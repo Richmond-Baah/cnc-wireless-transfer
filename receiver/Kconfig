@@ -1,0 +1,51 @@
+menu "CNC Wireless Transfer"
+
+config CNC_DEFAULT_WIFI_SSID
+    string "Default Wi-Fi SSID"
+    default "CNC_WIRELESS"
+    help
+        Default SSID the receiver will connect to (should match the
+        transmitter's AP SSID). Can be overridden via NVS at runtime.
+
+config CNC_DEFAULT_WIFI_PASSWORD
+    string "Default Wi-Fi Password"
+    default "cnc12345"
+    help
+        Default password for the Wi-Fi network the receiver connects to.
+        Must be at least 8 characters. Can be overridden via NVS at runtime.
+
+config CNC_RECEIVER_IP
+    string "Receiver Static IP Address"
+    default "192.168.4.150"
+    help
+        Static IP assigned to this receiver device on the local network.
+        The transmitter uses this IP to reach the receiver's HTTP API.
+
+config CNC_RECEIVER_NETMASK
+    string "Receiver Subnet Mask"
+    default "255.255.255.0"
+    help
+        Subnet mask for the static IP configuration.
+
+config CNC_RECEIVER_GATEWAY
+    string "Receiver Gateway IP"
+    default "192.168.4.1"
+    help
+        Gateway IP for the static IP configuration (typically the
+        transmitter's AP IP).
+
+config CNC_MDNS_HOSTNAME
+    string "mDNS Hostname"
+    default "cnc-receiver"
+    help
+        Hostname advertised via mDNS. The device will be reachable at
+        <hostname>.local on networks that support mDNS.
+
+config CNC_MDNS_SERVICE
+    string "mDNS Service Type"
+    default "_cnc-wireless"
+    help
+        Service type advertised via mDNS. The transmitter will browse
+        for this service to discover the receiver.
+
+endmenu

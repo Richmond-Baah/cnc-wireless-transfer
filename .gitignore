@@ -1,0 +1,8 @@
+/transmitter/build/
+/receiver/build/
+/.pio-mcp-workspace/
+.pio/
+build/
+sdkconfig.old
+.DS_Store
+Thumbs.db

@@ -1,0 +1,40 @@
+menu "CNC Wireless Transfer"
+
+config CNC_DEFAULT_WIFI_SSID
+    string "Default Wi-Fi SSID"
+    default "CNC_WIRELESS"
+    help
+        Default SSID for the Wi-Fi access point (transmitter) or
+        station connection (receiver). Can be overridden via NVS at runtime.
+
+config CNC_DEFAULT_WIFI_PASSWORD
+    string "Default Wi-Fi Password"
+    default "cnc12345"
+    help
+        Default password for the Wi-Fi network.
+        Must be at least 8 characters. Leave empty for open networks.
+        Can be overridden via NVS at runtime.
+
+config CNC_DEFAULT_WEB_USER
+    string "Default Web UI Username"
+    default "admin"
+    help
+        Default username for the web interface login.
+        Can be changed via the web UI Settings panel after first login.
+
+config CNC_DEFAULT_WEB_PASS
+    string "Default Web UI Password"
+    default "admin123"
+    help
+        Default password for the web interface login.
+        IMPORTANT: Change this before deploying to production!
+        Can be changed via the web UI Settings panel after first login.
+
+config CNC_RECEIVER_IP
+    string "Receiver Static IP Address"
+    default "192.168.4.150"
+    help
+        Static IP assigned to the receiver device on the local network.
+        The transmitter uses this IP to reach the receiver's HTTP API.
+
+endmenu

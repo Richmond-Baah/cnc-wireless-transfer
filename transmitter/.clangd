@@ -1,0 +1,17 @@
+CompileFlags:
+  CompilationDatabase: "build"
+  Remove:
+    - "-mlongcalls"
+    - "-fno-shrink-wrap"
+    - "-fstrict-volatile-bitfields"
+    - "-fno-tree-switch-conversion"
+  Add:
+    - "-D__XTENSA__=1"
+    - "-mlong-calls"
+    - "-Wno-unknown-warning-option"
+    - "-Wno-unused-command-line-argument"
+
+Diagnostics:
+  UnusedIncludes: None
+  Suppress:
+    - "drv_unknown_argument"
