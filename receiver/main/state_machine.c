@@ -36,6 +36,8 @@ const char *state_to_string(app_state_t state) {
     return "USB_ACTIVE";
   case STATE_ERROR:
     return "ERROR";
+  case STATE_CARD_ERROR:
+    return "CARD_ERROR";
   default:
     return "UNKNOWN";
   }
@@ -48,8 +50,8 @@ bool state_machine_transition(app_state_t new_state) {
   bool valid = false;
   if (new_state == STATE_RECEIVING) {
       valid = true; // Always allow starting a new transfer from any state
-  } else if (new_state == STATE_ERROR) {
-      valid = true; // Errors (e.g. unmountable SD at boot) can occur in any state
+  } else if (new_state == STATE_ERROR || new_state == STATE_CARD_ERROR) {
+      valid = true; // Errors (e.g. unmountable SD card) can occur in any state
   } else {
       switch (current_state) {
       case STATE_IDLE:
@@ -70,6 +72,11 @@ bool state_machine_transition(app_state_t new_state) {
         break;
       case STATE_ERROR:
         if (new_state == STATE_IDLE)
+          valid = true;
+        break;
+      case STATE_CARD_ERROR:
+        // Host may still enumerate the raw card (e.g. to reformat it)
+        if (new_state == STATE_USB_ACTIVE || new_state == STATE_IDLE)
           valid = true;
         break;
       }
@@ -96,6 +103,9 @@ bool state_machine_transition(app_state_t new_state) {
       break;
     case STATE_ERROR:
       led_set_state(RECEIVER_LED_ERROR);
+      break;
+    case STATE_CARD_ERROR:
+      led_set_state(RECEIVER_LED_CARD_ERROR);
       break;
     }
 

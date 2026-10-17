@@ -69,6 +69,14 @@ static void led_task(void *pvParameters) {
       vTaskDelay(pdMS_TO_TICKS(5000));
       current_state = RECEIVER_LED_IDLE;
       break;
+
+    case RECEIVER_LED_CARD_ERROR:
+      // Slow red blink, persistent until the state machine leaves CARD_ERROR
+      set_color(128, 0, 0);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      set_color(0, 0, 0);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      break;
     }
   }
 }

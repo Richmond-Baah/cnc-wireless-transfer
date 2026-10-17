@@ -145,6 +145,18 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    // Card was unreadable: retry the mount (USB off so the host can't race it)
+    if (sd_card_has_card_error()) {
+        usb_msc_disconnect();
+        if (sd_card_retry_card_error() != ESP_OK) {
+            usb_msc_connect();
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                "Card unreadable - format FAT32 on PC or use Format");
+            cJSON_Delete(json);
+            return ESP_FAIL;
+        }
+    }
+
     if (!state_machine_transition(STATE_RECEIVING)) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "State transition failed");
         cJSON_Delete(json);
@@ -418,8 +430,9 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
 
     char resp[256];
     snprintf(resp, sizeof(resp), 
-             "{\"state\":\"%s\",\"storage_type\":\"%s\",\"total_bytes\":%llu,\"free_bytes\":%llu}", 
-             state_to_string(state_machine_get()), stype, total, free_bytes);
+             "{\"state\":\"%s\",\"storage_type\":\"%s\",\"total_bytes\":%llu,\"free_bytes\":%llu,\"card_error\":%s}",
+             state_to_string(state_machine_get()), stype, total, free_bytes,
+             sd_card_has_card_error() ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;

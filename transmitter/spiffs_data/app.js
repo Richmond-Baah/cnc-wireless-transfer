@@ -140,6 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     'RECEIVING': { text: 'Receiving...', cls: 'status-receiving' },
                     'USB_ACTIVE': { text: 'Ready (USB Linked)', cls: 'status-usb' },
                     'ERROR': { text: 'Error', cls: 'status-error' },
+                    'CARD_ERROR': { text: 'Card unreadable – format FAT32 (≤32 GB) on PC or use Format', cls: 'status-error' },
                     'OFFLINE': { text: 'Receiver Offline', cls: 'status-offline' }
                 };
                 const info = stateMap[data.state] || { text: data.state || 'Unknown', cls: 'status-offline' };

@@ -19,10 +19,22 @@ esp_err_t sd_card_format_fatfs(void);
 /**
  * @brief Ensure the SD card has a valid FAT filesystem for USB MSC.
  * Mounts FatFS to verify the card; if mount fails (no valid FAT or
- * corrupt), formats the card once.  Always unmounts before returning
- * so the card is left in raw mode ready for USB MSC block access.
+ * corrupt), never formats: sets the card-error flag and STATE_CARD_ERROR.
+ * On success clears the flag (CARD_ERROR -> IDLE). Always leaves the card
+ * in raw mode ready for USB MSC block access.
  */
 esp_err_t sd_card_ensure_fatfs(void);
+
+/**
+ * @brief True while the SD card's filesystem is known to be unmountable.
+ */
+bool sd_card_has_card_error(void);
+
+/**
+ * @brief Re-run sd_card_ensure_fatfs() only if a card error is pending and
+ * FatFS is not currently mounted. Returns ESP_OK if no error is pending.
+ */
+esp_err_t sd_card_retry_card_error(void);
 
 /**
  * @brief Unmount the SD card FAT filesystem (flushes all cached data to disk)

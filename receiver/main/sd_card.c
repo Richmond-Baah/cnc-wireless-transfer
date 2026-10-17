@@ -358,13 +358,14 @@ esp_err_t sd_card_format_fatfs(void) {
     return ret;
 }
 
-esp_err_t sd_card_ensure_fatfs(void) {
-    if (!io_lock_take(portMAX_DELAY)) {
-        return ESP_ERR_TIMEOUT;
-    }
+static bool s_card_error = false; // set when the card's FAT filesystem can't be mounted
 
+bool sd_card_has_card_error(void) {
+    return s_card_error;
+}
+
+static esp_err_t sd_card_ensure_fatfs_locked(void) {
     if (current_sd_card == NULL) {
-        io_lock_give();
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -372,7 +373,6 @@ esp_err_t sd_card_ensure_fatfs(void) {
     if (s_fatfs_mounted) {
         esp_err_t unmount_err = sd_card_unmount_fatfs_locked();
         if (unmount_err != ESP_OK) {
-            io_lock_give();
             return unmount_err;
         }
     }
@@ -382,14 +382,40 @@ esp_err_t sd_card_ensure_fatfs(void) {
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "SD card has valid FAT filesystem; unmounting for raw USB MSC access");
         ret = sd_card_unmount_fatfs_locked();
+        if (s_card_error) {
+            s_card_error = false;
+            ESP_LOGI(TAG, "SD card readable again; leaving CARD_ERROR");
+            state_machine_transition(STATE_IDLE);
+        }
     } else {
         // Never auto-format: a transient SPI error or a non-FAT card (e.g. exFAT)
         // must not wipe user data. Leave the card raw and flag the error.
         ESP_LOGE(TAG, "SD card FAT mount failed (%s). NOT formatting; card left raw. "
                       "Reformat as FAT32 on a PC or via /format.", esp_err_to_name(ret));
-        state_machine_transition(STATE_ERROR);
+        s_card_error = true;
+        state_machine_transition(STATE_CARD_ERROR);
     }
+    return ret;
+}
 
+esp_err_t sd_card_ensure_fatfs(void) {
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = sd_card_ensure_fatfs_locked();
+    io_lock_give();
+    return ret;
+}
+
+esp_err_t sd_card_retry_card_error(void) {
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = ESP_OK;
+    if (s_card_error) {
+        // Checked under the lock: never unmount a FatFS session a transfer just opened
+        ret = s_fatfs_mounted ? ESP_ERR_INVALID_STATE : sd_card_ensure_fatfs_locked();
+    }
     io_lock_give();
     return ret;
 }

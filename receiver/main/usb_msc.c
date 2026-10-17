@@ -242,8 +242,13 @@ void tud_msc_flush_cb(uint8_t lun) {
 }
 
 bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, bool load_eject) {
-    (void) lun; (void) power_condition; (void) load_eject;
+    (void) lun; (void) power_condition;
     ESP_LOGI(TAG, "MSC %s", start ? "START" : "STOP");
+    // Host ejected the media (e.g. after reformatting it): retry the card mount
+    if (!start && load_eject && sd_card_has_card_error() &&
+        state_machine_get() != STATE_RECEIVING) {
+        sd_card_retry_card_error();
+    }
     return true;
 }
 
@@ -285,7 +290,11 @@ void tud_umount_cb(void) {
     ESP_LOGI(TAG, "********** USB UNMOUNTED **********");
     s_usb_mounted_by_host = false;
 
-    if (state_machine_get() == STATE_USB_ACTIVE) {
+    app_state_t st = state_machine_get();
+    if (sd_card_has_card_error() && st != STATE_RECEIVING) {
+        // Retry the card mount: IDLE if readable now, otherwise back to CARD_ERROR
+        sd_card_retry_card_error();
+    } else if (st == STATE_USB_ACTIVE) {
         state_machine_transition(STATE_IDLE);
     }
 }

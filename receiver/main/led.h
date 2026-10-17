@@ -6,7 +6,8 @@ typedef enum {
   RECEIVER_LED_RECEIVING,
   RECEIVER_LED_FILE_READY,
   RECEIVER_LED_USB_ACTIVE,
-  RECEIVER_LED_ERROR
+  RECEIVER_LED_ERROR,
+  RECEIVER_LED_CARD_ERROR
 } receiver_led_state_t;
 
 void led_init(void);

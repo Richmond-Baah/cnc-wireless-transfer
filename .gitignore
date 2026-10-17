@@ -6,3 +6,4 @@ build/
 sdkconfig.old
 .DS_Store
 Thumbs.db
+__pycache__/

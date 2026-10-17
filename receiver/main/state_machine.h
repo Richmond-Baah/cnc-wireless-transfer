@@ -8,7 +8,8 @@ typedef enum {
   STATE_RECEIVING,  // Receiving file over Wi-Fi, USB stalled
   STATE_FILE_READY, // Verified successfully, USB PC can access
   STATE_USB_ACTIVE, // PC actively reading via USB, reject uploads
-  STATE_ERROR       // Checksum mismatch, write error, etc.
+  STATE_ERROR,      // Checksum mismatch, write error, etc.
+  STATE_CARD_ERROR  // SD card present but its FAT filesystem cannot be mounted
 } app_state_t;
 
 void state_machine_init(void);

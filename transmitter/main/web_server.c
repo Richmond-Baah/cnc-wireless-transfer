@@ -251,7 +251,7 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  char state_str[128] = {0};
+  char state_str[256] = {0}; // matches STATUS_CACHE_LEN; receiver JSON can exceed 128
   file_transfer_get_receiver_status(state_str, sizeof(state_str));
 
   httpd_resp_set_type(req, "application/json");
