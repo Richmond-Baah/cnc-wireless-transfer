@@ -18,6 +18,7 @@
 #include "esp_system.h"
 #include "esp_random.h"
 #include "esp_app_desc.h"
+#include "esp_timer.h"
 #include <sys/stat.h>
 static const char *TAG = "FILE_RCV";
 #define STORAGE_PATH storage_manager_get_base_path()
@@ -32,6 +33,26 @@ static mbedtls_md5_context active_md5_ctx;
 static char chunk_buf[RECEIVER_CHUNK_BUFSIZE];
 static int chunk_count = 0;
 static int expected_chunk_index = 0;
+
+// Per-transfer stage timings (µs), logged as one summary line at /finalize
+static struct {
+    int64_t t_start;      // /prepare accepted
+    int64_t usb_release;  // USB disconnect
+    int64_t mount;        // FatFS mount
+    int64_t open;         // staging file open
+    int64_t recv;         // network reads inside /chunk
+    int64_t write;        // fwrite + periodic/final fsync
+    int64_t md5;          // incremental MD5 + finish/verify
+    int64_t commit;       // remove + rename
+    int64_t snapshot;     // file-list/free-space cache refresh
+    int64_t unmount;      // flush + FatFS unmount
+    int64_t usb_reconnect;// disconnect + settle wait + connect
+    uint64_t bytes;
+    uint32_t chunks;
+} s_tm;
+#define TM_START() int64_t _tm0 = esp_timer_get_time()
+#define TM_ADD(field) (s_tm.field += esp_timer_get_time() - _tm0, _tm0 = esp_timer_get_time())
+#define TM_MS(us) ((long long)((us) / 1000))
 
 // ERROR exit for an in-flight transfer: drop the partial staging file, release
 // FatFS and hand the storage back to the USB host so the machine keeps its drive.
@@ -310,8 +331,13 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         active_file = NULL;
     }
 
+    memset(&s_tm, 0, sizeof(s_tm));
+    s_tm.t_start = esp_timer_get_time();
+    TM_START();
+
     // Step 1: Disconnect USB so the host stops reading raw SD sectors
     usb_msc_disconnect();
+    TM_ADD(usb_release);
 
     // Step 2: Ensure the target storage filesystem is mounted before opening.
     // The SD card is the transfer target when present; internal flash is the
@@ -321,6 +347,7 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     if (!storage_manager_fatfs_available() || (storage_manager_is_sd_present() && !sd_card_is_mounted())) {
         storage_manager_remount();
     }
+    TM_ADD(mount);
     if (!storage_manager_fatfs_available()) {
         ESP_LOGE(TAG, "No storage filesystem available for transfer");
         fail_transfer_and_release();
@@ -354,12 +381,15 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    TM_ADD(open);
     mbedtls_md5_init(&active_md5_ctx);
     mbedtls_md5_starts(&active_md5_ctx);
     chunk_count = 0;
     expected_chunk_index = 0;
 
     ESP_LOGI(TAG, "Ready to receive staging file: %s (final: %s, expected MD5: %s)", active_filename, final_filename, expected_md5);
+    ESP_LOGI(TAG, "Stage prepare: usb_release %lld ms, mount %lld ms, open %lld ms",
+             TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.open));
     
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
@@ -406,6 +436,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
     }
 
     int remaining = req->content_len;
+    TM_START();
     while (remaining > 0) {
         int to_read = remaining < (int)sizeof(chunk_buf) ? remaining : (int)sizeof(chunk_buf);
         int read_len = httpd_req_recv(req, chunk_buf, to_read);
@@ -416,6 +447,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Chunk read error");
             return ESP_FAIL;
         }
+        TM_ADD(recv);
 
         size_t written = fwrite(chunk_buf, 1, read_len, active_file);
         if ((int)written != read_len) {
@@ -430,11 +462,15 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
             fflush(active_file);
             fsync(fileno(active_file));
         }
+        TM_ADD(write);
 
         mbedtls_md5_update(&active_md5_ctx, (const unsigned char *)chunk_buf, read_len);
+        TM_ADD(md5);
+        s_tm.bytes += read_len;
         remaining -= read_len;
     }
     expected_chunk_index++;
+    s_tm.chunks++;
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
@@ -475,11 +511,13 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
         }
     }
 
+    TM_START();
     fflush(active_file);
     fsync(fileno(active_file));
     long final_size = ftell(active_file);
     fclose(active_file);
     active_file = NULL;
+    TM_ADD(write);
 
     unsigned char hash[16];
     mbedtls_md5_finish(&active_md5_ctx, hash);
@@ -494,8 +532,10 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
              computed_md5, final_size, active_filename);
 
     const char *check_against = strlen(finalize_md5) > 0 ? finalize_md5 : expected_md5;
+    bool md5_ok = strcasecmp(computed_md5, check_against) == 0;
+    TM_ADD(md5);
 
-    if (strcasecmp(computed_md5, check_against) != 0) {
+    if (!md5_ok) {
         ESP_LOGE(TAG, "MD5 MISMATCH! Deleting corrupted temp file: %s", active_filename);
         remove(active_filename);
         state_machine_transition(STATE_ERROR);
@@ -519,24 +559,38 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    TM_ADD(commit);
     ESP_LOGI(TAG, "File verified and atomically committed: %s", final_filename);
     state_machine_transition(STATE_FILE_READY);
 
     snapshot_storage(); // still mounted: refresh cached file list + free space
+    TM_ADD(snapshot);
 
     // CRITICAL: Flush metadata to physical sectors, then unmount FatFS so the
     // storage is back in raw USB MSC mode before the host is reconnected.
     storage_manager_flush_and_release_for_usb();
-    
+    TM_ADD(unmount);
+
     state_machine_transition(STATE_IDLE);
 
     // Drop the USB connection to signal disconnect to the PC
     usb_msc_disconnect();
-    
+
     // Give the host time to notice the disconnect, then reconnect USB
     ESP_LOGI(TAG, "Waiting 1.5s before reconnecting USB host...");
     vTaskDelay(pdMS_TO_TICKS(1500));
     usb_msc_connect();
+    TM_ADD(usb_reconnect);
+
+    int64_t total_us = esp_timer_get_time() - s_tm.t_start;
+    ESP_LOGI(TAG, "XFER summary: %llu bytes, %lu chunks in %lld ms = %.1f KB/s | "
+                  "usb_release %lld, mount %lld, open %lld, recv %lld, write %lld, md5 %lld, "
+                  "commit %lld, snapshot %lld, unmount %lld, usb_reconnect %lld ms",
+             (unsigned long long)s_tm.bytes, (unsigned long)s_tm.chunks, TM_MS(total_us),
+             total_us > 0 ? (double)s_tm.bytes / 1024.0 / ((double)total_us / 1e6) : 0.0,
+             TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.open), TM_MS(s_tm.recv),
+             TM_MS(s_tm.write), TM_MS(s_tm.md5), TM_MS(s_tm.commit), TM_MS(s_tm.snapshot),
+             TM_MS(s_tm.unmount), TM_MS(s_tm.usb_reconnect));
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
