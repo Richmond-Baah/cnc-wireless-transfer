@@ -57,6 +57,24 @@ static void drain_request_body(httpd_req_t *req) {
     }
 }
 
+// Rejects names with path separators, drive colons, "..", control characters,
+// or that are empty / consist only of dots.
+static bool filename_is_valid(const char *name) {
+    if (name[0] == '\0' || strstr(name, "..") != NULL) {
+        return false;
+    }
+    bool dots_only = true;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f || *p == '/' || *p == '\\' || *p == ':') {
+            return false;
+        }
+        if (*p != '.') {
+            dots_only = false;
+        }
+    }
+    return !dots_only;
+}
+
 // Helper to sanitize filename and prevent path traversal
 static void sanitize_filename(const char *input, char *output, size_t max_len) {
     const char *basename = strrchr(input, '/');
@@ -147,6 +165,12 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     // Reject instead of silently truncating into sanitized[128] / expected_md5[33]
     if (strlen(fname->valuestring) > 127 || strlen(md5->valuestring) > 32) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Filename or md5 too long");
+        cJSON_Delete(json);
+        return ESP_FAIL;
+    }
+    if (!filename_is_valid(fname->valuestring)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Invalid filename: no / \\ : .. or control characters, not empty or dots-only");
         cJSON_Delete(json);
         return ESP_FAIL;
     }

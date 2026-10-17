@@ -245,8 +245,8 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
     file_transfer_clear_abort();
     return ESP_OK;
   }
-  if (!success && file_transfer_last_machine_busy()) {
-    // 423 already sent; return OK so httpd drains the body instead of
+  if (!success && file_transfer_last_refused()) {
+    // 423/400 already sent; return OK so httpd drains the body instead of
     // resetting the socket (the browser would see a network error)
     return ESP_OK;
   }

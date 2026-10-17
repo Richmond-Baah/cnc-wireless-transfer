@@ -48,4 +48,11 @@ config CNC_MDNS_SERVICE
         Service type advertised via mDNS. The transmitter will browse
         for this service to discover the receiver.
 
+config CNC_USB_READ_LOG
+    bool "Log USB host read activity"
+    default y
+    help
+        While the USB host is reading, log once per second to the UART
+        console: number of READ10 commands, bytes read and min/max LBA.
+
 endmenu

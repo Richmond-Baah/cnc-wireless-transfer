@@ -1,4 +1,5 @@
 #include "usb_msc.h"
+#include "sdkconfig.h"
 #include "esp_log.h"
 #include "storage_manager.h"
 #include "tinyusb.h"
@@ -17,6 +18,46 @@ static const char *TAG = "USB_MSC";
 static bool s_usb_mounted_by_host = false;
 static volatile TickType_t s_last_host_read_tick = 0; // last SCSI READ10 from the host
 static volatile bool s_host_read_seen = false;
+
+#if CONFIG_CNC_USB_READ_LOG
+// Per-second host read statistics, filled in READ10 and drained by a log task
+static portMUX_TYPE s_read_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_read_count = 0;
+static uint64_t s_read_bytes = 0;
+static uint32_t s_read_min_lba = UINT32_MAX;
+static uint32_t s_read_max_lba = 0;
+
+static void record_host_read(uint32_t lba, uint32_t bufsize) {
+    portENTER_CRITICAL(&s_read_stats_mux);
+    s_read_count++;
+    s_read_bytes += bufsize;
+    if (lba < s_read_min_lba) s_read_min_lba = lba;
+    if (lba > s_read_max_lba) s_read_max_lba = lba;
+    portEXIT_CRITICAL(&s_read_stats_mux);
+}
+
+static void host_read_log_task(void *arg) {
+    (void)arg;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        portENTER_CRITICAL(&s_read_stats_mux);
+        uint32_t count = s_read_count;
+        uint64_t bytes = s_read_bytes;
+        uint32_t min_lba = s_read_min_lba;
+        uint32_t max_lba = s_read_max_lba;
+        s_read_count = 0;
+        s_read_bytes = 0;
+        s_read_min_lba = UINT32_MAX;
+        s_read_max_lba = 0;
+        portEXIT_CRITICAL(&s_read_stats_mux);
+        if (count > 0) {
+            ESP_LOGI(TAG, "Host reads/1s: count=%lu bytes=%llu lba=%lu..%lu",
+                     (unsigned long)count, (unsigned long long)bytes,
+                     (unsigned long)min_lba, (unsigned long)max_lba);
+        }
+    }
+}
+#endif
 
 #define TOTAL_LUNS 1
 
@@ -121,6 +162,9 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buff
     (void)lun;
     s_last_host_read_tick = xTaskGetTickCount();
     s_host_read_seen = true;
+#if CONFIG_CNC_USB_READ_LOG
+    record_host_read(lba, bufsize);
+#endif
     if (current_sd_card != NULL) {
         if (!sd_card_acquire_io()) {
             ESP_LOGE(TAG, "READ FAILED: could not acquire SD IO lock (FatFS busy?)");
@@ -368,6 +412,10 @@ void usb_msc_init(void) {
     tud_connect();
     ESP_LOGI(TAG, "[USB_INIT] tud_connect() called");
     ESP_LOGI(TAG, "[USB_INIT] COMPLETE - device should enumerate");
+
+#if CONFIG_CNC_USB_READ_LOG
+    xTaskCreate(host_read_log_task, "usb_read_log", 3072, NULL, 2, NULL);
+#endif
 }
 
 esp_err_t usb_msc_format_storage(void) {

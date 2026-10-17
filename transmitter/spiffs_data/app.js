@@ -438,6 +438,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (forceUploadBtn) forceUploadBtn.style.display = 'block';
                 } else if (xhr.status === 503) {
                     showFeedback('âŒ Receiver is busy. Please wait a moment and try again.', 'error');
+                } else if (xhr.status === 400 && xhr.responseText) {
+                    // Receiver's reason (invalid filename, checksum mismatch, ...)
+                    showFeedback('Rejected: ' + xhr.responseText, 'error');
                 } else if (xhr.status === 400) {
                     showFeedback('âŒ Checksum verification failed. Please retry.', 'error');
                 } else if (xhr.status === 401) {

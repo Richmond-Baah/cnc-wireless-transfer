@@ -21,10 +21,10 @@ static const char *TAG = "TRANSFER";
 
 static char scratch_buf[SCRATCH_BUFSIZE];
 static volatile bool s_abort_transfer = false;
-static bool s_last_machine_busy = false;
+static bool s_last_refused = false;
 
-bool file_transfer_last_machine_busy(void) {
-  return s_last_machine_busy;
+bool file_transfer_last_refused(void) {
+  return s_last_refused;
 }
 
 // ─── Cached receiver status ─────────────────────────────────────────────────
@@ -113,7 +113,7 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
                                        const char *expected_md5,
                                        size_t filesize, bool force) {
   s_abort_transfer = false;
-  s_last_machine_busy = false;
+  s_last_refused = false;
   ESP_LOGI(TAG, "Starting transfer for %s (%u bytes, md5=%s)", filename,
            (unsigned)filesize, expected_md5);
   led_set_state(LED_STATE_SENDING);
@@ -136,19 +136,41 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
   snprintf(payload, sizeof(payload),
            "{\"filename\":\"%s\",\"filesize\":%u,\"md5\":\"%s\"}", filename,
            (unsigned)filesize, expected_md5);
-  esp_http_client_set_post_field(client, payload, strlen(payload));
-
-  esp_err_t err = esp_http_client_perform(client);
-  int prepare_status = esp_http_client_get_status_code(client);
+  // open/write/read instead of perform() so the receiver's error text can be relayed
+  int payload_len = strlen(payload);
+  int prepare_status = 0;
+  char prepare_msg[160] = {0};
+  esp_err_t err = esp_http_client_open(client, payload_len);
+  if (err == ESP_OK) {
+    if (esp_http_client_write(client, payload, payload_len) != payload_len) {
+      err = ESP_FAIL;
+    } else {
+      esp_http_client_fetch_headers(client);
+      prepare_status = esp_http_client_get_status_code(client);
+      int r = esp_http_client_read(client, prepare_msg, sizeof(prepare_msg) - 1);
+      if (r > 0) prepare_msg[r] = '\0';
+    }
+    esp_http_client_close(client);
+  }
   esp_http_client_cleanup(client);
 
   if (err == ESP_OK && prepare_status == 423) {
     ESP_LOGW(TAG, "Receiver refused /prepare: machine is reading the drive");
-    s_last_machine_busy = true;
+    s_last_refused = true;
     led_set_state(LED_STATE_IDLE);
     httpd_resp_set_status(req, "423 Locked");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
+    return false;
+  }
+
+  if (err == ESP_OK && prepare_status == 400) {
+    // e.g. invalid filename: pass the receiver's reason through to the UI
+    ESP_LOGW(TAG, "Receiver rejected /prepare: %s", prepare_msg);
+    s_last_refused = true;
+    led_set_state(LED_STATE_ERROR);
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                        prepare_msg[0] ? prepare_msg : "Receiver rejected the file");
     return false;
   }
 
