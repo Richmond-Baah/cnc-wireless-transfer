@@ -34,52 +34,107 @@ bool file_transfer_last_refused(void) {
 static char     s_status_cache[STATUS_CACHE_LEN] = "{\"state\":\"OFFLINE\"}";
 static SemaphoreHandle_t s_status_mutex = NULL;
 
+// The receiver's HTTP server is single-threaded: a /list refresh (SD mount +
+// scan) or /finalize (1.5 s USB reconnect wait) can stall /status for >1 s,
+// so allow a generous timeout and require several consecutive failures
+// before reporting OFFLINE.
+#define STATUS_POLL_TIMEOUT_MS 3000
+#define STATUS_OFFLINE_AFTER   3
+
+static void cache_status(const char *json) {
+    if (xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        strncpy(s_status_cache, json, STATUS_CACHE_LEN - 1);
+        s_status_cache[STATUS_CACHE_LEN - 1] = '\0';
+        xSemaphoreGive(s_status_mutex);
+    }
+}
+
+// Fetches receiver /status into buf. On failure returns false and describes why.
+static bool fetch_receiver_status(const char *url, char *buf, size_t len,
+                                  char *why, size_t why_len) {
+    esp_http_client_config_t cfg = {
+        .url        = url,
+        .timeout_ms = STATUS_POLL_TIMEOUT_MS,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) {
+        snprintf(why, why_len, "client init failed (bad URL?)");
+        return false;
+    }
+
+    bool ok = false;
+    TickType_t t0 = xTaskGetTickCount();
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        snprintf(why, why_len, "connect failed: %s", esp_err_to_name(err));
+    } else {
+        int64_t clen = esp_http_client_fetch_headers(client);
+        int code = esp_http_client_get_status_code(client);
+        if (clen < 0) {
+            snprintf(why, why_len, "no response headers (%lld, timeout?)", (long long)clen);
+        } else if (code != 200) {
+            snprintf(why, why_len, "HTTP %d", code);
+        } else if (clen >= (int64_t)len) {
+            snprintf(why, why_len, "response too large (%lld >= %u bytes)", (long long)clen, (unsigned)len);
+        } else {
+            int total = 0;
+            while (total < (int)len - 1) {
+                int r = esp_http_client_read(client, buf + total, len - 1 - total);
+                if (r <= 0) break;
+                total += r;
+            }
+            buf[total] = '\0';
+            if (total == 0) {
+                snprintf(why, why_len, "empty body");
+            } else if (buf[0] != '{' || strstr(buf, "\"state\"") == NULL) {
+                snprintf(why, why_len, "unexpected body: %.40s", buf);
+            } else {
+                ok = true;
+            }
+        }
+        esp_http_client_close(client);
+    }
+    esp_http_client_cleanup(client);
+
+    if (!ok) {
+        size_t used = strlen(why);
+        snprintf(why + used, why_len - used, " (after %lu ms)",
+                 (unsigned long)pdTICKS_TO_MS(xTaskGetTickCount() - t0));
+    }
+    return ok;
+}
+
 // Background task: poll receiver /status every 2 s and update the cache.
 static void receiver_status_task(void *arg) {
     (void)arg;
     char url[128];
     char buf[STATUS_CACHE_LEN];
+    char why[96];
+    int fails = 0;
+    bool online = false;
 
     for (;;) {
         get_receiver_url("/status", url, sizeof(url));
+        why[0] = '\0';
 
-        esp_http_client_config_t cfg = {
-            .url        = url,
-            .timeout_ms = 1200,   // Never block longer than 1.2 s
-        };
-        esp_http_client_handle_t client = esp_http_client_init(&cfg);
-
-        if (client == NULL) {
-            // URL was malformed (e.g. empty IP) – skip this cycle
-            ESP_LOGE("TRANSFER", "esp_http_client_init failed (bad URL?): %s", url);
-            snprintf(buf, sizeof(buf), "{\"state\":\"OFFLINE\"}");
-        } else {
-            esp_err_t err = esp_http_client_open(client, 0);
-            if (err == ESP_OK) {
-                esp_http_client_fetch_headers(client);
-                int code = esp_http_client_get_status_code(client);
-                if (code == 200) {
-                    int rlen = esp_http_client_read(client, buf, sizeof(buf) - 1);
-                    if (rlen > 0) {
-                        buf[rlen] = '\0';
-                    } else {
-                        snprintf(buf, sizeof(buf), "{\"state\":\"IDLE\"}");
-                    }
-                } else {
-                    snprintf(buf, sizeof(buf), "{\"state\":\"OFFLINE\"}");
-                }
-                esp_http_client_close(client);
-            } else {
-                snprintf(buf, sizeof(buf), "{\"state\":\"OFFLINE\"}");
+        if (fetch_receiver_status(url, buf, sizeof(buf), why, sizeof(why))) {
+            if (!online || fails > 0) {
+                ESP_LOGI(TAG, "Receiver status OK at %s", url);
             }
-            esp_http_client_cleanup(client);
-        }
-
-        // Write result into the shared cache
-        if (xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-            strncpy(s_status_cache, buf, STATUS_CACHE_LEN - 1);
-            s_status_cache[STATUS_CACHE_LEN - 1] = '\0';
-            xSemaphoreGive(s_status_mutex);
+            fails = 0;
+            online = true;
+            cache_status(buf);
+        } else {
+            fails++;
+            // Log every failure until OFFLINE, then every ~30 s
+            if (fails <= STATUS_OFFLINE_AFTER || fails % 15 == 0) {
+                ESP_LOGW(TAG, "Receiver status poll failed (%d in a row) %s: %s", fails, url, why);
+            }
+            if (fails == STATUS_OFFLINE_AFTER) {
+                ESP_LOGW(TAG, "Marking receiver OFFLINE");
+                online = false;
+                cache_status("{\"state\":\"OFFLINE\"}");
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -106,7 +161,7 @@ void get_receiver_url(const char *path, char *out_url, size_t max_len) {
     nvs_close(nvs_handle);
   }
   snprintf(out_url, max_len, "http://%s%s", ip, path);
-  ESP_LOGI("TRANSFER", "Receiver URL: %s", out_url);
+  ESP_LOGD("TRANSFER", "Receiver URL: %s", out_url); // called every 2 s by the poller
 }
 
 bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
@@ -447,23 +502,42 @@ int file_transfer_get_receiver_files(char *out_json, size_t max_len) {
 
   esp_http_client_config_t config = {
       .url = list_url,
-      .timeout_ms = 5000,
+      .timeout_ms = 15000, // receiver may mount + scan the SD card to build the list
   };
   esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == NULL) {
+    ESP_LOGE(TAG, "Receiver /list: client init failed (bad URL?) %s", list_url);
+    return 500;
+  }
 
   esp_err_t err = esp_http_client_open(client, 0);
   int status_code = 500;
-  if (err == ESP_OK) {
-    esp_http_client_fetch_headers(client);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Receiver /list: connect failed: %s", esp_err_to_name(err));
+  } else {
+    int64_t clen = esp_http_client_fetch_headers(client);
     status_code = esp_http_client_get_status_code(client);
-    if (status_code == 200) {
-      int total_read = 0;
+    if (clen < 0) {
+      ESP_LOGW(TAG, "Receiver /list: no response headers (%lld, timeout?)", (long long)clen);
+      status_code = 500;
+    } else if (status_code != 200) {
+      ESP_LOGW(TAG, "Receiver /list: HTTP %d", status_code);
+    } else {
+      size_t total_read = 0;
       while (total_read < max_len - 1) {
         int r = esp_http_client_read(client, out_json + total_read, max_len - 1 - total_read);
         if (r <= 0) break;
         total_read += r;
       }
       out_json[total_read] = '\0';
+      if (total_read == max_len - 1 && !esp_http_client_is_complete_data_received(client)) {
+        // Truncated JSON would break the UI's res.json(); report it instead
+        ESP_LOGW(TAG, "Receiver /list: response exceeds %u-byte buffer", (unsigned)max_len);
+        status_code = 500;
+      } else if (total_read == 0 || out_json[0] != '{') {
+        ESP_LOGW(TAG, "Receiver /list: unexpected body (%u bytes): %.40s", (unsigned)total_read, out_json);
+        status_code = 500;
+      }
     }
     esp_http_client_close(client);
   }
