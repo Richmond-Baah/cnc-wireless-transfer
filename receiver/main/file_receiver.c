@@ -144,6 +144,12 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         cJSON_Delete(json);
         return ESP_FAIL;
     }
+    // Reject instead of silently truncating into sanitized[128] / expected_md5[33]
+    if (strlen(fname->valuestring) > 127 || strlen(md5->valuestring) > 32) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Filename or md5 too long");
+        cJSON_Delete(json);
+        return ESP_FAIL;
+    }
 
     // Card was unreadable: retry the mount (USB off so the host can't race it)
     if (sd_card_has_card_error()) {
@@ -490,6 +496,10 @@ static esp_err_t format_storage_handler(httpd_req_t *req) {
     usb_msc_disconnect();
 
     esp_err_t ret = usb_msc_format_storage();
+    if (ret == ESP_OK) {
+        // Freshly formatted card: re-verify it so CARD_ERROR clears (-> IDLE)
+        sd_card_retry_card_error();
+    }
 
     if (ret != ESP_OK) {
         usb_msc_notify_change();
@@ -642,15 +652,34 @@ static void restart_delayed_task(void *arg) {
 
 static esp_err_t settings_post_handler(httpd_req_t *req) {
     char buf[512];
-    int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (received <= 0) {
+    if (req->content_len <= 0 || req->content_len >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
         return ESP_FAIL;
+    }
+    int received = 0;
+    while (received < req->content_len) {
+        int r = httpd_req_recv(req, buf + received, req->content_len - received);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) {
+            return ESP_FAIL;
+        }
+        received += r;
     }
     buf[received] = '\0';
 
     cJSON *json = cJSON_Parse(buf);
     if (!json) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    // Must fit sta_ssid[32] / sta_pass[64] in wifi_manager.c
+    cJSON *chk_ssid = cJSON_GetObjectItem(json, "ap_ssid");
+    cJSON *chk_pass = cJSON_GetObjectItem(json, "ap_pass");
+    if ((chk_ssid && chk_ssid->valuestring && strlen(chk_ssid->valuestring) > 31) ||
+        (chk_pass && chk_pass->valuestring && strlen(chk_pass->valuestring) > 63)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID or password too long");
         return ESP_FAIL;
     }
 

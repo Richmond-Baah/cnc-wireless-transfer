@@ -146,6 +146,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const info = stateMap[data.state] || { text: data.state || 'Unknown', cls: 'status-offline' };
                 statusBadge.textContent = info.text;
                 statusBadge.className = 'status-badge ' + info.cls;
+                const fmtBtn = document.getElementById('formatReceiverBtn');
+                if (fmtBtn) fmtBtn.style.display = (data.state === 'CARD_ERROR') ? 'block' : 'none';
 
                 // Update storage info if present
                 const stypeEl = document.getElementById('storageTypeText');
@@ -236,6 +238,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 showFeedback('âŒ Network error clearing receiver.', 'error');
             } finally {
                 clearBtn.disabled = false;
+            }
+        });
+    }
+
+    // Format Receiver Card (shown only on CARD_ERROR)
+    const formatBtn = document.getElementById('formatReceiverBtn');
+    if (formatBtn) {
+        formatBtn.addEventListener('click', async () => {
+            const typed = prompt('This ERASES ALL DATA on the receiver card and formats it as FAT32.\nType FORMAT to continue:');
+            if (typed !== 'FORMAT') {
+                if (typed !== null) showFeedback('Format cancelled: you must type FORMAT exactly.', 'error');
+                return;
+            }
+            formatBtn.disabled = true;
+            showFeedback('Formatting receiver card... this can take up to 2 minutes.', 'success');
+            try {
+                const res = await fetch('/receiver_format', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ confirm: 'FORMAT' })
+                });
+                if (res.ok) {
+                    showFeedback('Receiver card formatted.', 'success');
+                    pollStatus();
+                    loadReceiverFiles();
+                } else {
+                    showFeedback('Format failed (HTTP ' + res.status + ').', 'error');
+                }
+            } catch (e) {
+                showFeedback('Network error while formatting receiver.', 'error');
+            } finally {
+                formatBtn.disabled = false;
             }
         });
     }

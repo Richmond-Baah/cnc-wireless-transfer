@@ -349,6 +349,26 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  // Reject values that would not fit the fixed buffers they are read back
+  // into (wifi_manager.c, auth.c, file_transfer.c); NVS would otherwise store
+  // them and later nvs_get_str() calls silently fall back to defaults.
+  static const struct { const char *key; size_t max; } limits[] = {
+      {"wifi_mode", 7},  {"ap_ssid", 31},   {"ap_pass", 63},
+      {"sta_ssid", 31},  {"sta_pass", 63},  {"auth_user", 31},
+      {"auth_pass", 63}, {"receiver_ip", 31},
+  };
+  for (size_t i = 0; i < sizeof(limits) / sizeof(limits[0]); i++) {
+    cJSON *item = cJSON_GetObjectItem(json, limits[i].key);
+    if (item && item->valuestring && strlen(item->valuestring) > limits[i].max) {
+      char msg[64];
+      snprintf(msg, sizeof(msg), "%s too long (max %u)", limits[i].key,
+               (unsigned)limits[i].max);
+      cJSON_Delete(json);
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+      return ESP_FAIL;
+    }
+  }
+
   // Forward AP settings to receiver if receiver is online
   cJSON *j_ap_ssid = cJSON_GetObjectItem(json, "ap_ssid");
   cJSON *j_ap_pass = cJSON_GetObjectItem(json, "ap_pass");
@@ -448,6 +468,59 @@ static esp_err_t clear_post_handler(httpd_req_t *req) {
   // We call the clear endpoint to delete all files from the SD card.
   int code = file_transfer_clear_receiver();
   if (code == 200) {
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+  } else {
+    char err[64];
+    snprintf(err, sizeof(err), "{\"status\":\"error\",\"code\":%d}", code);
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, err);
+  }
+  return ESP_OK;
+}
+
+// Proxies a full storage format to the receiver. Body must be
+// {"confirm":"FORMAT"} so a stray request can't wipe the card.
+static esp_err_t format_post_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    return ESP_FAIL;
+  }
+
+  char body[64] = {0};
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body)) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Confirmation required");
+    return ESP_FAIL;
+  }
+  int cur_len = 0;
+  while (cur_len < req->content_len) {
+    int received = httpd_req_recv(req, body + cur_len, req->content_len - cur_len);
+    if (received <= 0) {
+      if (received == HTTPD_SOCK_ERR_TIMEOUT)
+        continue;
+      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+      return ESP_FAIL;
+    }
+    cur_len += received;
+  }
+  body[cur_len] = '\0';
+
+  cJSON *json = cJSON_Parse(body);
+  cJSON *confirm = json ? cJSON_GetObjectItem(json, "confirm") : NULL;
+  bool confirmed = confirm && confirm->valuestring &&
+                   strcmp(confirm->valuestring, "FORMAT") == 0;
+  cJSON_Delete(json);
+  if (!confirmed) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Confirmation required");
+    return ESP_FAIL;
+  }
+
+  if (!file_transfer_is_receiver_online()) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receiver offline");
+    return ESP_FAIL;
+  }
+
+  int code = file_transfer_format_receiver();
+  if (code == 200) {
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
   } else {
     char err[64];
@@ -567,7 +640,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 16;
+  config.max_uri_handlers = 20; // 17 registered
   config.max_open_sockets = 7;
   config.recv_wait_timeout = 30; // large uploads
   config.send_wait_timeout = 30;
@@ -625,6 +698,10 @@ void web_server_start(void) {
     httpd_register_uri_handler(server, &uri_upload_cancel);
     httpd_register_uri_handler(server, &uri_receiver_list);
     httpd_register_uri_handler(server, &uri_ping);
+
+    httpd_uri_t uri_format = {
+        .uri = "/receiver_format", .method = HTTP_POST, .handler = format_post_handler};
+    httpd_register_uri_handler(server, &uri_format);
 
     httpd_uri_t uri_debug = {
         .uri = "/debug", .method = HTTP_GET, .handler = debug_get_handler};

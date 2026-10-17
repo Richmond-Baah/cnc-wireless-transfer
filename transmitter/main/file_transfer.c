@@ -347,7 +347,7 @@ int file_transfer_format_receiver(void) {
   esp_http_client_config_t config = {
       .url = format_url,
       .method = HTTP_METHOD_POST,
-      .timeout_ms = 10000,
+      .timeout_ms = 120000, // f_mkfs on a large SD card over SPI can take a while
   };
   esp_http_client_handle_t client = esp_http_client_init(&config);
 
