@@ -2,12 +2,12 @@ CompileFlags:
   CompilationDatabase: "build"
   Remove:
     - "-mlongcalls"
+    - "-mlong-calls"
     - "-fno-shrink-wrap"
     - "-fstrict-volatile-bitfields"
     - "-fno-tree-switch-conversion"
   Add:
     - "-D__XTENSA__=1"
-    - "-mlong-calls"
     - "-Wno-unknown-warning-option"
     - "-Wno-unused-command-line-argument"
 

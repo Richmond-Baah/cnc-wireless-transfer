@@ -48,6 +48,8 @@ bool state_machine_transition(app_state_t new_state) {
   bool valid = false;
   if (new_state == STATE_RECEIVING) {
       valid = true; // Always allow starting a new transfer from any state
+  } else if (new_state == STATE_ERROR) {
+      valid = true; // Errors (e.g. unmountable SD at boot) can occur in any state
   } else {
       switch (current_state) {
       case STATE_IDLE:

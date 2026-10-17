@@ -74,24 +74,37 @@ static void generate_token_string(char *out) {
 
 void auth_init(void) {
     nvs_handle_t nvs_handle;
+    // Start with compiled-in defaults
+    snprintf(sys_user, sizeof(sys_user), "%s", DEFAULT_USER);
+    snprintf(sys_pass, sizeof(sys_pass), "%s", DEFAULT_PASS);
+
     esp_err_t err = nvs_open("sys_cfg", NVS_READONLY, &nvs_handle);
     if (err == ESP_OK) {
-        size_t len = sizeof(sys_user);
-        if (nvs_get_str(nvs_handle, "auth_user", sys_user, &len) != ESP_OK) {
-            snprintf(sys_user, sizeof(sys_user), "%s", DEFAULT_USER);
+        char tmp_user[32] = "";   // same size as sys_user
+        char tmp_pass[64] = "";   // same size as sys_pass
+        size_t len;
+        // Only use NVS value if it is non-empty
+        len = sizeof(tmp_user);
+        if (nvs_get_str(nvs_handle, "auth_user", tmp_user, &len) == ESP_OK && strlen(tmp_user) > 0) {
+            strncpy(sys_user, tmp_user, sizeof(sys_user) - 1);
+            sys_user[sizeof(sys_user) - 1] = '\0';
+        } else {
+            ESP_LOGW(TAG, "auth_user missing/empty in NVS, using default");
         }
-        len = sizeof(sys_pass);
-        if (nvs_get_str(nvs_handle, "auth_pass", sys_pass, &len) != ESP_OK) {
-            snprintf(sys_pass, sizeof(sys_pass), "%s", DEFAULT_PASS);
+        len = sizeof(tmp_pass);
+        if (nvs_get_str(nvs_handle, "auth_pass", tmp_pass, &len) == ESP_OK && strlen(tmp_pass) > 0) {
+            strncpy(sys_pass, tmp_pass, sizeof(sys_pass) - 1);
+            sys_pass[sizeof(sys_pass) - 1] = '\0';
+        } else {
+            ESP_LOGW(TAG, "auth_pass missing/empty in NVS, using default");
         }
         nvs_close(nvs_handle);
     } else {
-        snprintf(sys_user, sizeof(sys_user), "%s", DEFAULT_USER);
-        snprintf(sys_pass, sizeof(sys_pass), "%s", DEFAULT_PASS);
+        ESP_LOGW(TAG, "sys_cfg NVS open failed, using default credentials");
     }
     s_active_tokens = 0;
-    ESP_LOGI(TAG, "Auth initialized (TTL=%ds, max_tokens=%d)",
-             CNC_AUTH_TOKEN_TTL_SEC, CNC_AUTH_MAX_TOKENS);
+    ESP_LOGI(TAG, "Auth initialized (user=[%s], TTL=%ds, max_tokens=%d)",
+             sys_user, CNC_AUTH_TOKEN_TTL_SEC, CNC_AUTH_MAX_TOKENS);
 }
 
 bool auth_check_credentials(const char *username, const char *password) {

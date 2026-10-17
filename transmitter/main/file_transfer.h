@@ -31,6 +31,9 @@ void file_transfer_clear_abort(void);
 // Fetch the list of files from the receiver
 int file_transfer_get_receiver_files(char *out_json, size_t max_len);
 
+// Helper to check if receiver is currently online (cached, non-blocking)
+bool file_transfer_is_receiver_online(void);
+
 // Helper to get the full URL for a receiver endpoint
 void get_receiver_url(const char *path, char *out_url, size_t max_len);
 

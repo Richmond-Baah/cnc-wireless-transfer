@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "sd_card.h"
 #include "sdmmc_cmd.h"
+#include "driver/gpio.h"
 #include "soc/usb_serial_jtag_struct.h"
 #include "soc/system_struct.h"
 #include <string.h>
@@ -61,33 +62,51 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16
 
 bool tud_msc_test_unit_ready_cb(uint8_t lun) {
     (void)lun;
+    // FatFS has exclusive ownership of the SD card -> host must retry later
+    if (current_sd_card != NULL && sd_card_is_mounted()) {
+        return false;
+    }
+    // FatFS has exclusive ownership of internal flash -> host must retry later
+    if (current_sd_card == NULL && storage_manager_is_flash_mounted()) {
+        return false;
+    }
     // We are ready if we have ANY valid hardware pointer (SD or Internal Flash)
     bool has_sd = (current_sd_card != NULL);
     bool has_flash = (storage_manager_get_wl_handle() != WL_INVALID_HANDLE);
-    
+
     return (has_sd || has_flash);
 }
 
 void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_size) {
     (void)lun;
-    *block_size = 512;
-    
+
     if (current_sd_card != NULL) {
+        // SD card: 512-byte sectors (hardware sector size)
+        *block_size  = 512;
         *block_count = current_sd_card->csd.capacity;
-        ESP_LOGI(TAG, "SD Card: blocks=%lu", *block_count);
+        ESP_LOGI(TAG, "SD Card: block_size=512, blocks=%lu", *block_count);
     } else {
         wl_handle_t wl = storage_manager_get_wl_handle();
         ESP_LOGI(TAG, "=== CAPACITY CB: WL handle=%d ===", wl);
         if (wl != WL_INVALID_HANDLE) {
-            uint32_t size = wl_size(wl);
-            *block_count = size / 512;
-            ESP_LOGI(TAG, "Flash: size=%lu bytes, blocks=%lu", size, *block_count);
+            // IMPORTANT: flash erase granularity = wl_sector_size() (typically 4096).
+            // Reporting 512-byte blocks causes wl_erase_range to erase 8 USB
+            // sectors for every single write, silently corrupting the FAT after
+            // every USB session. Report the actual erase-sector size so each USB
+            // LBA maps 1:1 to one erase operation, preserving files across reboots.
+            uint32_t sec_size  = wl_sector_size(wl);
+            uint32_t total     = wl_size(wl);
+            *block_size  = (uint16_t)sec_size;
+            *block_count = total / sec_size;
+            ESP_LOGI(TAG, "Flash: sector_size=%lu, total=%lu, blocks=%lu",
+                     sec_size, total, *block_count);
         } else {
+            *block_size  = 512;
             *block_count = 0;
             ESP_LOGW(TAG, "NO STORAGE AVAILABLE!");
         }
     }
-    ESP_LOGI(TAG, "USB Capacity Reported: %lu blocks", *block_count);
+    ESP_LOGI(TAG, "USB Capacity: block_size=%u, blocks=%lu", *block_size, *block_count);
 }
 
 bool tud_msc_is_writable_cb(uint8_t lun) {
@@ -95,15 +114,24 @@ bool tud_msc_is_writable_cb(uint8_t lun) {
     return true;
 }
 
-// Permanent buffer for flash sector operations (4KB)
-static uint8_t s_internal_flash_buf[4096];
 
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
     (void)lun;
     if (current_sd_card != NULL) {
+        if (!sd_card_acquire_io()) {
+            ESP_LOGE(TAG, "READ FAILED: could not acquire SD IO lock (FatFS busy?)");
+            return -1;
+        }
+        if (sd_card_is_mounted()) {
+            ESP_LOGE(TAG, "READ FAILED: SD owned by FatFS, raw LBA access refused");
+            sd_card_release_io();
+            return -1;
+        }
+
         uint32_t sectors_total = bufsize / 512;
         uint32_t sectors_done = 0;
         uint8_t *ptr = (uint8_t *)buffer;
+        int32_t result = bufsize;
 
         while (sectors_done < sectors_total) {
             uint32_t count = sectors_total - sectors_done;
@@ -112,20 +140,29 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buff
             esp_err_t ret = sdmmc_read_sectors(current_sd_card, ptr, lba + sectors_done, count);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "SD Card READ FAILED at LBA=%lu, count=%lu: %s", lba + sectors_done, count, esp_err_to_name(ret));
-                return -1;
+                result = -1;
+                break;
             }
             ptr += count * 512;
             sectors_done += count;
         }
-        return bufsize;
+
+        sd_card_release_io();
+        return result;
     } else {
+        if (storage_manager_is_flash_mounted()) {
+            ESP_LOGE(TAG, "READ FAILED: Flash owned by FatFS, raw access refused");
+            return -1;
+        }
         wl_handle_t wl = storage_manager_get_wl_handle();
         if (wl != WL_INVALID_HANDLE) {
-            esp_err_t ret = wl_read(wl, lba * 512 + offset, buffer, bufsize);
+            // Address is lba * sector_size (sector_size = wl_sector_size, not 512)
+            uint32_t sec_size = wl_sector_size(wl);
+            esp_err_t ret = wl_read(wl, (size_t)lba * sec_size + offset, buffer, bufsize);
             if (ret == ESP_OK) {
                 return bufsize;
             }
-            ESP_LOGE(TAG, "READ FAILED: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "READ FAILED at LBA=%lu offset=%lu: %s", lba, offset, esp_err_to_name(ret));
             return -1;
         }
     }
@@ -136,9 +173,20 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buff
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
     (void)lun;
     if (current_sd_card != NULL) {
+        if (!sd_card_acquire_io()) {
+            ESP_LOGE(TAG, "WRITE FAILED: could not acquire SD IO lock (FatFS busy?)");
+            return -1;
+        }
+        if (sd_card_is_mounted()) {
+            ESP_LOGE(TAG, "WRITE FAILED: SD owned by FatFS, raw LBA access refused");
+            sd_card_release_io();
+            return -1;
+        }
+
         uint32_t sectors_total = bufsize / 512;
         uint32_t sectors_done = 0;
         uint8_t *ptr = buffer;
+        int32_t result = bufsize;
 
         while (sectors_done < sectors_total) {
             uint32_t count = sectors_total - sectors_done;
@@ -147,32 +195,40 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* 
             esp_err_t ret = sdmmc_write_sectors(current_sd_card, ptr, lba + sectors_done, count);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "SD Card WRITE FAILED at LBA=%lu, count=%lu: %s", lba + sectors_done, count, esp_err_to_name(ret));
-                return -1;
+                result = -1;
+                break;
             }
             ptr += count * 512;
             sectors_done += count;
         }
-        return bufsize;
+
+        sd_card_release_io();
+        return result;
     } else {
+        if (storage_manager_is_flash_mounted()) {
+            ESP_LOGE(TAG, "WRITE FAILED: Flash owned by FatFS, raw access refused");
+            return -1;
+        }
         wl_handle_t wl = storage_manager_get_wl_handle();
         if (wl != WL_INVALID_HANDLE) {
-            const size_t sector_sz = 4096;
-            uint32_t write_addr = lba * 512;
-            uint32_t bytes_written = 0;
-
-            while (bytes_written < bufsize) {
-                uint32_t current_addr = write_addr + bytes_written;
-                uint32_t sector_start = current_addr & ~(sector_sz - 1);
-                uint32_t offset_in_sector = current_addr % sector_sz;
-                uint32_t chunk_size = (sector_sz - offset_in_sector < bufsize - bytes_written) ? 
-                                       sector_sz - offset_in_sector : bufsize - bytes_written;
-
-                wl_read(wl, sector_start, s_internal_flash_buf, sector_sz);
-                memcpy(s_internal_flash_buf + offset_in_sector, buffer + bytes_written, chunk_size);
-                wl_erase_range(wl, sector_start, sector_sz);
-                wl_write(wl, sector_start, s_internal_flash_buf, sector_sz);
-
-                bytes_written += chunk_size;
+            // Each USB LBA maps to exactly one erase sector (wl_sector_size bytes).
+            // We must erase before writing — wl_erase_range requires the address
+            // and size to be multiples of wl_sector_size(); bufsize == sec_size here.
+            uint32_t sec_size = wl_sector_size(wl);
+            size_t addr = (size_t)lba * sec_size + offset;
+            // Erase the sector(s) covered by this write
+            size_t erase_size = ((bufsize + sec_size - 1) / sec_size) * sec_size;
+            esp_err_t ret = wl_erase_range(wl, addr, erase_size);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "wl_erase_range failed at addr 0x%zx (size %zu): %s",
+                         addr, erase_size, esp_err_to_name(ret));
+                return -1;
+            }
+            ret = wl_write(wl, addr, buffer, bufsize);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "wl_write failed at addr 0x%zx (size %lu): %s",
+                         addr, (unsigned long)bufsize, esp_err_to_name(ret));
+                return -1;
             }
             return bufsize;
         }
@@ -203,9 +259,11 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, u
     case SCSI_CMD_START_STOP_UNIT:
         ESP_LOGD(TAG, "SCSI: START_STOP_UNIT");
         return 0;
+    case SCSI_CMD_TEST_UNIT_READY:
+        return 0;
     default:
-        ESP_LOGD(TAG, "SCSI: Unknown command 0x%02X", cmd);
-        return -1;
+        ESP_LOGD(TAG, "SCSI: Handled by TinyUSB core (cmd 0x%02X)", cmd);
+        return 0;
     }
 }
 
@@ -249,6 +307,9 @@ void usb_msc_disconnect(void) {
 
 void usb_msc_connect(void) {
     ESP_LOGI(TAG, "Connecting USB...");
+    // Force a complete physical disconnect state first
+    tud_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(500));
     tud_connect();
 }
 
@@ -261,10 +322,6 @@ void usb_msc_notify_change(void) {
 
 void usb_msc_init(void) {
     ESP_LOGI(TAG, "[USB_INIT] Starting...");
-    
-    ESP_LOGI(TAG, "[USB_INIT] Storage manager init...");
-    storage_manager_init();
-    ESP_LOGI(TAG, "[USB_INIT] Storage DONE");
 
     /*
     Disable USB Serial/JTAG to prevent pad contention with TinyUSB OTG.
@@ -305,5 +362,6 @@ esp_err_t usb_msc_format_storage(void) {
 }
 
 bool usb_msc_is_host_mounted(void) {
+    // Return true only if USB is actively connected and enumerated by a host
     return s_usb_mounted_by_host;
 }

@@ -50,11 +50,15 @@
                 </svg>
                 <span class="choose-file-button btn btn-secondary">Select File</span>
                 <span class="file-message">or drag and drop .nc, .gcode, .tap</span>
-                <input class="file-input" type="file" id="fileInput" accept=".nc,.gcode,.tap">
+                <input class="file-input" type="file" id="fileInput" accept=".nc,.gcode,.tap,.cnc,.gc,.ngc,.pcn,.plt,.hnc,.txt,.crv,.sbp,.dxf,.svg,.xcn,.din,.cut,.iso">
             </div>
 
             <div id="selectedFileInfo" style="display: none;">
                 <p>Selected: <strong id="selectedFileName"></strong> (<span id="selectedFileSize"></span>)</p>
+            </div>
+
+            <div id="storageInfo" class="text-muted" style="margin-bottom: 15px; font-size: 0.9rem;">
+                Storage: <span id="storageTypeText">Connecting...</span> | Free: <span id="storageFreeText">-</span>
             </div>
 
             <button id="uploadBtn" class="btn btn-primary btn-block" disabled style="margin-top: 15px; padding: 14px;">

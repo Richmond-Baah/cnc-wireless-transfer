@@ -4,6 +4,7 @@
 #include "esp_err.h"
 #include "wear_levelling.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * @brief Initialize the storage manager (mount FAT filesystem)
@@ -12,12 +13,67 @@
 esp_err_t storage_manager_init(void);
 
 /**
- * @brief Performs an explicit FAT16 format with 512-byte sectors
- * @return esp_err_t ESP_OK on success
+ * @brief Unmount storage FatFS
  */
 esp_err_t storage_manager_unmount(void);
+
+/**
+ * @brief Remount storage FatFS
+ */
 esp_err_t storage_manager_remount(void);
+
+/**
+ * @brief Performs formatting of active storage
+ */
 esp_err_t storage_manager_format(void);
+
+/**
+ * @brief Get total and free space in bytes and storage type name
+ */
+esp_err_t storage_manager_get_info(uint64_t *out_total, uint64_t *out_free, const char **out_type);
+
+/**
+ * @brief Check whether any FatFS volume is currently mounted (SD or flash)
+ */
+bool storage_manager_fatfs_available(void);
+
+/**
+ * @brief Check whether an SD card is physically present/initialized
+ */
+bool storage_manager_is_sd_present(void);
+
+/**
+ * @brief Check whether the internal flash FatFS is currently mounted
+ */
+bool storage_manager_is_flash_mounted(void);
+
+/**
+ * @brief Prepare storage for USB MSC operation.
+ * If SD card is present, ensures it has a valid FAT filesystem and leaves it in raw mode.
+ * If internal flash only, ensures it is formatted and switches to raw wear-levelling mode.
+ */
+esp_err_t storage_manager_prepare_for_usb(void);
+
+/**
+ * @brief Unmount internal flash FatFS while retaining raw wear-levelling handle for USB MSC
+ */
+esp_err_t storage_manager_unmount_flash_for_usb(void);
+
+/**
+ * @brief Release storage so USB MSC can access the SD card exclusively
+ * If FatFS is mounted on the SD card it is unmounted (flush performed).
+ */
+esp_err_t storage_manager_release_for_usb(void);
+
+/**
+ * @brief Flush pending FatFS writes and release storage for USB MSC
+ */
+esp_err_t storage_manager_flush_and_release_for_usb(void);
+
+/**
+ * @brief Sync and flush FatFS buffers to media
+ */
+esp_err_t storage_manager_flush_sync(void);
 
 /**
  * @brief Get the wear leveling handle for MSC
@@ -31,3 +87,4 @@ wl_handle_t storage_manager_get_wl_handle(void);
 const char* storage_manager_get_base_path(void);
 
 #endif
+

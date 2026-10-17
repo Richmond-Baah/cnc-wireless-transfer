@@ -44,6 +44,7 @@ static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 
 static void apply_static_ip(void) {
+    if (!s_sta_netif) return;
     esp_netif_dhcpc_stop(s_sta_netif);
     esp_netif_ip_info_t ip_info;
     ip4_addr_t ip, gw, mask;
@@ -57,7 +58,7 @@ static void apply_static_ip(void) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "set_ip_info failed: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "Static IP set: %s", CONFIG_CNC_RECEIVER_IP);
+        ESP_LOGI(TAG, "Static IP set: %s (GW: %s)", CONFIG_CNC_RECEIVER_IP, CONFIG_CNC_RECEIVER_GATEWAY);
     }
 }
 
@@ -69,6 +70,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        apply_static_ip();
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         ESP_LOGI(TAG, "Connected to AP! Applying static IP...");
@@ -103,10 +105,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 strncpy((char *)wifi_config.sta.password, g_sta_pass, sizeof(wifi_config.sta.password) - 1);
             }
             
-            esp_wifi_disconnect();
             esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Never call vTaskDelay inside event loop handler
         esp_wifi_connect();
     }
 }
@@ -123,14 +124,16 @@ void wifi_init(void) {
     nvs_handle_t nvs_handle;
     if (nvs_open("wifi_cfg", NVS_READWRITE, &nvs_handle) == ESP_OK) {
         int32_t version = 0;
-        if (nvs_get_i32(nvs_handle, "cfg_version", &version) != ESP_OK || version != 1) {
-            ESP_LOGW(TAG, "NVS version mismatch (or missing). Wiping wifi_cfg for a clean slate!");
+        // Bump to version 2 to clean out any old invalid router credentials
+        if (nvs_get_i32(nvs_handle, "cfg_version", &version) != ESP_OK || version != 2) {
+            ESP_LOGW(TAG, "NVS version mismatch. Resetting wifi_cfg to defaults!");
             nvs_erase_all(nvs_handle);
             nvs_commit(nvs_handle);
-            // Re-open
             nvs_close(nvs_handle);
             nvs_open("wifi_cfg", NVS_READWRITE, &nvs_handle);
-            nvs_set_i32(nvs_handle, "cfg_version", 1);
+            nvs_set_i32(nvs_handle, "cfg_version", 2);
+            nvs_set_str(nvs_handle, "sta_ssid", DEFAULT_STA_SSID);
+            nvs_set_str(nvs_handle, "sta_pass", DEFAULT_STA_PASS);
             nvs_commit(nvs_handle);
         }
 
@@ -158,7 +161,6 @@ void wifi_init(void) {
     strncpy(g_sta_pass, sta_pass, sizeof(g_sta_pass) - 1);
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
-    apply_static_ip();
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
 
@@ -180,5 +182,18 @@ void wifi_init(void) {
     ESP_ERROR_CHECK(esp_wifi_start());
     esp_wifi_set_ps(WIFI_PS_NONE);
 
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
+    // Set country code for proper regulatory domain
+    wifi_country_t country = {
+      .cc = "GH",
+      .schan = 1,
+      .nchan = 13,
+      .policy = WIFI_COUNTRY_POLICY_AUTO,
+    };
+    esp_wifi_set_country(&country);
+
+    // Set max TX power for better signal
+    esp_wifi_set_max_tx_power(78);
+
+    // Non-blocking wait: Wait up to 500ms for initial connection bit, then proceed so USB MSC initializes immediately
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(500));
 }

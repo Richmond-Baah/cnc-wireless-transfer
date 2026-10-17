@@ -1,14 +1,20 @@
 #include "sd_card.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
+#include "driver/spi_master.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdmmc_cmd.h"
-#include "driver/spi_master.h"
-#include "driver/gpio.h"
+#include "diskio_impl.h"
+#include "diskio_sdmmc.h"
+#include "ff.h"
+#include "state_machine.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "SD_CARD";
@@ -19,79 +25,86 @@ static const char *TAG = "SD_CARD";
 #define PIN_NUM_CLK  12
 #define PIN_NUM_CS   10
 
-// Optional: Define a power pin if you have a MOSFET controlling SD card VCC
-#define PIN_NUM_PWR  -1 // Set to GPIO number if applicable
+#define PIN_NUM_PWR  -1
 
-// Global reference used by usb_msc.c via extern
+#define SD_BASE_PATH "/sdcard"
+#define SD_MAX_FILES 5
+
 sdmmc_card_t *current_sd_card = NULL;
-static int successful_speed_khz = 400; // Default to safe speed
+static bool s_fatfs_mounted = false;
+static BYTE s_pdrv = FF_DRV_NOT_USED; // FatFS drive number used by the SD card disk I/O
+static SemaphoreHandle_t s_io_lock = NULL; // serializes FatFS ops vs raw USB MSC sector access
 
-static void power_cycle_sd_card() {
+static void io_lock_init(void) {
+    if (s_io_lock == NULL) {
+        SemaphoreHandle_t lock = xSemaphoreCreateMutex();
+        if (lock != NULL) {
+            s_io_lock = lock;
+            ESP_LOGI(TAG, "SD IO mutex created");
+        }
+    }
+}
+
+static bool io_lock_take(TickType_t timeout) {
+    io_lock_init();
+    return xSemaphoreTake(s_io_lock, timeout) == pdTRUE;
+}
+
+static void io_lock_give(void) {
+    if (s_io_lock != NULL) {
+        xSemaphoreGive(s_io_lock);
+    }
+}
+
+// Public bus-access guard used by USB MSC callbacks for raw sector I/O.
+// Acquring this lock prevents any concurrent FatFS mount/unmount from
+// registering/unregistering the raw disk driver while sectors are in flight.
+bool sd_card_acquire_io(void) {
+    return io_lock_take(pdMS_TO_TICKS(1000));
+}
+
+void sd_card_release_io(void) {
+    io_lock_give();
+}
+
+static void power_cycle_sd_card(void) {
     if (PIN_NUM_PWR >= 0) {
         ESP_LOGI(TAG, "Power cycling SD card...");
         gpio_reset_pin(PIN_NUM_PWR);
         gpio_set_direction(PIN_NUM_PWR, GPIO_MODE_OUTPUT);
-        gpio_set_level(PIN_NUM_PWR, 0); // Assuming active high, set low to power off
+        gpio_set_level(PIN_NUM_PWR, 0);
         vTaskDelay(pdMS_TO_TICKS(500));
-        gpio_set_level(PIN_NUM_PWR, 1); // Power on
-        vTaskDelay(pdMS_TO_TICKS(500)); // Wait for stabilization
+        gpio_set_level(PIN_NUM_PWR, 1);
+        vTaskDelay(pdMS_TO_TICKS(500));
     } else {
-        // Soft reset via wait (some cards need time after power-on before SPI commands)
         ESP_LOGI(TAG, "No power control pin defined. Waiting for card to stabilize...");
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
-static esp_err_t attempt_mount(int freq_khz, sdmmc_host_t *host, sdspi_device_config_t *slot_config, esp_vfs_fat_sdmmc_mount_config_t *mount_config) {
-    host->max_freq_khz = freq_khz;
-    ESP_LOGI(TAG, "Attempting to mount at %d kHz...", freq_khz);
-    
-    esp_err_t ret = esp_vfs_fat_sdspi_mount("/sdcard", host, slot_config, mount_config, &current_sd_card);
-    
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "SUCCESS! Mounted at %d kHz.", freq_khz);
-        return ESP_OK;
-    } else {
-        ESP_LOGW(TAG, "Failed at %d kHz (Error: %s)", freq_khz, esp_err_to_name(ret));
-        return ret;
-    }
-}
-
-esp_err_t sd_card_init(void) {
+// Raw hardware probe only: initializes the card in sector mode for USB MSC.
+// Does NOT register FatFS. Keeps the SD host/(card) alive permanently so USB
+// MSC can read/write raw sectors; FatFS mount/unmount is layered on top later.
+static esp_err_t sd_card_init_raw_locked(void) {
     if (current_sd_card != NULL) {
-        ESP_LOGI(TAG, "SD card already initialized");
+        ESP_LOGI(TAG, "SD card already initialized in raw mode");
         return ESP_OK;
     }
 
-    esp_err_t ret;
-
-    // Power management: cycle power if possible, or wait
     power_cycle_sd_card();
 
-    // 1. Reset and Configure Pins for Stability
     gpio_reset_pin(PIN_NUM_MISO);
     gpio_reset_pin(PIN_NUM_MOSI);
     gpio_reset_pin(PIN_NUM_CLK);
     gpio_reset_pin(PIN_NUM_CS);
 
-    // Pull-ups are CRITICAL for SPI SD cards, especially MISO and CS.
     gpio_set_pull_mode(PIN_NUM_MISO, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(PIN_NUM_MOSI, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(PIN_NUM_CLK, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(PIN_NUM_CS,  GPIO_PULLUP_ONLY);
 
-    ESP_LOGI(TAG, "Initializing SD card via SPI (Host: SPI3)");
-    ESP_LOGI(TAG, "SPI pins: MOSI=%d, MISO=%d, CLK=%d, CS=%d", PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_CS);
-
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,
-        .max_files = 5,
-        .allocation_unit_size = 512
-    };
-
-    // 2. Configure SPI Host
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SPI3_HOST; // Use SPI3 (HSPI) on ESP32-S3 to avoid internal flash conflicts
+    host.slot = SPI3_HOST;
 
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = PIN_NUM_MOSI,
@@ -102,74 +115,281 @@ esp_err_t sd_card_init(void) {
         .max_transfer_sz = 16384,
     };
 
-    // Check if SPI bus is already initialized
-    ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH_AUTO);
+    esp_err_t ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
         return ret;
     }
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "SPI bus already initialized; continuing");
+    }
 
-    vTaskDelay(pdMS_TO_TICKS(100)); // Short settle delay
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ESP_LOGI(TAG, "Initializing SD card via SPI (Host: SPI3)");
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
 
-    // 3. Multi-speed Diagnostics & Initialization
-    // We test from highest (20MHz) down to lowest (400kHz) to get the best performance.
-    // The driver handles the initial 400kHz negotiation automatically; this frequency 
-    // sets the MAX speed used after identification.
-    int test_speeds[] = {20000, 10000, 5000, 1000, 400};
-    int num_speeds = sizeof(test_speeds) / sizeof(test_speeds[0]);
-    bool mounted = false;
-
-    for (int i = 0; i < num_speeds; i++) {
-        ret = attempt_mount(test_speeds[i], &host, &slot_config, &mount_config);
-        if (ret == ESP_OK) {
-            mounted = true;
-            successful_speed_khz = test_speeds[i];
-            ESP_LOGI(TAG, "SD Card initialized at %d kHz", successful_speed_khz);
-            break; // Stop at the highest successful speed
-        }
-        // Wait before trying the next speed
-        vTaskDelay(pdMS_TO_TICKS(500));
+    ret = (*host.init)();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "sdspi_host_init failed: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    if (!mounted) {
-        ESP_LOGE(TAG, "Failed to initialize SD card at ANY speed.");
-        ESP_LOGE(TAG, "--- LIKELY CAUSES ---");
-        ESP_LOGE(TAG, "1. Wiring: Ensure MOSI, MISO, CLK, CS are correct and wires are SHORT.");
-        ESP_LOGE(TAG, "2. Power: The 3.3V rail drops during init. SD cards draw 100mA+. Use a strong 3.3V source or 5V if module has LDO.");
-        ESP_LOGE(TAG, "3. SPI Mode Unsupported: Some cheap/fake cards (especially 8GB+) drop SPI mode support.");
-        ESP_LOGE(TAG, "4. Format: Card must be formatted as FAT32, not exFAT or NTFS.");
-        return ESP_FAIL;
+    sdspi_dev_handle_t card_handle = -1;
+    ret = sdspi_host_init_device(&slot_config, &card_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "sdspi_host_init_device failed: %s", esp_err_to_name(ret));
+        return ret;
     }
 
+    sdmmc_card_t *card = calloc(1, sizeof(sdmmc_card_t));
+    if (card == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate sdmmc_card_t");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // The 'slot' field must be swapped to the actual SPI device handle returned
+    // above, mirroring esp_vfs_fat_sdspi_mount().
+    sdmmc_host_t host_config = host;
+    if (card_handle != host.slot) {
+        host_config.slot = card_handle;
+    }
+
+    ret = sdmmc_card_init(&host_config, card);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "sdmmc_card_init failed: %s", esp_err_to_name(ret));
+        sdspi_host_remove_device(card_handle);
+        free(card);
+        return ret;
+    }
+
+    current_sd_card = card;
     ESP_LOGI(TAG, "================ SD CARD INFO ================");
     sdmmc_card_print_info(stdout, current_sd_card);
     ESP_LOGI(TAG, "==============================================");
+    return ESP_OK;
+}
 
-    // 4. Capacity Sanity Check
-    uint64_t capacity_mb = ((uint64_t)current_sd_card->csd.capacity) * 512 / (1024 * 1024);
-    ESP_LOGI(TAG, "Reported FAT Capacity: %llu MB", capacity_mb);
-    
-    if (capacity_mb < 2000) {
-        ESP_LOGW(TAG, "WARNING: Card capacity is very low (< 2GB).");
-        ESP_LOGW(TAG, "If this is your 32GB card, the partition table is corrupted or heavily fragmented.");
-        ESP_LOGW(TAG, "Please use 'SD Card Formatter' on PC to restore full capacity.");
+// Registers the SD disk I/O driver and mounts FatFS on /sdcard.
+static esp_err_t sd_card_mount_fatfs_locked(void) {
+    if (s_fatfs_mounted) {
+        ESP_LOGI(TAG, "SD card FatFS already mounted");
+        return ESP_OK;
     }
 
+    if (current_sd_card == NULL) {
+        ESP_LOGW(TAG, "Cannot mount FatFS: SD card not initialized (raw probe first)");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (ff_diskio_get_drive(&s_pdrv) != ESP_OK || s_pdrv == FF_DRV_NOT_USED) {
+        ESP_LOGE(TAG, "No free FatFS drive slot available");
+        s_pdrv = FF_DRV_NOT_USED;
+        return ESP_ERR_NOT_FOUND;
+    }
+    ESP_LOGI(TAG, "Using FatFS drive %u for SD card", (unsigned)s_pdrv);
+
+    char drv[3] = {(char)('0' + s_pdrv), ':', 0};
+
+    ff_diskio_register_sdmmc(s_pdrv, current_sd_card);
+    // SPI mode has no card-detect pin: keep disk status "present" so FatFS
+    // does not treat the card as removed between sector operations.
+    ff_sdmmc_set_disk_status_check(s_pdrv, false);
+
+    esp_vfs_fat_conf_t conf = {
+        .base_path = SD_BASE_PATH,
+        .fat_drive = drv,
+        .max_files = SD_MAX_FILES,
+    };
+    FATFS *fs = NULL;
+    esp_err_t err = esp_vfs_fat_register_cfg(&conf, &fs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_vfs_fat_register_cfg failed: %s", esp_err_to_name(err));
+        goto fail;
+    }
+
+    FRESULT fres = f_mount(fs, drv, 1);
+    if (fres != FR_OK) {
+        ESP_LOGE(TAG, "f_mount failed: %d", (int)fres);
+        err = ESP_FAIL;
+        goto fail;
+    }
+
+    s_fatfs_mounted = true;
+    ESP_LOGI(TAG, "SD card FatFS mounted on %s", SD_BASE_PATH);
     return ESP_OK;
+
+fail:
+    if (fs) {
+        f_mount(NULL, drv, 0);
+    }
+    esp_vfs_fat_unregister_path(SD_BASE_PATH);
+    ff_diskio_unregister(s_pdrv);
+    s_pdrv = FF_DRV_NOT_USED;
+    return err;
+}
+
+// Flushes and unregisters FatFS so the SD card becomes raw again for USB MSC.
+// IMPORTANT ORDER (matches IDF unmount): f_mount(NULL) FIRST (flushes open
+// files and drops the FatFs[vol] reference), THEN unregister disk I/O, THEN
+// unregister the VFS path.
+static esp_err_t sd_card_unmount_fatfs_locked(void) {
+    if (!s_fatfs_mounted) {
+        ESP_LOGI(TAG, "SD card FatFS already unmounted");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Unmounting SD card FatFS (flushing to disk)...");
+    char drv[3] = {(char)('0' + s_pdrv), ':', 0};
+
+    FRESULT fres = f_mount(NULL, drv, 0);
+    if (fres != FR_OK) {
+        ESP_LOGW(TAG, "f_mount(NULL) returned %d (continuing cleanup)", (int)fres);
+    }
+
+    esp_err_t err = esp_vfs_fat_unregister_path(SD_BASE_PATH);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_vfs_fat_unregister_path returned: %s", esp_err_to_name(err));
+    }
+
+    ff_diskio_unregister(s_pdrv);
+    s_pdrv = FF_DRV_NOT_USED;
+    s_fatfs_mounted = false;
+
+    ESP_LOGI(TAG, "SD card FatFS unmounted. RAW access active for USB MSC.");
+    return (fres == FR_OK) ? err : ESP_FAIL;
+}
+
+esp_err_t sd_card_init_raw(void) {
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = sd_card_init_raw_locked();
+    io_lock_give();
+    return ret;
+}
+
+esp_err_t sd_card_init(void) {
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = ESP_OK;
+    if (s_fatfs_mounted) {
+        ESP_LOGI(TAG, "SD card FatFS already mounted");
+    } else {
+        if (current_sd_card == NULL) {
+            ret = sd_card_init_raw_locked();
+        }
+        if (ret == ESP_OK) {
+            ret = sd_card_mount_fatfs_locked();
+        }
+    }
+    io_lock_give();
+    return ret;
 }
 
 bool sd_card_is_mounted(void) {
-    return current_sd_card != NULL;
+    return s_fatfs_mounted;
 }
 
 esp_err_t sd_card_unmount(void) {
-    return ESP_OK;
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = sd_card_unmount_fatfs_locked();
+    io_lock_give();
+    return ret;
 }
 
 esp_err_t sd_card_remount(void) {
-    return ESP_OK;
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = sd_card_mount_fatfs_locked();
+    io_lock_give();
+    return ret;
+}
+
+// Formats the SD card via FatFS f_mkfs. Requires the card to be unmounted.
+static esp_err_t sd_card_format_fatfs_locked(void) {
+    if (s_fatfs_mounted) {
+        ESP_LOGW(TAG, "Cannot format while FatFS is mounted");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (current_sd_card == NULL) {
+        ESP_LOGW(TAG, "Cannot format: SD card not initialized");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    BYTE pdrv = FF_DRV_NOT_USED;
+    if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == FF_DRV_NOT_USED) {
+        ESP_LOGE(TAG, "No free FatFS drive slot available for formatting");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    char drv[3] = {(char)('0' + pdrv), ':', 0};
+
+    ff_diskio_register_sdmmc(pdrv, current_sd_card);
+    ff_sdmmc_set_disk_status_check(pdrv, false);
+
+    BYTE work[FF_MAX_SS]; // scratch buffer for f_mkfs
+    FRESULT fres = f_mkfs(drv, NULL, work, sizeof(work));
+    esp_err_t ret = (fres == FR_OK) ? ESP_OK : ESP_FAIL;
+    if (fres != FR_OK) {
+        ESP_LOGE(TAG, "f_mkfs failed: %d", (int)fres);
+    } else {
+        ESP_LOGI(TAG, "SD card formatted (drive %u)", (unsigned)pdrv);
+    }
+
+    ff_diskio_unregister(pdrv);
+    return ret;
+}
+
+esp_err_t sd_card_format_fatfs(void) {
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = sd_card_format_fatfs_locked();
+    io_lock_give();
+    return ret;
+}
+
+esp_err_t sd_card_ensure_fatfs(void) {
+    if (!io_lock_take(portMAX_DELAY)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (current_sd_card == NULL) {
+        io_lock_give();
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // If already mounted, unmount first to test from a clean state
+    if (s_fatfs_mounted) {
+        esp_err_t unmount_err = sd_card_unmount_fatfs_locked();
+        if (unmount_err != ESP_OK) {
+            io_lock_give();
+            return unmount_err;
+        }
+    }
+
+    // Attempt to mount FatFS to verify existing filesystem
+    esp_err_t ret = sd_card_mount_fatfs_locked();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "SD card has valid FAT filesystem; unmounting for raw USB MSC access");
+        ret = sd_card_unmount_fatfs_locked();
+    } else {
+        // Never auto-format: a transient SPI error or a non-FAT card (e.g. exFAT)
+        // must not wipe user data. Leave the card raw and flag the error.
+        ESP_LOGE(TAG, "SD card FAT mount failed (%s). NOT formatting; card left raw. "
+                      "Reformat as FAT32 on a PC or via /format.", esp_err_to_name(ret));
+        state_machine_transition(STATE_ERROR);
+    }
+
+    io_lock_give();
+    return ret;
 }

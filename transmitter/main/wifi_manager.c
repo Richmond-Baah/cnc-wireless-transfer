@@ -4,8 +4,10 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
+#include "esp_netif.h"
 #include "lwip/ip4_addr.h"
 #include "nvs.h"
+#include "dhcpserver/dhcpserver.h"
 #include <string.h>
 
 #ifndef CONFIG_CNC_DEFAULT_WIFI_SSID
@@ -151,6 +153,10 @@ void wifi_init(void) {
   strncpy((char *)ap_config.ap.password, ap_pass, sizeof(ap_config.ap.password));
   ap_config.ap.max_connection = 4;
   ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+  ap_config.ap.channel = 1;
+  ap_config.ap.beacon_interval = 50;
+  ap_config.ap.dtim_period = 1;
+  ap_config.ap.pairwise_cipher = WIFI_CIPHER_TYPE_CCMP;
 
   if (strlen(ap_pass) < 8) {
     ap_config.ap.authmode = WIFI_AUTH_OPEN;
@@ -182,6 +188,32 @@ void wifi_init(void) {
     // Disable modem sleep so AP beacons are always sent on time
     // and the SSID remains visible to all clients.
     esp_wifi_set_ps(WIFI_PS_NONE);
-    ESP_LOGI(TAG, "=== WiFi Started Successfully (PS_NONE) ===");
+
+    // Set country code for proper regulatory domain (improves compatibility)
+    wifi_country_t country = {
+      .cc = "GH",
+      .schan = 1,
+      .nchan = 13,
+      .policy = WIFI_COUNTRY_POLICY_AUTO,
+    };
+    esp_wifi_set_country(&country);
+
+    // Set bandwidth to 20MHz for better compatibility and range
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+
+    // Set max TX power for better signal (78 = 19.5dBm, max for ESP32-S3)
+    esp_wifi_set_max_tx_power(78);
+
+    // Configure DHCP server for faster IP assignment
+    dhcps_lease_t lease;
+    lease.enable = true;
+    lease.start_ip.addr = ipInfo.ip.addr + 1;  // 192.168.4.2
+    lease.end_ip.addr = ipInfo.ip.addr + 10;   // 192.168.4.11
+    esp_netif_dhcps_stop(ap_netif);
+    esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease));
+    esp_netif_dhcps_start(ap_netif);
+
+    ESP_LOGI(TAG, "=== WiFi Started Successfully (PS_NONE, ch=%d, beacon=%d, BW=HT20) ===", 
+             ap_config.ap.channel, ap_config.ap.beacon_interval);
   }
 }

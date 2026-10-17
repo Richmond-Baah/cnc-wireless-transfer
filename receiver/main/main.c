@@ -51,8 +51,8 @@ void app_main(void) {
     led_init();
     ESP_LOGI(TAG, "Step 3: DONE");
 
-    ESP_LOGI(TAG, "Step 4: SD card...");
-    sd_card_init();
+    ESP_LOGI(TAG, "Step 4: SD card raw init (USB MSC owns card at boot)...");
+    sd_card_init_raw();
     ESP_LOGI(TAG, "Step 4: DONE");
 
     ESP_LOGI(TAG, "Step 4b: Storage manager init...");
@@ -74,6 +74,10 @@ void app_main(void) {
     ESP_LOGI(TAG, "Step 8: Creating debug task...");
     xTaskCreate(usb_debug_task, "usb_debug", 2048, NULL, 3, NULL);
     ESP_LOGI(TAG, "Step 8: DONE");
+
+    ESP_LOGI(TAG, "Step 8b: Preparing storage for USB MSC...");
+    storage_manager_prepare_for_usb();
+    ESP_LOGI(TAG, "Step 8b: DONE");
 
     ESP_LOGI(TAG, "Step 9: USB MSC init (LAST STEP)...");
     usb_msc_init();

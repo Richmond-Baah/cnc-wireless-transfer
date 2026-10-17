@@ -145,6 +145,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 const info = stateMap[data.state] || { text: data.state || 'Unknown', cls: 'status-offline' };
                 statusBadge.textContent = info.text;
                 statusBadge.className = 'status-badge ' + info.cls;
+
+                // Update storage info if present
+                const stypeEl = document.getElementById('storageTypeText');
+                const sfreeEl = document.getElementById('storageFreeText');
+                if (stypeEl && data.storage_type) {
+                    stypeEl.textContent = data.storage_type + ' (' + formatBytes(data.total_bytes) + ')';
+                }
+                if (sfreeEl && data.free_bytes !== undefined) {
+                    sfreeEl.textContent = formatBytes(data.free_bytes);
+                }
             } else if (res.status === 401) {
                 sessionStorage.removeItem('token');
                 window.location.href = 'index.html';
@@ -173,8 +183,12 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (res.ok) {
                 const data = await res.json();
+                if (data.storage_available === false && data.reason === 'usb_active') {
+                    receiverFileList.innerHTML = '<p class="text-warning">Storage busy (USB host connected). Unplug USB to browse/transfer files.</p>';
+                    return;
+                }
                 if (!data.files || data.files.length === 0) {
-                    receiverFileList.innerHTML = '<p class="text-muted">No files on SD card.</p>';
+                    receiverFileList.innerHTML = '<p class="text-muted">No files on storage.</p>';
                     return;
                 }
                 let html = '<ul class="file-items-list">';
@@ -287,15 +301,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function handleFileSelect(file) {
-        const validExts = ['.nc', '.gcode', '.tap'];
+        const validExts = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso'];
         const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
 
         if (!validExts.includes(ext)) {
-            showFeedback('Invalid file type. Only .nc, .gcode, .tap files allowed.', 'error');
-            currentFile = null;
-            uploadBtn.disabled = true;
-            selectedFileInfo.style.display = 'none';
-            return;
+            if (!confirm('Warning: "' + ext + '" is not a standard machine program extension. Proceed anyway?')) {
+                currentFile = null;
+                uploadBtn.disabled = true;
+                selectedFileInfo.style.display = 'none';
+                return;
+            }
         }
 
         currentFile = file;

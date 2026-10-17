@@ -25,7 +25,7 @@ static volatile bool s_abort_transfer = false;
 // ─── Cached receiver status ─────────────────────────────────────────────────
 // The background task writes here; the HTTP handler reads from here.
 // This prevents the web server from ever blocking on a slow receiver HTTP call.
-#define STATUS_CACHE_LEN 128
+#define STATUS_CACHE_LEN 256
 static char     s_status_cache[STATUS_CACHE_LEN] = "{\"state\":\"OFFLINE\"}";
 static SemaphoreHandle_t s_status_mutex = NULL;
 
@@ -40,29 +40,35 @@ static void receiver_status_task(void *arg) {
 
         esp_http_client_config_t cfg = {
             .url        = url,
-            .timeout_ms = 1500,   // Never block longer than 1.5 s
+            .timeout_ms = 1200,   // Never block longer than 1.2 s
         };
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
 
-        esp_err_t err = esp_http_client_open(client, 0);
-        if (err == ESP_OK) {
-            esp_http_client_fetch_headers(client);
-            int code = esp_http_client_get_status_code(client);
-            if (code == 200) {
-                int rlen = esp_http_client_read(client, buf, sizeof(buf) - 1);
-                if (rlen > 0) {
-                    buf[rlen] = '\0';
+        if (client == NULL) {
+            // URL was malformed (e.g. empty IP) – skip this cycle
+            ESP_LOGE("TRANSFER", "esp_http_client_init failed (bad URL?): %s", url);
+            snprintf(buf, sizeof(buf), "{\"state\":\"OFFLINE\"}");
+        } else {
+            esp_err_t err = esp_http_client_open(client, 0);
+            if (err == ESP_OK) {
+                esp_http_client_fetch_headers(client);
+                int code = esp_http_client_get_status_code(client);
+                if (code == 200) {
+                    int rlen = esp_http_client_read(client, buf, sizeof(buf) - 1);
+                    if (rlen > 0) {
+                        buf[rlen] = '\0';
+                    } else {
+                        snprintf(buf, sizeof(buf), "{\"state\":\"IDLE\"}");
+                    }
                 } else {
-                    snprintf(buf, sizeof(buf), "{\"state\":\"IDLE\"}");
+                    snprintf(buf, sizeof(buf), "{\"state\":\"OFFLINE\"}");
                 }
+                esp_http_client_close(client);
             } else {
                 snprintf(buf, sizeof(buf), "{\"state\":\"OFFLINE\"}");
             }
-            esp_http_client_close(client);
-        } else {
-            snprintf(buf, sizeof(buf), "{\"state\":\"OFFLINE\"}");
+            esp_http_client_cleanup(client);
         }
-        esp_http_client_cleanup(client);
 
         // Write result into the shared cache
         if (xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
@@ -77,7 +83,7 @@ static void receiver_status_task(void *arg) {
 
 void file_transfer_status_task_start(void) {
     s_status_mutex = xSemaphoreCreateMutex();
-    xTaskCreate(receiver_status_task, "rec_status", 4096, NULL, 3, NULL);
+    xTaskCreate(receiver_status_task, "rec_status", 6144, NULL, 3, NULL);
     ESP_LOGI(TAG, "Receiver status background poller started.");
 }
 
@@ -86,10 +92,16 @@ void get_receiver_url(const char *path, char *out_url, size_t max_len) {
   nvs_handle_t nvs_handle;
   if (nvs_open("sys_cfg", NVS_READONLY, &nvs_handle) == ESP_OK) {
     size_t len = sizeof(ip);
-    nvs_get_str(nvs_handle, "receiver_ip", ip, &len);
+    char tmp[32] = "";
+    if (nvs_get_str(nvs_handle, "receiver_ip", tmp, &len) == ESP_OK && strlen(tmp) > 0) {
+      strncpy(ip, tmp, sizeof(ip) - 1);
+      ip[sizeof(ip) - 1] = '\0';
+    }
+    // else: keep the compiled-in default
     nvs_close(nvs_handle);
   }
   snprintf(out_url, max_len, "http://%s%s", ip, path);
+  ESP_LOGI("TRANSFER", "Receiver URL: %s", out_url);
 }
 
 bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
@@ -171,6 +183,7 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
       led_set_state(LED_STATE_ERROR);
       mbedtls_md5_free(&ctx);
       esp_http_client_cleanup(chunk_client);
+      file_transfer_cancel_receiver(); // release receiver storage + reconnect USB
       httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                           "Client read error");
       return false;
@@ -186,8 +199,22 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
     esp_http_client_set_header(chunk_client, "X-Chunk-Index", chunk_hdr);
     esp_http_client_set_post_field(chunk_client, scratch_buf, read_len);
 
-    err = esp_http_client_perform(chunk_client);
-    int chunk_status = esp_http_client_get_status_code(chunk_client);
+    esp_err_t err = ESP_FAIL;
+    int chunk_status = 500;
+    int max_retries = 3;
+    bool success = false;
+
+    for (int retry = 0; retry < max_retries; retry++) {
+        err = esp_http_client_perform(chunk_client);
+        chunk_status = esp_http_client_get_status_code(chunk_client);
+        if (err == ESP_OK && chunk_status == 200) {
+            success = true;
+            break;
+        }
+        ESP_LOGW(TAG, "Chunk %d upload attempt %d failed (err %s, status %d). Retrying...", 
+                 chunk_index, retry + 1, esp_err_to_name(err), chunk_status);
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
 
     if (s_abort_transfer) {
         ESP_LOGW(TAG, "Transfer aborted after chunk %d", chunk_index);
@@ -197,12 +224,13 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
         return false;
     }
 
-    if (err != ESP_OK || chunk_status != 200) {
-      ESP_LOGE(TAG, "Receiver /chunk failed at index %d (err %s, status %d)",
-               chunk_index, esp_err_to_name(err), chunk_status);
+    if (!success) {
+      ESP_LOGE(TAG, "Receiver /chunk failed at index %d after %d retries (err %s, status %d)",
+               chunk_index, max_retries, esp_err_to_name(err), chunk_status);
       mbedtls_md5_free(&ctx);
       led_set_state(LED_STATE_ERROR);
       esp_http_client_cleanup(chunk_client);
+      file_transfer_cancel_receiver(); // release receiver storage + reconnect USB
       httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                           "Receiver chunk failure");
       return false;
@@ -278,6 +306,15 @@ int file_transfer_get_receiver_status(char *out_state_str, size_t max_len) {
     snprintf(out_state_str, max_len, "{\"state\":\"OFFLINE\"}");
   }
   return 200;
+}
+
+bool file_transfer_is_receiver_online(void) {
+  bool online = false;
+  if (s_status_mutex && xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    online = (strstr(s_status_cache, "OFFLINE") == NULL);
+    xSemaphoreGive(s_status_mutex);
+  }
+  return online;
 }
 
 int file_transfer_clear_receiver(void) {

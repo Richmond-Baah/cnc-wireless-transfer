@@ -16,21 +16,90 @@
 #include <unistd.h>
 #include "nvs.h"
 #include "esp_system.h"
+#include "esp_random.h"
 static const char *TAG = "FILE_RCV";
 #define STORAGE_PATH storage_manager_get_base_path()
 
-static void flush_all_storage(void) {
-    ESP_LOGI(TAG, "Storage synchronized.");
-}
-
 static FILE *active_file = NULL;
-static char active_filename[128] = {0};
+static char active_filename[256] = {0}; // temporary filename during transfer (.tmp)
+static char final_filename[256] = {0};  // target filename after successful verification
 static char expected_md5[33] = {0};
 static mbedtls_md5_context active_md5_ctx;
 
 #define RECEIVER_CHUNK_BUFSIZE 16384
 static char chunk_buf[RECEIVER_CHUNK_BUFSIZE];
 static int chunk_count = 0;
+static int expected_chunk_index = 0;
+
+// ERROR exit for an in-flight transfer: drop the partial staging file, release
+// FatFS and hand the storage back to the USB host so the machine keeps its drive.
+static void fail_transfer_and_release(void) {
+    if (active_file) {
+        fclose(active_file);
+        active_file = NULL;
+        remove(active_filename);
+    }
+    mbedtls_md5_free(&active_md5_ctx);
+    state_machine_transition(STATE_ERROR);
+    storage_manager_flush_and_release_for_usb();
+    usb_msc_connect();
+}
+
+// Discard any unread request body so the connection stays usable.
+static void drain_request_body(httpd_req_t *req) {
+    int remaining = req->content_len;
+    while (remaining > 0) {
+        int to_read = remaining < (int)sizeof(chunk_buf) ? remaining : (int)sizeof(chunk_buf);
+        int r = httpd_req_recv(req, chunk_buf, to_read);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) break;
+        remaining -= r;
+    }
+}
+
+// Helper to sanitize filename and prevent path traversal
+static void sanitize_filename(const char *input, char *output, size_t max_len) {
+    const char *basename = strrchr(input, '/');
+    if (!basename) {
+        basename = strrchr(input, '\\');
+    }
+    if (basename) {
+        basename++;
+    } else {
+        basename = input;
+    }
+    
+    // Remove leading dots or hidden prefixes
+    while (*basename == '.' || *basename == ' ') {
+        basename++;
+    }
+
+    if (strlen(basename) == 0) {
+        snprintf(output, max_len, "job_%ul.nc", (unsigned)esp_random());
+    } else {
+        strncpy(output, basename, max_len - 1);
+        output[max_len - 1] = '\0';
+    }
+}
+
+// Cleanup any orphan temporary files on startup
+static void cleanup_orphan_temp_files(void) {
+    DIR *dir = opendir(STORAGE_PATH);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') {
+            if (strstr(entry->d_name, ".tmp") != NULL) {
+                char filepath[320];
+                snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_PATH, entry->d_name);
+                ESP_LOGI(TAG, "Removing orphan temp file: %s", filepath);
+                remove(filepath);
+            }
+        }
+    }
+    closedir(dir);
+}
 
 static esp_err_t prepare_post_handler(httpd_req_t *req) {
     app_state_t cur = state_machine_get();
@@ -82,9 +151,8 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    snprintf(active_filename, sizeof(active_filename), "%s/%s", STORAGE_PATH, fname->valuestring);
-    strncpy(expected_md5, md5->valuestring, sizeof(expected_md5) - 1);
-    expected_md5[sizeof(expected_md5) - 1] = '\0';
+    char sanitized[128];
+    sanitize_filename(fname->valuestring, sanitized, sizeof(sanitized));
 
     if (active_file) {
         fclose(active_file);
@@ -95,28 +163,42 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     // Step 1: Disconnect USB so the host stops reading raw SD sectors
     usb_msc_disconnect();
 
-    // Step 2: Ensure the storage filesystem is mounted before opening the file
-    if (sd_card_is_mounted() && strcmp(STORAGE_PATH, "/sdcard") == 0) {
-        // SD card already mounted; nothing to do
-    } else if (!sd_card_is_mounted()) {
+    // Step 2: Ensure the target storage filesystem is mounted before opening.
+    // The SD card is the transfer target when present; internal flash is the
+    // fallback. FatFS and USB MSC are strictly exclusive: USB was just
+    // disconnected, so we are free to mount FatFS now. Never mount the SD
+    // card while the USB host could still be reading it.
+    if (!storage_manager_fatfs_available() || (storage_manager_is_sd_present() && !sd_card_is_mounted())) {
         storage_manager_remount();
     }
+    if (!storage_manager_fatfs_available()) {
+        ESP_LOGE(TAG, "No storage filesystem available for transfer");
+        fail_transfer_and_release();
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "File system error");
+        cJSON_Delete(json);
+        return ESP_FAIL;
+    }
 
-    // Step 3: Open the file for writing with a retry
+    // Build paths only after the active storage path has been resolved
+    snprintf(final_filename, sizeof(final_filename), "%s/%s", STORAGE_PATH, sanitized);
+    snprintf(active_filename, sizeof(active_filename), "%s/%s.tmp", STORAGE_PATH, sanitized);
+    strncpy(expected_md5, md5->valuestring, sizeof(expected_md5) - 1);
+    expected_md5[sizeof(expected_md5) - 1] = '\0';
+
+    // Step 3: Open the temporary staging file for writing with a retry
     active_file = fopen(active_filename, "wb");
     if (!active_file) {
         ESP_LOGW(TAG, "First fopen failed, remounting storage and retrying...");
-        if (sd_card_is_mounted()) {
-            sd_card_remount();
-        } else {
-            storage_manager_remount();
-        }
+        storage_manager_remount();
+        // Rebuild paths in case the storage path changed after the remount
+        snprintf(final_filename, sizeof(final_filename), "%s/%s", STORAGE_PATH, sanitized);
+        snprintf(active_filename, sizeof(active_filename), "%s/%s.tmp", STORAGE_PATH, sanitized);
         active_file = fopen(active_filename, "wb");
     }
 
     if (!active_file) {
-        ESP_LOGE(TAG, "Failed to open file for writing: %s", active_filename);
-        state_machine_transition(STATE_ERROR);
+        ESP_LOGE(TAG, "Failed to open temporary file for writing: %s", active_filename);
+        fail_transfer_and_release();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "File system error");
         cJSON_Delete(json);
         return ESP_FAIL;
@@ -125,8 +207,9 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     mbedtls_md5_init(&active_md5_ctx);
     mbedtls_md5_starts(&active_md5_ctx);
     chunk_count = 0;
+    expected_chunk_index = 0;
 
-    ESP_LOGI(TAG, "Ready to receive: %s (expected MD5: %s)", active_filename, expected_md5);
+    ESP_LOGI(TAG, "Ready to receive staging file: %s (final: %s, expected MD5: %s)", active_filename, final_filename, expected_md5);
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
@@ -141,6 +224,37 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    char idx_hdr[16] = {0};
+    if (httpd_req_get_hdr_value_str(req, "X-Chunk-Index", idx_hdr, sizeof(idx_hdr)) != ESP_OK) {
+        drain_request_body(req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing X-Chunk-Index");
+        return ESP_FAIL;
+    }
+    char *idx_end = NULL;
+    long chunk_index = strtol(idx_hdr, &idx_end, 10);
+    if (idx_end == idx_hdr || *idx_end != '\0' || chunk_index < 0) {
+        drain_request_body(req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid X-Chunk-Index");
+        return ESP_FAIL;
+    }
+
+    if (chunk_index < expected_chunk_index) {
+        // Retry of a chunk already written (its response was lost): acknowledge, don't re-append.
+        ESP_LOGW(TAG, "Duplicate chunk %ld (expected %d) ignored", chunk_index, expected_chunk_index);
+        drain_request_body(req);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"duplicate\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    if (chunk_index > expected_chunk_index) {
+        ESP_LOGE(TAG, "Out-of-order chunk %ld (expected %d) rejected", chunk_index, expected_chunk_index);
+        drain_request_body(req);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "Out-of-order chunk", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
     int remaining = req->content_len;
     while (remaining > 0) {
         int to_read = remaining < (int)sizeof(chunk_buf) ? remaining : (int)sizeof(chunk_buf);
@@ -148,9 +262,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         if (read_len <= 0) {
             if (read_len == HTTPD_SOCK_ERR_TIMEOUT) continue;
             ESP_LOGE(TAG, "Error reading chunk data");
-            state_machine_transition(STATE_ERROR);
-            fclose(active_file);
-            active_file = NULL;
+            fail_transfer_and_release();
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Chunk read error");
             return ESP_FAIL;
         }
@@ -158,9 +270,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         size_t written = fwrite(chunk_buf, 1, read_len, active_file);
         if ((int)written != read_len) {
             ESP_LOGE(TAG, "Write error (wrote %d of %d)", (int)written, read_len);
-            state_machine_transition(STATE_ERROR);
-            fclose(active_file);
-            active_file = NULL;
+            fail_transfer_and_release();
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write error");
             return ESP_FAIL;
         }
@@ -174,6 +284,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         mbedtls_md5_update(&active_md5_ctx, (const unsigned char *)chunk_buf, read_len);
         remaining -= read_len;
     }
+    expected_chunk_index++;
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
@@ -196,10 +307,7 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
             if (received <= 0) {
                 if (received == HTTPD_SOCK_ERR_TIMEOUT) continue;
             ESP_LOGE(TAG, "Error reading finalize body");
-            state_machine_transition(STATE_ERROR);
-            fclose(active_file);
-            active_file = NULL;
-            mbedtls_md5_free(&active_md5_ctx);
+            fail_transfer_and_release();
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Chunk read error");
             return ESP_FAIL;
             }
@@ -238,22 +346,44 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     const char *check_against = strlen(finalize_md5) > 0 ? finalize_md5 : expected_md5;
 
     if (strcasecmp(computed_md5, check_against) != 0) {
-        ESP_LOGE(TAG, "MD5 MISMATCH! Deleting corrupted file");
+        ESP_LOGE(TAG, "MD5 MISMATCH! Deleting corrupted temp file: %s", active_filename);
         remove(active_filename);
         state_machine_transition(STATE_ERROR);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Checksum mismatch - file deleted");
+        // Release FatFS back to raw USB mode before reconnecting the host
+        storage_manager_flush_and_release_for_usb();
+        usb_msc_connect();
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "File verified and saved successfully.");
+    // ATOMIC COMMIT: Remove existing final file if present, then rename .tmp -> final
+    remove(final_filename);
+    if (rename(active_filename, final_filename) != 0) {
+        ESP_LOGE(TAG, "Failed to atomically rename %s to %s", active_filename, final_filename);
+        remove(active_filename);
+        state_machine_transition(STATE_ERROR);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "File commit error");
+        // Release FatFS back to raw USB mode before reconnecting the host
+        storage_manager_flush_and_release_for_usb();
+        usb_msc_connect();
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "File verified and atomically committed: %s", final_filename);
     state_machine_transition(STATE_FILE_READY);
 
-    // CRITICAL: Flush metadata to physical sectors
-    flush_all_storage();
+    // CRITICAL: Flush metadata to physical sectors, then unmount FatFS so the
+    // storage is back in raw USB MSC mode before the host is reconnected.
+    storage_manager_flush_and_release_for_usb();
+    
+    state_machine_transition(STATE_IDLE);
 
+    // Drop the USB connection to signal disconnect to the PC
+    usb_msc_disconnect();
+    
     // Give the host time to notice the disconnect, then reconnect USB
-    ESP_LOGI(TAG, "Waiting 2s before reconnecting USB host...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "Waiting 1.5s before reconnecting USB host...");
+    vTaskDelay(pdMS_TO_TICKS(1500));
     usb_msc_connect();
 
     httpd_resp_set_type(req, "application/json");
@@ -271,7 +401,9 @@ static esp_err_t cancel_post_handler(httpd_req_t *req) {
     mbedtls_md5_free(&active_md5_ctx);
     state_machine_transition(STATE_IDLE);
 
-    // Ensure USB is re-connected even if transfer was cancelled
+    // Release FatFS (flush + unmount) so the SD card is raw for USB again,
+    // then re-connect the USB host even if transfer was cancelled.
+    storage_manager_flush_and_release_for_usb();
     usb_msc_connect();
 
     httpd_resp_set_type(req, "application/json");
@@ -280,8 +412,14 @@ static esp_err_t cancel_post_handler(httpd_req_t *req) {
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req) {
-    char resp[128];
-    snprintf(resp, sizeof(resp), "{\"state\":\"%s\"}", state_to_string(state_machine_get()));
+    uint64_t total = 0, free_bytes = 0;
+    const char *stype = "Unknown";
+    storage_manager_get_info(&total, &free_bytes, &stype);
+
+    char resp[256];
+    snprintf(resp, sizeof(resp), 
+             "{\"state\":\"%s\",\"storage_type\":\"%s\",\"total_bytes\":%llu,\"free_bytes\":%llu}", 
+             state_to_string(state_machine_get()), stype, total, free_bytes);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -294,16 +432,16 @@ static esp_err_t clear_files_handler(httpd_req_t *req) {
     usb_msc_disconnect();
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Remount VFS if needed (just in case)
-    if (!sd_card_is_mounted()) {
-        sd_card_remount();
+    // Ensure the target storage is mounted before clearing
+    if (!storage_manager_fatfs_available() || (storage_manager_is_sd_present() && !sd_card_is_mounted())) {
+        storage_manager_remount();
     }
 
     DIR *dir = opendir(STORAGE_PATH);
     if (!dir) {
         ESP_LOGE(TAG, "Failed to open directory for clearing");
-        sd_card_unmount();
-        sd_card_remount();
+        storage_manager_remount();
+        storage_manager_flush_and_release_for_usb();
         usb_msc_connect();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot open storage");
         return ESP_FAIL;
@@ -319,9 +457,9 @@ static esp_err_t clear_files_handler(httpd_req_t *req) {
     }
     closedir(dir);
 
-    // Unmount and remount to flush FAT directory entries to physical disk
+    // Flush directory entries to physical media, then release SD for USB mode
     ESP_LOGI(TAG, "Flushing clear operation to storage...");
-    flush_all_storage();
+    storage_manager_flush_and_release_for_usb();
 
     // Give the host time to notice the disconnect, then reconnect USB
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -335,9 +473,13 @@ static esp_err_t clear_files_handler(httpd_req_t *req) {
 static esp_err_t format_storage_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Full format requested");
 
+    // Disconnect USB so no raw sector access races with the format
+    usb_msc_disconnect();
+
     esp_err_t ret = usb_msc_format_storage();
 
     if (ret != ESP_OK) {
+        usb_msc_notify_change();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Format failed");
         return ESP_FAIL;
     }
@@ -350,12 +492,24 @@ static esp_err_t format_storage_handler(httpd_req_t *req) {
 }
 
 static esp_err_t list_get_handler(httpd_req_t *req) {
-    // Ensure SD card is mounted before listing
-    if (!sd_card_is_mounted()) {
-        sd_card_remount();
+    httpd_resp_set_type(req, "application/json");
+
+    // Only block listing if the USB host has actually enumerated and mounted us.
+    // If USB cable is plugged into a power-only port or PC is asleep, 
+    // s_usb_mounted_by_host is false, allowing normal Wi-Fi file listing/transfer.
+    if (usb_msc_is_host_mounted()) {
+        httpd_resp_sendstr_chunk(req, "{\"files\":[],\"storage_available\":false,\"reason\":\"usb_active\"}");
+        httpd_resp_sendstr_chunk(req, NULL); // End of chunks
+        return ESP_OK;
     }
 
-    httpd_resp_set_type(req, "application/json");
+    // USB not mounted: it is safe to mount storage for listing. If we mount it
+    // here, release it afterwards so USB MSC regains ownership.
+    bool mounted_here = false;
+    if (!storage_manager_fatfs_available()) {
+        mounted_here = (storage_manager_remount() == ESP_OK);
+    }
+
     httpd_resp_sendstr_chunk(req, "{\"files\":[");
 
     bool first = true;
@@ -383,7 +537,11 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
         }
         closedir(dir);
     }
-    
+
+    if (mounted_here) {
+        storage_manager_flush_and_release_for_usb();
+    }
+
     httpd_resp_sendstr_chunk(req, "]}");
     httpd_resp_sendstr_chunk(req, NULL); // End of chunks
     return ESP_OK;
@@ -492,29 +650,14 @@ static esp_err_t settings_post_handler(httpd_req_t *req) {
         cJSON *j_sta_ssid = cJSON_GetObjectItem(json, "sta_ssid");
         cJSON *j_sta_pass = cJSON_GetObjectItem(json, "sta_pass");
 
-        bool is_ap_mode = true;
-        if (j_wifi_mode && j_wifi_mode->valuestring && strcmp(j_wifi_mode->valuestring, "STA") == 0) {
-            is_ap_mode = false;
+        // The receiver must ALWAYS connect to the transmitter's private AP SSID.
+        // It should never attempt to connect to the shop router SSID.
+        if (j_ap_ssid && j_ap_ssid->valuestring && strlen(j_ap_ssid->valuestring) > 0) {
+            nvs_set_str(nvs_handle, "sta_ssid", j_ap_ssid->valuestring);
+            ESP_LOGI(TAG, "Saved new STA SSID (Transmitter AP): %s", j_ap_ssid->valuestring);
         }
-
-        if (is_ap_mode) {
-            // The transmitter is an AP, so we connect to its AP SSID as a station.
-            if (j_ap_ssid && j_ap_ssid->valuestring && strlen(j_ap_ssid->valuestring) > 0) {
-                nvs_set_str(nvs_handle, "sta_ssid", j_ap_ssid->valuestring);
-                ESP_LOGI(TAG, "Saved new STA SSID (from AP update): %s", j_ap_ssid->valuestring);
-            }
-            if (j_ap_pass && j_ap_pass->valuestring && strlen(j_ap_pass->valuestring) > 0) {
-                nvs_set_str(nvs_handle, "sta_pass", j_ap_pass->valuestring);
-            }
-        } else {
-            // The transmitter is a STA connecting to a router, so we connect to the same router.
-            if (j_sta_ssid && j_sta_ssid->valuestring && strlen(j_sta_ssid->valuestring) > 0) {
-                nvs_set_str(nvs_handle, "sta_ssid", j_sta_ssid->valuestring);
-                ESP_LOGI(TAG, "Saved new STA SSID (from STA update): %s", j_sta_ssid->valuestring);
-            }
-            if (j_sta_pass && j_sta_pass->valuestring && strlen(j_sta_pass->valuestring) > 0) {
-                nvs_set_str(nvs_handle, "sta_pass", j_sta_pass->valuestring);
-            }
+        if (j_ap_pass && j_ap_pass->valuestring && strlen(j_ap_pass->valuestring) > 0) {
+            nvs_set_str(nvs_handle, "sta_pass", j_ap_pass->valuestring);
         }
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
@@ -529,6 +672,9 @@ static esp_err_t settings_post_handler(httpd_req_t *req) {
 }
 
 void file_receiver_init(void) {
+    ESP_LOGI(TAG, "Cleaning up any orphan temp files on storage...");
+    cleanup_orphan_temp_files();
+
     ESP_LOGI(TAG, "File receiver HTTP server starting...");
 
     httpd_handle_t server = NULL;

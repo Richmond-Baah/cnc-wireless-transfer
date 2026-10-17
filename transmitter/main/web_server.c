@@ -349,38 +349,31 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  // 1. SAFETY CHECK: Forward settings to receiver FIRST.
-  // If the receiver is offline, we must NOT change the transmitter's SSID,
-  // otherwise the receiver will be permanently locked out!
-  char rec_url[128];
-  extern void get_receiver_url(const char *path, char *out_url, size_t max_len);
-  get_receiver_url("/settings", rec_url, sizeof(rec_url));
+  // Forward AP settings to receiver if receiver is online
+  cJSON *j_ap_ssid = cJSON_GetObjectItem(json, "ap_ssid");
+  cJSON *j_ap_pass = cJSON_GetObjectItem(json, "ap_pass");
 
-  ESP_LOGI(TAG, "Forwarding settings to receiver at %s", rec_url);
-  esp_http_client_config_t client_cfg = {
-      .url = rec_url,
-      .method = HTTP_METHOD_POST,
-      .timeout_ms = 5000,
-  };
-  esp_http_client_handle_t client = esp_http_client_init(&client_cfg);
-  esp_err_t send_err = ESP_FAIL;
-  if (client) {
-      esp_http_client_set_post_field(client, scratch_buf, strlen(scratch_buf));
-      esp_http_client_set_header(client, "Content-Type", "application/json");
-      send_err = esp_http_client_perform(client);
-      esp_http_client_cleanup(client);
+  if (file_transfer_is_receiver_online() && (j_ap_ssid || j_ap_pass)) {
+      char rec_url[128];
+      extern void get_receiver_url(const char *path, char *out_url, size_t max_len);
+      get_receiver_url("/settings", rec_url, sizeof(rec_url));
+
+      ESP_LOGI(TAG, "Syncing settings with receiver at %s", rec_url);
+      esp_http_client_config_t client_cfg = {
+          .url = rec_url,
+          .method = HTTP_METHOD_POST,
+          .timeout_ms = 2000,
+      };
+      esp_http_client_handle_t client = esp_http_client_init(&client_cfg);
+      if (client) {
+          esp_http_client_set_post_field(client, scratch_buf, strlen(scratch_buf));
+          esp_http_client_set_header(client, "Content-Type", "application/json");
+          esp_http_client_perform(client);
+          esp_http_client_cleanup(client);
+      }
   }
 
-  if (send_err != ESP_OK) {
-      ESP_LOGE(TAG, "Receiver offline. Aborting config update to prevent lockout!");
-      cJSON_Delete(json);
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot sync with receiver. Ensure receiver is connected before changing SSID.");
-      return ESP_FAIL;
-  }
-
-  ESP_LOGI(TAG, "Receiver accepted settings. Updating local NVS...");
-
-  // 2. Now safe to update local NVS
+  // Update local NVS
   nvs_handle_t nvs_handle;
   esp_err_t err = nvs_open("wifi_cfg", NVS_READWRITE, &nvs_handle);
   if (err != ESP_OK) {
@@ -390,8 +383,6 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
   }
 
   cJSON *j_wifi_mode = cJSON_GetObjectItem(json, "wifi_mode");
-  cJSON *j_ap_ssid = cJSON_GetObjectItem(json, "ap_ssid");
-  cJSON *j_ap_pass = cJSON_GetObjectItem(json, "ap_pass");
   cJSON *j_sta_ssid = cJSON_GetObjectItem(json, "sta_ssid");
   cJSON *j_sta_pass = cJSON_GetObjectItem(json, "sta_pass");
 
@@ -449,6 +440,11 @@ static esp_err_t clear_post_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  if (!file_transfer_is_receiver_online()) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receiver offline");
+    return ESP_FAIL;
+  }
+
   // We call the clear endpoint to delete all files from the SD card.
   int code = file_transfer_clear_receiver();
   if (code == 200) {
@@ -476,6 +472,12 @@ static esp_err_t receiver_list_get_handler(httpd_req_t *req) {
     if (!is_authorized(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
+    }
+
+    if (!file_transfer_is_receiver_online()) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"files\":[],\"storage_available\":false,\"reason\":\"receiver_offline\"}");
+        return ESP_OK;
     }
 
     char *list_buf = malloc(4096);
