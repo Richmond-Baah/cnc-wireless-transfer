@@ -498,3 +498,41 @@ hr {
     white-space: nowrap;
     margin-left: 12px;
 }
+
+/* Firmware versions line in the status card */
+.status-panel {
+    padding: 20px 30px;
+}
+.status-panel .fw-line {
+    flex-basis: 100%;
+    font-size: 0.8rem;
+}
+
+/* Narrow screens (~360-800px): wrap rows instead of overflowing the right edge */
+.header.d-flex,
+.status-panel,
+.status-main,
+.card > .d-flex.justify-between {
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.header.d-flex h1,
+.status-main,
+.file-items-list li > .file-name {
+    min-width: 0;
+}
+.status-badge {
+    max-width: 100%;
+    white-space: normal;
+}
+.file-name {
+    overflow-wrap: anywhere;
+}
+@media (max-width: 800px) {
+    .container { padding: 20px 12px; }
+    .card { padding: 20px 16px; }
+    .status-panel { padding: 16px; }
+    .header h1 { font-size: 1.35rem; }
+    .file-drop-area { padding: 32px 16px; }
+    #floatingCancel { right: 12px; left: 12px; text-align: center; }
+}

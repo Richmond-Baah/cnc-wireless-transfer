@@ -18,7 +18,7 @@ bool file_transfer_last_refused(void);
 int file_transfer_get_receiver_status(char *out_state_str, size_t max_len);
 
 // Request the receiver to clear its storage
-int file_transfer_clear_receiver(void);
+int file_transfer_clear_receiver(bool force); // sends {"confirm":"WIPE"}; force bypasses busy guard
 
 // Request the receiver to perform a full format of its storage
 int file_transfer_format_receiver(void);

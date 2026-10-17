@@ -13,7 +13,7 @@
         <div class="header d-flex justify-between align-center">
             <h1 class="d-flex align-center" style="gap: 10px;">
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                    <path d="M12 14V3"></path><path d="M7 8l5-5 5 5"></path><rect x="3" y="14" width="18" height="7" rx="2"></rect><path d="M7 17.5h.01M11 17.5h6"></path>
                 </svg>
                 CNC Transfer System
             </h1>
@@ -29,8 +29,8 @@
             </div>
         </div>
 
-        <div class="status-panel card d-flex justify-between align-center" style="padding: 20px 30px;">
-            <div class="d-flex align-center" style="gap:15px">
+        <div class="status-panel card d-flex justify-between align-center">
+            <div class="d-flex align-center status-main" style="gap:15px">
                 <h2 style="margin-bottom: 0; border: none; padding: 0;">Receiver Status</h2>
                 <div id="receiverStatus" class="status-badge status-checking">Checking...</div>
             </div>
@@ -38,6 +38,7 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                 Wipe Storage
             </button>
+            <div id="fwVersions" class="text-muted fw-line">Firmware: transmitter - | receiver -</div>
         </div>
 
         <div class="upload-panel card">
@@ -49,8 +50,9 @@
                     <line x1="12" y1="3" x2="12" y2="15"></line>
                 </svg>
                 <span class="choose-file-button btn btn-secondary">Select File</span>
-                <span class="file-message">or drag and drop .nc, .gcode, .tap</span>
-                <input class="file-input" type="file" id="fileInput" accept=".nc,.gcode,.tap,.cnc,.gc,.ngc,.pcn,.plt,.hnc,.txt,.crv,.sbp,.dxf,.svg,.xcn,.din,.cut,.iso">
+                <!-- text and accept list are filled from VALID_EXTS in app.js -->
+                <span class="file-message" id="fileMessage">or drag and drop a machine program file</span>
+                <input class="file-input" type="file" id="fileInput">
             </div>
 
             <div id="selectedFileInfo" style="display: none;">
@@ -96,6 +98,7 @@
                 <h2 style="margin: 0;">Files on Receiver</h2>
                 <button id="refreshFilesBtn" class="btn btn-secondary btn-sm">Refresh List</button>
             </div>
+            <p id="fileListNote" class="text-muted" style="display: none; font-size: 0.85rem; margin-bottom: 8px;">As of last transfer (the machine has the drive)</p>
             <div id="receiverFileList" class="file-list">
                 <p class="text-muted">Connecting to receiver...</p>
             </div>

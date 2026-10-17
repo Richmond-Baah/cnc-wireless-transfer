@@ -1,9 +1,9 @@
-﻿// CNC Wireless Transfer - Client Application Logic
+// CNC Wireless Transfer - Client Application Logic
 document.addEventListener('DOMContentLoaded', () => {
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════
     // LOGIN PAGE
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════
     const loginForm = document.getElementById('loginForm');
     if (loginForm) {
         const token = sessionStorage.getItem('token');
@@ -41,16 +41,36 @@ document.addEventListener('DOMContentLoaded', () => {
         return; // Stop further execution on login page
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════
     // UPLOAD PAGE
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════
     const token = sessionStorage.getItem('token');
     if (!token) {
         window.location.href = 'index.html';
         return;
     }
 
-    // â”€â”€â”€ Logout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Single source of truth for accepted machine-program extensions:
+    // drives the drop-zone text, the file picker filter and the selection check.
+    const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso'];
+    const fileMessageEl = document.getElementById('fileMessage');
+    if (fileMessageEl) fileMessageEl.textContent = 'or drag and drop ' + VALID_EXTS.join(', ');
+    const fileInputEl = document.getElementById('fileInput');
+    if (fileInputEl) fileInputEl.accept = VALID_EXTS.join(',');
+
+    const STORAGE_LABELS = { 'SDCard': 'SD card', 'InternalFlash': 'Internal flash' };
+
+    // Storage capacities in MB below 1 GB, GB above (binary units)
+    function formatStorage(bytes) {
+        const mb = (bytes || 0) / (1024 * 1024);
+        return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb.toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    // ─── Logout ─────────────────────────────────────────────────────────
     const logoutBtn = document.getElementById('logoutBtn');
     if (logoutBtn) {
         logoutBtn.addEventListener('click', () => {
@@ -59,7 +79,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // â”€â”€â”€ Settings Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Settings Modal ─────────────────────────────────────────────────
     const configBtn = document.getElementById('configBtn');
     const closeSettingsBtn = document.getElementById('closeSettingsBtn');
     const settingsModal = document.getElementById('settingsModal');
@@ -123,7 +143,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // â”€â”€â”€ Status Polling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Status Polling ─────────────────────────────────────────────────
     const statusBadge = document.getElementById('receiverStatus');
     let statusInterval;
 
@@ -153,10 +173,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 const stypeEl = document.getElementById('storageTypeText');
                 const sfreeEl = document.getElementById('storageFreeText');
                 if (stypeEl && data.storage_type) {
-                    stypeEl.textContent = data.storage_type + ' (' + formatBytes(data.total_bytes) + ')';
+                    const label = STORAGE_LABELS[data.storage_type] || data.storage_type;
+                    stypeEl.textContent = label + ' (' + formatStorage(data.total_bytes) + ')';
                 }
                 if (sfreeEl && data.free_bytes !== undefined) {
-                    sfreeEl.textContent = formatBytes(data.free_bytes);
+                    sfreeEl.textContent = formatStorage(data.free_bytes);
+                }
+                const fwEl = document.getElementById('fwVersions');
+                if (fwEl) {
+                    fwEl.textContent = 'Firmware: transmitter ' + (data.tx_fw || '-') +
+                        ' | receiver ' + (data.fw || '-');
                 }
             } else if (res.status === 401) {
                 sessionStorage.removeItem('token');
@@ -173,7 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
         statusInterval = setInterval(pollStatus, 3000);
     }
 
-    // â”€â”€â”€ Receiver File List â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Receiver File List ────────────────────────────────────────────
     const receiverFileList = document.getElementById('receiverFileList');
     const refreshFilesBtn = document.getElementById('refreshFilesBtn');
 
@@ -186,10 +212,9 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (res.ok) {
                 const data = await res.json();
-                if (data.storage_available === false && data.reason === 'usb_active') {
-                    receiverFileList.innerHTML = '<p class="text-warning">Storage busy (USB host connected). Unplug USB to browse/transfer files.</p>';
-                    return;
-                }
+                // cached = the machine owns the drive; list is the receiver's last snapshot
+                const note = document.getElementById('fileListNote');
+                if (note) note.style.display = data.cached ? 'block' : 'none';
                 if (!data.files || data.files.length === 0) {
                     receiverFileList.innerHTML = '<p class="text-muted">No files on storage.</p>';
                     return;
@@ -197,11 +222,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 let html = '<ul class="file-items-list">';
                 data.files.forEach(f => {
                     html += `<li class="d-flex justify-between align-center">
-                        <span class="file-name">${f.name}</span>
+                        <span class="file-name">${escapeHtml(f.name)}</span>
                         <span class="file-size text-muted">${formatBytes(f.size)}</span>
                     </li>`;
                 });
                 html += '</ul>';
+                if (data.truncated) html += '<p class="text-muted">More files on storage than shown.</p>';
                 receiverFileList.innerHTML = html;
             } else {
                 receiverFileList.innerHTML = '<p class="text-error">Error: Receiver not responding</p>';
@@ -216,26 +242,43 @@ document.addEventListener('DOMContentLoaded', () => {
         loadReceiverFiles();
     }
 
-    // â”€â”€â”€ Clear Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Clear Storage ──────────────────────────────────────────────────
     const clearBtn = document.getElementById('clearReceiverBtn');
     if (clearBtn) {
+        const sendWipe = (force) => {
+            const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+            if (force) headers['X-Force'] = '1';
+            return fetch('/receiver_clear', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ confirm: 'WIPE' })
+            });
+        };
         clearBtn.addEventListener('click', async () => {
-            if (!confirm('Permanently delete all files from receiver storage?')) return;
-            
+            const typed = prompt('Permanently delete ALL files from receiver storage?\nType WIPE to continue:');
+            if (typed !== 'WIPE') {
+                if (typed !== null) showFeedback('Wipe cancelled: you must type WIPE exactly.', 'error');
+                return;
+            }
+
             clearBtn.disabled = true;
             try {
-                const res = await fetch('/receiver_clear', {
-                    method: 'POST',
-                    headers: { 'Authorization': 'Bearer ' + token }
-                });
+                let res = await sendWipe(false);
+                if (res.status === 423 &&
+                    confirm('Machine is reading – stop the job or confirm it\'s idle.\nWipe anyway?')) {
+                    res = await sendWipe(true);
+                }
                 if (res.ok) {
-                    showFeedback('âœ… Receiver storage cleared successfully.', 'success');
+                    showFeedback('✅ Receiver storage cleared successfully.', 'success');
                     loadReceiverFiles();
+                    pollStatus();
+                } else if (res.status === 423) {
+                    showFeedback('Wipe cancelled: machine is reading the drive.', 'error');
                 } else {
-                    showFeedback('âŒ Failed to clear receiver storage.', 'error');
+                    showFeedback('❌ Failed to clear receiver storage.', 'error');
                 }
             } catch (e) {
-                showFeedback('âŒ Network error clearing receiver.', 'error');
+                showFeedback('❌ Network error clearing receiver.', 'error');
             } finally {
                 clearBtn.disabled = false;
             }
@@ -274,7 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // â”€â”€â”€ File Selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── File Selection ─────────────────────────────────────────────────
     const dropZone = document.getElementById('dropZone');
     const fileInput = document.getElementById('fileInput');
     const uploadBtn = document.getElementById('uploadBtn');
@@ -336,10 +379,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function handleFileSelect(file) {
-        const validExts = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso'];
         const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
 
-        if (!validExts.includes(ext)) {
+        if (!VALID_EXTS.includes(ext)) {
             if (!confirm('Warning: "' + ext + '" is not a standard machine program extension. Proceed anyway?')) {
                 currentFile = null;
                 uploadBtn.disabled = true;
@@ -375,7 +417,7 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadFeedback.style.display = 'none';
     }
 
-    // â”€â”€â”€ Upload Logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Upload Logic ───────────────────────────────────────────────────
     // Machine-busy retry: keep the refused file so the confirm button can resend it
     const forceUploadBtn = document.getElementById('forceUploadBtn');
     let busyRetryFile = null;
@@ -430,36 +472,37 @@ document.addEventListener('DOMContentLoaded', () => {
             xhr.onload = () => {
                 if (xhr.status === 200) {
                     updateProgress(100, 'Transfer Complete!');
-                    showFeedback('âœ… File transferred and verified successfully!', 'success');
+                    showFeedback('✅ File transferred and verified successfully!', 'success');
                     loadReceiverFiles();
+                    pollStatus(); // refresh free/total space
                 } else if (xhr.status === 423) {
                     showFeedback('Machine is reading – stop the job or confirm it\'s idle', 'error');
                     busyRetryFile = currentFile;
                     if (forceUploadBtn) forceUploadBtn.style.display = 'block';
                 } else if (xhr.status === 503) {
-                    showFeedback('âŒ Receiver is busy. Please wait a moment and try again.', 'error');
+                    showFeedback('❌ Receiver is busy. Please wait a moment and try again.', 'error');
                 } else if (xhr.status === 400 && xhr.responseText) {
                     // Receiver's reason (invalid filename, checksum mismatch, ...)
                     showFeedback('Rejected: ' + xhr.responseText, 'error');
                 } else if (xhr.status === 400) {
-                    showFeedback('âŒ Checksum verification failed. Please retry.', 'error');
+                    showFeedback('❌ Checksum verification failed. Please retry.', 'error');
                 } else if (xhr.status === 401) {
-                    showFeedback('âŒ Session expired. Please login again.', 'error');
+                    showFeedback('❌ Session expired. Please login again.', 'error');
                     setTimeout(() => { window.location.href = 'index.html'; }, 2000);
                 } else {
-                    showFeedback('âŒ Transfer failed: ' + (xhr.responseText || 'Unknown error'), 'error');
+                    showFeedback('❌ Transfer failed: ' + (xhr.responseText || 'Unknown error'), 'error');
                 }
                 resetUploadUI();
                 currentXhr = null;
             };
 
             xhr.onerror = () => {
-                showFeedback('âŒ Network error during upload. Check Wi-Fi connection.', 'error');
+                showFeedback('❌ Network error during upload. Check Wi-Fi connection.', 'error');
                 resetUploadUI();
             };
 
             xhr.ontimeout = () => {
-                showFeedback('âŒ Upload timed out. File may be too large or connection lost.', 'error');
+                showFeedback('❌ Upload timed out. File may be too large or connection lost.', 'error');
                 resetUploadUI();
             };
 
@@ -469,7 +512,7 @@ document.addEventListener('DOMContentLoaded', () => {
             xhr.send(currentFile);
 
         } catch (error) {
-            showFeedback('âŒ Error processing file: ' + error.message, 'error');
+            showFeedback('❌ Error processing file: ' + error.message, 'error');
             resetUploadUI();
         }
     }

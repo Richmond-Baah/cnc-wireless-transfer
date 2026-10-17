@@ -17,6 +17,8 @@
 #include "nvs.h"
 #include "esp_system.h"
 #include "esp_random.h"
+#include "esp_app_desc.h"
+#include <sys/stat.h>
 static const char *TAG = "FILE_RCV";
 #define STORAGE_PATH storage_manager_get_base_path()
 
@@ -54,6 +56,104 @@ static void drain_request_body(httpd_req_t *req) {
         if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
         if (r <= 0) break;
         remaining -= r;
+    }
+}
+
+// Host busy guard: the machine read the drive recently (likely running a job
+// from it). Sends 423 {"error":"machine_busy"} and returns true unless the
+// request carries X-Force: 1.
+static bool reject_if_machine_busy(httpd_req_t *req) {
+    char force_hdr[4] = {0};
+    bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr, sizeof(force_hdr)) == ESP_OK &&
+                 strcmp(force_hdr, "1") == 0;
+    if (force || usb_msc_ms_since_host_read() >= 10000) {
+        return false;
+    }
+    ESP_LOGW(TAG, "Host read %lu ms ago; refusing %s (machine_busy)",
+             (unsigned long)usb_msc_ms_since_host_read(), req->uri);
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_send(req, "{\"error\":\"machine_busy\"}", HTTPD_RESP_USE_STRLEN);
+    return true;
+}
+
+// ─── File list / storage-info cache ───────────────────────────────────────
+// USB MSC owns the storage most of the time, so the file list and total/free
+// space are snapshotted whenever FatFS is mounted (boot, finalize, wipe,
+// format) and served from RAM while the host has the drive.
+#define FILE_CACHE_MAX 48
+typedef struct {
+    char name[128];
+    uint32_t size;
+} cached_file_t;
+static cached_file_t s_file_cache[FILE_CACHE_MAX];
+static int s_file_cache_count = 0;
+static bool s_file_cache_truncated = false;
+static bool s_file_cache_valid = false;
+static uint64_t s_cache_total = 0;
+static uint64_t s_cache_free = 0;
+
+// True if the storage that transfers target (SD if present, else flash) has FatFS mounted.
+static bool active_storage_mounted(void) {
+    return storage_manager_is_sd_present() ? sd_card_is_mounted() : storage_manager_is_flash_mounted();
+}
+
+static void clear_file_cache(void) {
+    s_file_cache_count = 0;
+    s_file_cache_truncated = false;
+    s_cache_total = 0;
+    s_cache_free = 0;
+    s_file_cache_valid = true;
+}
+
+// Requires active_storage_mounted().
+static void snapshot_storage(void) {
+    clear_file_cache();
+    DIR *dir = opendir(STORAGE_PATH);
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            size_t len = strlen(entry->d_name);
+            if (entry->d_name[0] == '.' || (len > 4 && strcmp(entry->d_name + len - 4, ".tmp") == 0)) {
+                continue; // hidden files and in-flight staging files
+            }
+            if (s_file_cache_count >= FILE_CACHE_MAX) {
+                s_file_cache_truncated = true;
+                break;
+            }
+            cached_file_t *c = &s_file_cache[s_file_cache_count++];
+            strlcpy(c->name, entry->d_name, sizeof(c->name));
+            char filepath[300];
+            snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_PATH, entry->d_name);
+            struct stat st;
+            c->size = (stat(filepath, &st) == 0) ? (uint32_t)st.st_size : 0;
+        }
+        closedir(dir);
+    }
+    uint64_t total = 0, free_bytes = 0;
+    const char *stype = NULL;
+    if (storage_manager_get_info(&total, &free_bytes, &stype) == ESP_OK) {
+        s_cache_total = total;
+        s_cache_free = free_bytes;
+    }
+}
+
+// Mounts the active storage if needed, snapshots it, and releases it again.
+// Only call while the USB host cannot be accessing the storage.
+void file_receiver_refresh_cache(void) {
+    if (storage_manager_is_sd_present() && sd_card_has_card_error()) {
+        clear_file_cache(); // unreadable card: nothing to list
+        return;
+    }
+    bool mounted_here = false;
+    if (!active_storage_mounted()) {
+        mounted_here = (storage_manager_remount() == ESP_OK) && active_storage_mounted();
+    }
+    if (active_storage_mounted()) {
+        snapshot_storage();
+    }
+    if (mounted_here) {
+        storage_manager_flush_and_release_for_usb();
     }
 }
 
@@ -175,18 +275,8 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // Host busy guard: the machine read the drive recently (likely running a
-    // job from it). Refuse to yank USB unless the sender confirms with X-Force: 1.
-    char force_hdr[4] = {0};
-    bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr, sizeof(force_hdr)) == ESP_OK &&
-                 strcmp(force_hdr, "1") == 0;
-    if (!force && usb_msc_ms_since_host_read() < 10000) {
-        ESP_LOGW(TAG, "Host read %lu ms ago; refusing /prepare (machine_busy)",
-                 (unsigned long)usb_msc_ms_since_host_read());
+    if (reject_if_machine_busy(req)) {
         cJSON_Delete(json);
-        httpd_resp_set_status(req, "423 Locked");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"error\":\"machine_busy\"}", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
 
@@ -268,7 +358,7 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
 
     ESP_LOGI(TAG, "Ready to receive staging file: %s (final: %s, expected MD5: %s)", active_filename, final_filename, expected_md5);
     
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
 
     cJSON_Delete(json);
@@ -299,7 +389,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         // Retry of a chunk already written (its response was lost): acknowledge, don't re-append.
         ESP_LOGW(TAG, "Duplicate chunk %ld (expected %d) ignored", chunk_index, expected_chunk_index);
         drain_request_body(req);
-        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
         httpd_resp_send(req, "{\"status\":\"duplicate\"}", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
@@ -343,7 +433,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
     }
     expected_chunk_index++;
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
@@ -429,6 +519,8 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "File verified and atomically committed: %s", final_filename);
     state_machine_transition(STATE_FILE_READY);
 
+    snapshot_storage(); // still mounted: refresh cached file list + free space
+
     // CRITICAL: Flush metadata to physical sectors, then unmount FatFS so the
     // storage is back in raw USB MSC mode before the host is reconnected.
     storage_manager_flush_and_release_for_usb();
@@ -443,7 +535,7 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     vTaskDelay(pdMS_TO_TICKS(1500));
     usb_msc_connect();
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
@@ -463,7 +555,7 @@ static esp_err_t cancel_post_handler(httpd_req_t *req) {
     storage_manager_flush_and_release_for_usb();
     usb_msc_connect();
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
@@ -472,20 +564,49 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     uint64_t total = 0, free_bytes = 0;
     const char *stype = "Unknown";
     storage_manager_get_info(&total, &free_bytes, &stype);
+    if (!active_storage_mounted() && s_file_cache_valid) {
+        // USB owns the storage: report the last snapshot, not a stale/other volume
+        total = s_cache_total;
+        free_bytes = s_cache_free;
+    }
 
-    char resp[256];
-    snprintf(resp, sizeof(resp), 
-             "{\"state\":\"%s\",\"storage_type\":\"%s\",\"total_bytes\":%llu,\"free_bytes\":%llu,\"card_error\":%s}",
+    char resp[320];
+    snprintf(resp, sizeof(resp),
+             "{\"state\":\"%s\",\"storage_type\":\"%s\",\"total_bytes\":%llu,\"free_bytes\":%llu,\"card_error\":%s,\"fw\":\"%s\"}",
              state_to_string(state_machine_get()), stype, total, free_bytes,
-             sd_card_has_card_error() ? "true" : "false");
-    httpd_resp_set_type(req, "application/json");
+             sd_card_has_card_error() ? "true" : "false",
+             esp_app_get_description()->version);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
 static esp_err_t clear_files_handler(httpd_req_t *req) {
+    // Require {"confirm":"WIPE"} so a stray POST can't delete everything
+    char body[64] = {0};
+    int len = 0;
+    if (req->content_len > 0 && req->content_len < (int)sizeof(body)) {
+        while (len < req->content_len) {
+            int r = httpd_req_recv(req, body + len, req->content_len - len);
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            if (r <= 0) break;
+            len += r;
+        }
+    }
+    cJSON *json = (len == req->content_len && len > 0) ? cJSON_Parse(body) : NULL;
+    cJSON *confirm = json ? cJSON_GetObjectItem(json, "confirm") : NULL;
+    bool confirmed = confirm && confirm->valuestring && strcmp(confirm->valuestring, "WIPE") == 0;
+    cJSON_Delete(json);
+    if (!confirmed) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Confirmation required: type WIPE");
+        return ESP_FAIL;
+    }
+    if (reject_if_machine_busy(req)) {
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "Clearing all files in %s", STORAGE_PATH);
-    
+
     // Disconnect USB so host doesn't interfere
     usb_msc_disconnect();
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -514,6 +635,7 @@ static esp_err_t clear_files_handler(httpd_req_t *req) {
         remove(filepath);
     }
     closedir(dir);
+    snapshot_storage(); // still mounted: cache the (now empty) list + free space
 
     // Flush directory entries to physical media, then release SD for USB mode
     ESP_LOGI(TAG, "Flushing clear operation to storage...");
@@ -523,7 +645,7 @@ static esp_err_t clear_files_handler(httpd_req_t *req) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     usb_msc_connect();
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"Storage cleared\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
@@ -543,6 +665,8 @@ static esp_err_t format_storage_handler(httpd_req_t *req) {
     // Flash format leaves FatFS mounted (USB would report not-ready): release
     // storage to raw USB MSC mode before reconnecting the host on every path.
     storage_manager_flush_and_release_for_usb();
+    // USB is still disconnected: snapshot the fresh volume (empty list, new sizes)
+    file_receiver_refresh_cache();
 
     if (ret != ESP_OK) {
         usb_msc_notify_change();
@@ -552,69 +676,41 @@ static esp_err_t format_storage_handler(httpd_req_t *req) {
 
     usb_msc_notify_change();
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"Storage formatted\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
 static esp_err_t list_get_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
 
-    // Only block listing if the USB host has actually enumerated and mounted us.
-    // If USB cable is plugged into a power-only port or PC is asleep, 
-    // s_usb_mounted_by_host is false, allowing normal Wi-Fi file listing/transfer.
-    if (usb_msc_is_host_mounted()) {
-        httpd_resp_sendstr_chunk(req, "{\"files\":[],\"storage_available\":false,\"reason\":\"usb_active\"}");
-        httpd_resp_sendstr_chunk(req, NULL); // End of chunks
-        return ESP_OK;
-    }
-
-    // USB not mounted: it is safe to mount storage for listing. If we mount it
-    // here, release it afterwards so USB MSC regains ownership.
-    bool mounted_here = false;
-    if (!storage_manager_fatfs_available()) {
-        mounted_here = (storage_manager_remount() == ESP_OK);
+    // While the USB host has the drive, never mount it: serve the snapshot
+    // taken at the last transfer/wipe/format/boot. Otherwise list live
+    // (mounting and releasing the storage if needed).
+    bool cached = usb_msc_is_host_mounted();
+    if (!cached) {
+        file_receiver_refresh_cache();
     }
 
     httpd_resp_sendstr_chunk(req, "{\"files\":[");
-
-    bool first = true;
-    DIR *dir = opendir(STORAGE_PATH);
-    if (dir) {
-        struct dirent *entry;
-        while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_name[0] == '.') continue;
-            
-            // Get file size using stat() instead of opening the file
-            char filepath[300];
-            snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_PATH, entry->d_name);
-            
-            struct stat st;
-            long fsize = 0;
-            if (stat(filepath, &st) == 0) {
-                fsize = st.st_size;
-            }
-            
-            char entry_buf[512];
-            snprintf(entry_buf, sizeof(entry_buf), "%s{\"name\":\"%s\",\"size\":%ld}", 
-                     first ? "" : ",", entry->d_name, fsize);
-            httpd_resp_sendstr_chunk(req, entry_buf);
-            first = false;
-        }
-        closedir(dir);
+    for (int i = 0; i < s_file_cache_count; i++) {
+        // FAT names cannot contain " or \, so no JSON escaping is needed
+        char entry_buf[192];
+        snprintf(entry_buf, sizeof(entry_buf), "%s{\"name\":\"%s\",\"size\":%lu}",
+                 i ? "," : "", s_file_cache[i].name, (unsigned long)s_file_cache[i].size);
+        httpd_resp_sendstr_chunk(req, entry_buf);
     }
-
-    if (mounted_here) {
-        storage_manager_flush_and_release_for_usb();
-    }
-
-    httpd_resp_sendstr_chunk(req, "]}");
+    char tail[96];
+    snprintf(tail, sizeof(tail), "],\"cached\":%s,\"truncated\":%s,\"storage_available\":%s}",
+             cached ? "true" : "false", s_file_cache_truncated ? "true" : "false",
+             s_file_cache_valid ? "true" : "false");
+    httpd_resp_sendstr_chunk(req, tail);
     httpd_resp_sendstr_chunk(req, NULL); // End of chunks
     return ESP_OK;
 }
 
 static const char INDEX_HTML[] =
-"<!DOCTYPE html><html><head><title>CNC Files</title>"
+"<!DOCTYPE html><html><head><meta charset='utf-8'><title>CNC Files</title>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<style>"
 "body{font-family:Arial;margin:40px;background:#1a1a2e;color:#fff}"
@@ -634,7 +730,9 @@ static const char INDEX_HTML[] =
 "</div>"
 "<ul id='filelist'><li>Loading...</li></ul>"
 "<script>"
-"function clearAll(){if(confirm('Are you sure you want to delete all files?')){fetch('/clear',{method:'POST'}).then(()=>location.reload());}}"
+"function clearAll(){if(prompt('Type WIPE to delete all files')!=='WIPE')return;"
+"fetch('/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:'WIPE'})})"
+".then(r=>{if(r.status==423)alert('Machine is reading the drive - stop the job first.');location.reload();});}"
 "fetch('/list').then(r=>r.json()).then(d=>{"
 "  var l=document.getElementById('filelist');"
 "  if(!d.files || d.files.length==0){l.innerHTML='<li>No files uploaded</li>';return;}"
@@ -647,7 +745,7 @@ static const char INDEX_HTML[] =
 "</script></body></html>";
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
@@ -749,7 +847,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req) {
     }
     cJSON_Delete(json);
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
 
     xTaskCreate(restart_delayed_task, "restart_task", 2048, NULL, 5, NULL);

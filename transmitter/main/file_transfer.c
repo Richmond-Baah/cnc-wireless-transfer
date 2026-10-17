@@ -30,7 +30,7 @@ bool file_transfer_last_refused(void) {
 // ─── Cached receiver status ─────────────────────────────────────────────────
 // The background task writes here; the HTTP handler reads from here.
 // This prevents the web server from ever blocking on a slow receiver HTTP call.
-#define STATUS_CACHE_LEN 256
+#define STATUS_CACHE_LEN 384
 static char     s_status_cache[STATUS_CACHE_LEN] = "{\"state\":\"OFFLINE\"}";
 static SemaphoreHandle_t s_status_mutex = NULL;
 
@@ -159,7 +159,7 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
     s_last_refused = true;
     led_set_state(LED_STATE_IDLE);
     httpd_resp_set_status(req, "423 Locked");
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
     return false;
   }
@@ -332,7 +332,7 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
   ESP_LOGI(TAG, "File successfully transferred and verified.");
   led_set_state(LED_STATE_SUCCESS);
   s_abort_transfer = false;
-  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_sendstr(req, "{\"status\":\"success\"}");
   return true;
 }
@@ -358,7 +358,7 @@ bool file_transfer_is_receiver_online(void) {
   return online;
 }
 
-int file_transfer_clear_receiver(void) {
+int file_transfer_clear_receiver(bool force) {
   char clear_url[128];
   get_receiver_url("/clear", clear_url, sizeof(clear_url));
 
@@ -368,6 +368,12 @@ int file_transfer_clear_receiver(void) {
       .timeout_ms = 15000,
   };
   esp_http_client_handle_t client = esp_http_client_init(&config);
+  static const char confirm_body[] = "{\"confirm\":\"WIPE\"}";
+  esp_http_client_set_header(client, "Content-Type", "application/json");
+  esp_http_client_set_post_field(client, confirm_body, sizeof(confirm_body) - 1);
+  if (force) {
+    esp_http_client_set_header(client, "X-Force", "1");
+  }
 
   esp_err_t err = esp_http_client_perform(client);
   int status_code = 500;

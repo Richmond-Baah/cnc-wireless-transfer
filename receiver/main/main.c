@@ -79,6 +79,11 @@ void app_main(void) {
     storage_manager_prepare_for_usb();
     ESP_LOGI(TAG, "Step 8b: DONE");
 
+    // USB is not connected yet: safe to snapshot the file list + free space
+    ESP_LOGI(TAG, "Step 8c: Caching file list...");
+    file_receiver_refresh_cache();
+    ESP_LOGI(TAG, "Step 8c: DONE");
+
     ESP_LOGI(TAG, "Step 9: USB MSC init (LAST STEP)...");
     usb_msc_init();
     ESP_LOGI(TAG, "Step 9: USB init DONE - should enumerate NOW");

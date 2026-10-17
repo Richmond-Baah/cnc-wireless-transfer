@@ -7,6 +7,7 @@
 #include "esp_netif.h"
 #include "esp_mac.h"
 #include "esp_http_client.h"
+#include "esp_app_desc.h"
 
 #include "auth.h"
 #include "sdkconfig.h"
@@ -85,11 +86,11 @@ static esp_err_t serve_spiffs_file(httpd_req_t *req, const char *filepath) {
   // Set MIME type
   const char *ext = strrchr(filepath, '.');
   if (ext && strcmp(ext, ".html") == 0)
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
   else if (ext && strcmp(ext, ".css") == 0)
-    httpd_resp_set_type(req, "text/css");
+    httpd_resp_set_type(req, "text/css; charset=utf-8");
   else if (ext && (strcmp(ext, ".js") == 0))
-    httpd_resp_set_type(req, "application/javascript");
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
 
   // Read entire file into memory and send in one shot.
   // All SPIFFS web assets are small (< 20KB), so this is safe.
@@ -173,7 +174,7 @@ static esp_err_t login_post_handler(httpd_req_t *req) {
     const char *token = auth_create_session();
     char resp[128];
     snprintf(resp, sizeof(resp), "{\"token\":\"%s\"}", token);
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
   } else {
     httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Invalid credentials");
@@ -261,11 +262,17 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  char state_str[256] = {0}; // matches STATUS_CACHE_LEN; receiver JSON can exceed 128
+  char state_str[384] = {0}; // matches STATUS_CACHE_LEN
   file_transfer_get_receiver_status(state_str, sizeof(state_str));
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, state_str, HTTPD_RESP_USE_STRLEN);
+  // Prepend the transmitter's own firmware version to the receiver's JSON object
+  char resp[448];
+  const char *body = (state_str[0] == '{') ? state_str + 1 : "}";
+  snprintf(resp, sizeof(resp), "{\"tx_fw\":\"%s\"%s%s",
+           esp_app_get_description()->version, (body[0] == '}') ? "" : ",", body);
+
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -320,7 +327,7 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
            wifi_mode, ap_ssid, ap_pass, sta_ssid, sta_pass, auth_user,
            auth_pass, receiver_ip);
 
-  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -450,7 +457,7 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
 
   cJSON_Delete(json);
 
-  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"Restarting...\"}",
                   HTTPD_RESP_USE_STRLEN);
 
@@ -464,9 +471,44 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// Reads a small JSON body and checks it is {"confirm":"<word>"}.
+// Sends 400 and returns false otherwise.
+static bool body_confirms(httpd_req_t *req, const char *word) {
+  char body[64] = {0};
+  int cur_len = 0;
+  if (req->content_len > 0 && req->content_len < (int)sizeof(body)) {
+    while (cur_len < req->content_len) {
+      int received = httpd_req_recv(req, body + cur_len, req->content_len - cur_len);
+      if (received == HTTPD_SOCK_ERR_TIMEOUT)
+        continue;
+      if (received <= 0)
+        break;
+      cur_len += received;
+    }
+  }
+  bool confirmed = false;
+  if (cur_len == req->content_len && cur_len > 0) {
+    cJSON *json = cJSON_Parse(body);
+    cJSON *confirm = json ? cJSON_GetObjectItem(json, "confirm") : NULL;
+    confirmed = confirm && confirm->valuestring && strcmp(confirm->valuestring, word) == 0;
+    cJSON_Delete(json);
+  }
+  if (!confirmed) {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Confirmation required: type %s", word);
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+  }
+  return confirmed;
+}
+
+// Proxies a wipe to the receiver. Body must be {"confirm":"WIPE"}; X-Force: 1
+// overrides the receiver's machine-busy guard.
 static esp_err_t clear_post_handler(httpd_req_t *req) {
   if (!is_authorized(req)) {
     httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    return ESP_FAIL;
+  }
+  if (!body_confirms(req, "WIPE")) {
     return ESP_FAIL;
   }
 
@@ -475,10 +517,20 @@ static esp_err_t clear_post_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  char force_hdr[4] = {0};
+  bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr,
+                                           sizeof(force_hdr)) == ESP_OK &&
+               strcmp(force_hdr, "1") == 0;
+
   // We call the clear endpoint to delete all files from the SD card.
-  int code = file_transfer_clear_receiver();
+  int code = file_transfer_clear_receiver(force);
   if (code == 200) {
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+  } else if (code == 423) {
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
   } else {
     char err[64];
     snprintf(err, sizeof(err), "{\"status\":\"error\",\"code\":%d}", code);
@@ -495,31 +547,7 @@ static esp_err_t format_post_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  char body[64] = {0};
-  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body)) {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Confirmation required");
-    return ESP_FAIL;
-  }
-  int cur_len = 0;
-  while (cur_len < req->content_len) {
-    int received = httpd_req_recv(req, body + cur_len, req->content_len - cur_len);
-    if (received <= 0) {
-      if (received == HTTPD_SOCK_ERR_TIMEOUT)
-        continue;
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
-      return ESP_FAIL;
-    }
-    cur_len += received;
-  }
-  body[cur_len] = '\0';
-
-  cJSON *json = cJSON_Parse(body);
-  cJSON *confirm = json ? cJSON_GetObjectItem(json, "confirm") : NULL;
-  bool confirmed = confirm && confirm->valuestring &&
-                   strcmp(confirm->valuestring, "FORMAT") == 0;
-  cJSON_Delete(json);
-  if (!confirmed) {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Confirmation required");
+  if (!body_confirms(req, "FORMAT")) {
     return ESP_FAIL;
   }
 
@@ -530,7 +558,7 @@ static esp_err_t format_post_handler(httpd_req_t *req) {
 
   int code = file_transfer_format_receiver();
   if (code == 200) {
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
   } else {
     char err[64];
@@ -546,7 +574,7 @@ static esp_err_t upload_cancel_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     file_transfer_abort();
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_sendstr(req, "{\"status\":\"aborting\"}");
     return ESP_OK;
 }
@@ -558,20 +586,20 @@ static esp_err_t receiver_list_get_handler(httpd_req_t *req) {
     }
 
     if (!file_transfer_is_receiver_online()) {
-        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
         httpd_resp_sendstr(req, "{\"files\":[],\"storage_available\":false,\"reason\":\"receiver_offline\"}");
         return ESP_OK;
     }
 
-    char *list_buf = malloc(4096);
+    char *list_buf = malloc(8192); // receiver caches up to 48 names
     if (!list_buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
 
-    int code = file_transfer_get_receiver_files(list_buf, 4096);
+    int code = file_transfer_get_receiver_files(list_buf, 8192);
     if (code == 200) {
-        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
         httpd_resp_sendstr(req, list_buf);
     } else {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receiver list failed");
@@ -634,7 +662,7 @@ static esp_err_t debug_get_handler(httpd_req_t *req) {
 
   pos += snprintf(resp + pos, sizeof(resp) - pos, "</body></html>");
 
-  httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
   httpd_resp_send(req, resp, pos);
   return ESP_OK;
 }
