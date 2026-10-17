@@ -252,7 +252,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             formatBtn.disabled = true;
-            showFeedback('Formatting receiver card... this can take up to 2 minutes.', 'success');
+            showFeedback('Formatting – don\'t unplug the receiver (can take up to 2 minutes)...', 'success');
             try {
                 const res = await fetch('/receiver_format', {
                     method: 'POST',
@@ -376,8 +376,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // â”€â”€â”€ Upload Logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    async function startUpload() {
+    // Machine-busy retry: keep the refused file so the confirm button can resend it
+    const forceUploadBtn = document.getElementById('forceUploadBtn');
+    let busyRetryFile = null;
+    if (forceUploadBtn) {
+        forceUploadBtn.addEventListener('click', () => {
+            forceUploadBtn.style.display = 'none';
+            if (!busyRetryFile) return;
+            currentFile = busyRetryFile;
+            busyRetryFile = null;
+            startUpload(true);
+        });
+    }
+
+    async function startUpload(force) {
         if (!currentFile) return;
+        force = (force === true); // click handler passes an Event
+        if (forceUploadBtn) forceUploadBtn.style.display = 'none';
 
         uploadBtn.disabled = true;
         fileInput.disabled = true;
@@ -403,6 +418,7 @@ document.addEventListener('DOMContentLoaded', () => {
             xhr.setRequestHeader('X-Filename', currentFile.name);
             xhr.setRequestHeader('X-Filesize', currentFile.size.toString());
             xhr.setRequestHeader('X-MD5', md5);
+            if (force) xhr.setRequestHeader('X-Force', '1');
 
             xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
@@ -416,6 +432,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     updateProgress(100, 'Transfer Complete!');
                     showFeedback('âœ… File transferred and verified successfully!', 'success');
                     loadReceiverFiles();
+                } else if (xhr.status === 423) {
+                    showFeedback('Machine is reading – stop the job or confirm it\'s idle', 'error');
+                    busyRetryFile = currentFile;
+                    if (forceUploadBtn) forceUploadBtn.style.display = 'block';
                 } else if (xhr.status === 503) {
                     showFeedback('âŒ Receiver is busy. Please wait a moment and try again.', 'error');
                 } else if (xhr.status === 400) {

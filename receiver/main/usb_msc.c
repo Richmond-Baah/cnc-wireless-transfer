@@ -15,6 +15,8 @@
 
 static const char *TAG = "USB_MSC";
 static bool s_usb_mounted_by_host = false;
+static volatile TickType_t s_last_host_read_tick = 0; // last SCSI READ10 from the host
+static volatile bool s_host_read_seen = false;
 
 #define TOTAL_LUNS 1
 
@@ -117,6 +119,8 @@ bool tud_msc_is_writable_cb(uint8_t lun) {
 
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
     (void)lun;
+    s_last_host_read_tick = xTaskGetTickCount();
+    s_host_read_seen = true;
     if (current_sd_card != NULL) {
         if (!sd_card_acquire_io()) {
             ESP_LOGE(TAG, "READ FAILED: could not acquire SD IO lock (FatFS busy?)");
@@ -368,6 +372,13 @@ void usb_msc_init(void) {
 
 esp_err_t usb_msc_format_storage(void) {
     return storage_manager_format();
+}
+
+uint32_t usb_msc_ms_since_host_read(void) {
+    if (!s_host_read_seen) {
+        return UINT32_MAX;
+    }
+    return pdTICKS_TO_MS(xTaskGetTickCount() - s_last_host_read_tick);
 }
 
 bool usb_msc_is_host_mounted(void) {

@@ -151,6 +151,21 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    // Host busy guard: the machine read the drive recently (likely running a
+    // job from it). Refuse to yank USB unless the sender confirms with X-Force: 1.
+    char force_hdr[4] = {0};
+    bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr, sizeof(force_hdr)) == ESP_OK &&
+                 strcmp(force_hdr, "1") == 0;
+    if (!force && usb_msc_ms_since_host_read() < 10000) {
+        ESP_LOGW(TAG, "Host read %lu ms ago; refusing /prepare (machine_busy)",
+                 (unsigned long)usb_msc_ms_since_host_read());
+        cJSON_Delete(json);
+        httpd_resp_set_status(req, "423 Locked");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"machine_busy\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
     // Card was unreadable: retry the mount (USB off so the host can't race it)
     if (sd_card_has_card_error()) {
         usb_msc_disconnect();
@@ -500,6 +515,10 @@ static esp_err_t format_storage_handler(httpd_req_t *req) {
         // Freshly formatted card: re-verify it so CARD_ERROR clears (-> IDLE)
         sd_card_retry_card_error();
     }
+
+    // Flash format leaves FatFS mounted (USB would report not-ready): release
+    // storage to raw USB MSC mode before reconnecting the host on every path.
+    storage_manager_flush_and_release_for_usb();
 
     if (ret != ESP_OK) {
         usb_msc_notify_change();

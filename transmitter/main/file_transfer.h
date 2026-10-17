@@ -9,7 +9,10 @@
 // Forward incoming multipart body to the receiver in chunks
 bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
                                        const char *expected_md5,
-                                       size_t filesize);
+                                       size_t filesize, bool force);
+// True if the last forward was refused by the receiver with 423 machine_busy
+// (a 423 response has already been sent to the client).
+bool file_transfer_last_machine_busy(void);
 
 // Get the current operational status of the receiver (polls receiver endpoint)
 int file_transfer_get_receiver_status(char *out_state_str, size_t max_len);

@@ -21,6 +21,11 @@ static const char *TAG = "TRANSFER";
 
 static char scratch_buf[SCRATCH_BUFSIZE];
 static volatile bool s_abort_transfer = false;
+static bool s_last_machine_busy = false;
+
+bool file_transfer_last_machine_busy(void) {
+  return s_last_machine_busy;
+}
 
 // ─── Cached receiver status ─────────────────────────────────────────────────
 // The background task writes here; the HTTP handler reads from here.
@@ -106,8 +111,9 @@ void get_receiver_url(const char *path, char *out_url, size_t max_len) {
 
 bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
                                        const char *expected_md5,
-                                       size_t filesize) {
+                                       size_t filesize, bool force) {
   s_abort_transfer = false;
+  s_last_machine_busy = false;
   ESP_LOGI(TAG, "Starting transfer for %s (%u bytes, md5=%s)", filename,
            (unsigned)filesize, expected_md5);
   led_set_state(LED_STATE_SENDING);
@@ -122,6 +128,9 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
   esp_http_client_handle_t client = esp_http_client_init(&config);
   esp_http_client_set_method(client, HTTP_METHOD_POST);
   esp_http_client_set_header(client, "Content-Type", "application/json");
+  if (force) {
+    esp_http_client_set_header(client, "X-Force", "1");
+  }
 
   char payload[256];
   snprintf(payload, sizeof(payload),
@@ -132,6 +141,16 @@ bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
   esp_err_t err = esp_http_client_perform(client);
   int prepare_status = esp_http_client_get_status_code(client);
   esp_http_client_cleanup(client);
+
+  if (err == ESP_OK && prepare_status == 423) {
+    ESP_LOGW(TAG, "Receiver refused /prepare: machine is reading the drive");
+    s_last_machine_busy = true;
+    led_set_state(LED_STATE_IDLE);
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
+    return false;
+  }
 
   if (err != ESP_OK || prepare_status != 200) {
     ESP_LOGE(TAG, "Receiver /prepare failed. Err: %s. Code: %d",

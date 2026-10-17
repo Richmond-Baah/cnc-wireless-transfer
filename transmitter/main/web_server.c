@@ -234,10 +234,20 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
   ESP_LOGI(TAG, "Upload request: file=%s size=%u md5=%s", filename,
            (unsigned)filesize, md5);
 
+  char force_hdr[4] = {0};
+  bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr,
+                                           sizeof(force_hdr)) == ESP_OK &&
+               strcmp(force_hdr, "1") == 0;
+
   bool success =
-      file_transfer_forward_to_receiver(req, filename, md5, filesize);
+      file_transfer_forward_to_receiver(req, filename, md5, filesize, force);
   if (!success && file_transfer_is_aborted()) {
     file_transfer_clear_abort();
+    return ESP_OK;
+  }
+  if (!success && file_transfer_last_machine_busy()) {
+    // 423 already sent; return OK so httpd drains the body instead of
+    // resetting the socket (the browser would see a network error)
     return ESP_OK;
   }
   return success ? ESP_OK : ESP_FAIL;
