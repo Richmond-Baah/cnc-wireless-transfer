@@ -86,5 +86,11 @@ wl_handle_t storage_manager_get_wl_handle(void);
  */
 const char* storage_manager_get_base_path(void);
 
+/**
+ * @brief FatFS logical drive ("N:") of the mounted storage at the base path,
+ * for direct f_* calls that need FAT attributes. Returns false if not mounted.
+ */
+bool storage_manager_get_fatfs_drive(char *out, size_t len);
+
 #endif
 

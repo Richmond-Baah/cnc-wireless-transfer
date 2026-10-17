@@ -60,10 +60,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const STORAGE_LABELS = { 'SDCard': 'SD card', 'InternalFlash': 'Internal flash' };
 
-    // Storage capacities in MB below 1 GB, GB above (binary units)
+    // Storage capacities (binary units): KB below 1 MB, else MB/GB with 2 decimals
     function formatStorage(bytes) {
-        const mb = (bytes || 0) / (1024 * 1024);
-        return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb.toFixed(1) + ' MB';
+        const kb = (bytes || 0) / 1024;
+        if (kb < 1024) return kb.toFixed(kb < 10 ? 2 : 0) + ' KB';
+        const mb = kb / 1024;
+        return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(2) + ' MB';
     }
 
     function escapeHtml(s) {
@@ -221,6 +223,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 let html = '<ul class="file-items-list">';
                 data.files.forEach(f => {
+                    if (f.type === 'dir') {
+                        // Folders: icon, no size
+                        html += `<li class="d-flex align-center" style="gap: 8px;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; opacity: 0.8;"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
+                        <span class="file-name">${escapeHtml(f.name)}/</span>
+                    </li>`;
+                        return;
+                    }
                     html += `<li class="d-flex justify-between align-center">
                         <span class="file-name">${escapeHtml(f.name)}</span>
                         <span class="file-size text-muted">${formatBytes(f.size)}</span>

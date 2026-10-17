@@ -85,6 +85,7 @@ static bool reject_if_machine_busy(httpd_req_t *req) {
 typedef struct {
     char name[128];
     uint32_t size;
+    bool is_dir;
 } cached_file_t;
 static cached_file_t s_file_cache[FILE_CACHE_MAX];
 static int s_file_cache_count = 0;
@@ -109,26 +110,28 @@ static void clear_file_cache(void) {
 // Requires active_storage_mounted().
 static void snapshot_storage(void) {
     clear_file_cache();
-    DIR *dir = opendir(STORAGE_PATH);
-    if (dir) {
-        struct dirent *entry;
-        while ((entry = readdir(dir)) != NULL) {
-            size_t len = strlen(entry->d_name);
-            if (entry->d_name[0] == '.' || (len > 4 && strcmp(entry->d_name + len - 4, ".tmp") == 0)) {
-                continue; // hidden files and in-flight staging files
+    // Read the root via FatFS directly: VFS readdir/stat don't expose the
+    // HID/SYS attributes (e.g. "System Volume Information" written by Windows).
+    char drv[8];
+    FF_DIR dir;
+    FILINFO fno;
+    if (storage_manager_get_fatfs_drive(drv, sizeof(drv)) && f_opendir(&dir, drv) == FR_OK) {
+        while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+            size_t len = strlen(fno.fname);
+            if (fno.fname[0] == '.' || (fno.fattrib & (AM_HID | AM_SYS)) ||
+                (len > 4 && strcmp(fno.fname + len - 4, ".tmp") == 0)) {
+                continue; // hidden/system entries and in-flight staging files
             }
             if (s_file_cache_count >= FILE_CACHE_MAX) {
                 s_file_cache_truncated = true;
                 break;
             }
             cached_file_t *c = &s_file_cache[s_file_cache_count++];
-            strlcpy(c->name, entry->d_name, sizeof(c->name));
-            char filepath[300];
-            snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_PATH, entry->d_name);
-            struct stat st;
-            c->size = (stat(filepath, &st) == 0) ? (uint32_t)st.st_size : 0;
+            strlcpy(c->name, fno.fname, sizeof(c->name));
+            c->is_dir = (fno.fattrib & AM_DIR) != 0;
+            c->size = c->is_dir ? 0 : (uint32_t)fno.fsize;
         }
-        closedir(dir);
+        f_closedir(&dir);
     }
     uint64_t total = 0, free_bytes = 0;
     const char *stype = NULL;
@@ -696,8 +699,13 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
     for (int i = 0; i < s_file_cache_count; i++) {
         // FAT names cannot contain " or \, so no JSON escaping is needed
         char entry_buf[192];
-        snprintf(entry_buf, sizeof(entry_buf), "%s{\"name\":\"%s\",\"size\":%lu}",
-                 i ? "," : "", s_file_cache[i].name, (unsigned long)s_file_cache[i].size);
+        if (s_file_cache[i].is_dir) {
+            snprintf(entry_buf, sizeof(entry_buf), "%s{\"name\":\"%s\",\"type\":\"dir\"}",
+                     i ? "," : "", s_file_cache[i].name);
+        } else {
+            snprintf(entry_buf, sizeof(entry_buf), "%s{\"name\":\"%s\",\"type\":\"file\",\"size\":%lu}",
+                     i ? "," : "", s_file_cache[i].name, (unsigned long)s_file_cache[i].size);
+        }
         httpd_resp_sendstr_chunk(req, entry_buf);
     }
     char tail[96];

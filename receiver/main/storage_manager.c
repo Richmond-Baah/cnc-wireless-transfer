@@ -5,7 +5,10 @@
 #include "esp_vfs_fat.h"
 #include "wear_levelling.h"
 #include "diskio.h"
+#include "diskio_sdmmc.h"
+#include "diskio_wl.h"
 #include "sd_card.h"
+#include <stdio.h>
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -329,4 +332,18 @@ const char* storage_manager_get_base_path(void) {
         return "/sdcard";
     }
     return BASE_PATH;
+}
+
+bool storage_manager_get_fatfs_drive(char *out, size_t len) {
+    BYTE pdrv = 0xFF;
+    if (sd_card_is_mounted()) {
+        pdrv = ff_diskio_get_pdrv_card(current_sd_card);
+    } else if (s_flash_mounted && s_wl_handle != WL_INVALID_HANDLE) {
+        pdrv = ff_diskio_get_pdrv_wl(s_wl_handle);
+    }
+    if (pdrv == 0xFF) {
+        return false;
+    }
+    snprintf(out, len, "%u:", (unsigned)pdrv);
+    return true;
 }
