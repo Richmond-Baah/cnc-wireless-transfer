@@ -9,6 +9,7 @@
 #include "nvs.h"
 #include "dhcpserver/dhcpserver.h"
 #include "mdns.h"
+#include "esp_timer.h"
 #include <string.h>
 
 #ifndef CONFIG_CNC_DEFAULT_WIFI_SSID
@@ -26,7 +27,9 @@
 static const char *TAG = "WIFI_MGR";
 
 // STA (router) link state for /status. Written by the event task, read by httpd.
-#define STA_MAX_RETRIES 5 // then give up so channel scans stop disturbing the AP
+#define STA_MAX_RETRIES 5   // fast retries, then slow down so scans don't disturb the AP
+#define STA_SLOW_RETRY_S 60 // one attempt per minute after that
+static esp_timer_handle_t s_sta_retry_timer;
 static portMUX_TYPE s_sta_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *s_sta_state = "disabled"; // disabled|connecting|connected|failed
 static char s_sta_reason[48] = "";
@@ -74,6 +77,11 @@ static const char *sta_reason_text(uint8_t reason) {
   }
 }
 
+static void sta_slow_retry(void *arg) {
+  ESP_LOGI(TAG, "STA retry (every %d s until connected)", STA_SLOW_RETRY_S);
+  esp_wifi_connect();
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
   if (event_id == WIFI_EVENT_AP_STACONNECTED) {
@@ -101,7 +109,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
       snprintf(reason, sizeof(reason), "disconnected (reason %d)", event->reason);
     }
     // A link that worked before (router reboot) keeps retrying; a new one that
-    // never connected (bad SSID/password) gives up so the AP stays usable.
+    // never connected (bad SSID/password) drops to one try per minute so the
+    // AP stays usable between attempts.
     if (s_sta_was_connected || ++s_sta_retries < STA_MAX_RETRIES) {
       sta_set("connecting", reason, NULL);
       ESP_LOGW(TAG, "STA disconnected: %s, retrying (%d/%d)", reason,
@@ -109,8 +118,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
       esp_wifi_connect();
     } else {
       sta_set("failed", reason, NULL);
-      ESP_LOGE(TAG, "STA connect FAILED: %s. Giving up; AP 192.168.4.1 stays up. "
-                    "Fix router SSID/password in Settings.", reason);
+      ESP_LOGE(TAG, "STA connect FAILED: %s. Retrying in %d s; AP 192.168.4.1 stays up. "
+                    "Fix router SSID/password in Settings.", reason, STA_SLOW_RETRY_S);
+      esp_timer_start_once(s_sta_retry_timer, STA_SLOW_RETRY_S * 1000000ULL);
     }
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
@@ -256,6 +266,9 @@ void wifi_init(void) {
   if (strcmp(wifi_mode, "STA") == 0 && strlen(sta_ssid) > 0) {
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     esp_netif_set_hostname(sta_netif, MDNS_HOSTNAME); // name in the router's DHCP list
+    const esp_timer_create_args_t retry_args = {
+        .callback = sta_slow_retry, .name = "sta_retry"};
+    esp_timer_create(&retry_args, &s_sta_retry_timer);
     wifi_config_t sta_config;
     memset(&sta_config, 0, sizeof(wifi_config_t));
     strncpy((char *)sta_config.sta.ssid, sta_ssid, sizeof(sta_config.sta.ssid) - 1);
