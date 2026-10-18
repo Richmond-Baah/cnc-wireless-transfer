@@ -28,6 +28,7 @@ static const char *TAG = "TRANSFER";
 #define STATUS_CACHE_LEN 384
 static char     s_status_cache[STATUS_CACHE_LEN] = "{\"state\":\"OFFLINE\"}";
 static SemaphoreHandle_t s_status_mutex = NULL;
+static SemaphoreHandle_t s_up_mutex = NULL; // upload session (s_up), see below
 
 // The receiver's HTTP server is single-threaded: a /list refresh (SD mount +
 // scan) or /finalize (1.5 s USB reconnect wait) can stall /status for >1 s,
@@ -100,6 +101,8 @@ static bool fetch_receiver_status(const char *url, char *buf, size_t len,
 }
 
 // Background task: poll receiver /status every 2 s and update the cache.
+static void expire_idle_session(void);
+
 static void receiver_status_task(void *arg) {
     (void)arg;
     char url[128];
@@ -132,12 +135,14 @@ static void receiver_status_task(void *arg) {
             }
         }
 
+        expire_idle_session();
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
 void file_transfer_status_task_start(void) {
     s_status_mutex = xSemaphoreCreateMutex();
+    s_up_mutex = xSemaphoreCreateMutex();
     xTaskCreate(receiver_status_task, "rec_status", 6144, NULL, 3, NULL);
     ESP_LOGI(TAG, "Receiver status background poller started.");
 }
@@ -162,7 +167,11 @@ void get_receiver_url(const char *path, char *out_url, size_t max_len) {
 // ─── Browser-driven upload session ──────────────────────────────────────────
 // The browser slices the file and calls begin, chunk x N, finish. The receiver
 // handles one transfer at a time, so there is a single session.
-#define SESSION_IDLE_TIMEOUT_US (60LL * 1000 * 1000) // after this a session may be replaced
+#define SESSION_IDLE_TIMEOUT_US (30LL * 1000 * 1000) // idle sessions are expired by the poller task
+
+// httpd handlers and the poller's idle reaper both touch s_up
+static void up_lock(void) { if (s_up_mutex) xSemaphoreTake(s_up_mutex, portMAX_DELAY); }
+static void up_unlock(void) { if (s_up_mutex) xSemaphoreGive(s_up_mutex); }
 
 static struct {
   bool active;
@@ -245,17 +254,14 @@ static bool session_matches(const char *session) {
   return s_up.active && session && strcmp(session, s_up.id) == 0;
 }
 
-int file_transfer_begin(const char *name, size_t size, const char *md5, bool force,
+static int begin_locked(const char *name, size_t size, const char *md5, bool force,
                         char *session_out, size_t session_len,
                         char *msg, size_t msg_len) {
   int64_t now = esp_timer_get_time();
   msg[0] = '\0';
   if (s_up.active) {
-    if (now - s_up.last_activity_us < SESSION_IDLE_TIMEOUT_US) {
-      snprintf(msg, msg_len, "Another upload is in progress");
-      return 409;
-    }
-    ESP_LOGW(TAG, "Replacing stale upload session %s (%s)", s_up.id, s_up.name);
+    // One session at a time: a new begin closes the old one and its receiver socket
+    ESP_LOGW(TAG, "Replacing upload session %s (%s)", s_up.id, s_up.name);
     file_transfer_cancel_receiver();
     session_end();
   }
@@ -331,7 +337,7 @@ int file_transfer_begin(const char *name, size_t size, const char *md5, bool for
   return 200;
 }
 
-int file_transfer_chunk(const char *session, int index, const char *data, int len,
+static int chunk_locked(const char *session, int index, const char *data, int len,
                         uint64_t *acked_out, char *msg, size_t msg_len) {
   msg[0] = '\0';
   if (!session_matches(session)) {
@@ -365,12 +371,14 @@ int file_transfer_chunk(const char *session, int index, const char *data, int le
   if (err != ESP_OK) {
     snprintf(msg, msg_len, "Receiver unreachable: %s", esp_err_to_name(err));
     ESP_LOGW(TAG, "Chunk %d: %s", index, msg);
+    esp_http_client_close(s_up.chunk_client); // browser retry reconnects
     return 502;
   }
   int status = esp_http_client_get_status_code(s_up.chunk_client);
   if (status != 200) {
     snprintf(msg, msg_len, "Receiver rejected chunk %d (HTTP %d)", index, status);
     ESP_LOGW(TAG, "%s", msg);
+    esp_http_client_close(s_up.chunk_client); // browser retry reconnects
     return status == 409 ? 409 : 502;
   }
 
@@ -382,7 +390,7 @@ int file_transfer_chunk(const char *session, int index, const char *data, int le
   return 200;
 }
 
-int file_transfer_finish(const char *session, char *msg, size_t msg_len) {
+static int finish_locked(const char *session, char *msg, size_t msg_len) {
   msg[0] = '\0';
   if (!session_matches(session)) {
     snprintf(msg, msg_len, "Unknown or expired upload session");
@@ -426,7 +434,7 @@ int file_transfer_finish(const char *session, char *msg, size_t msg_len) {
   return 200;
 }
 
-int file_transfer_cancel(const char *session) {
+static int cancel_locked(const char *session) {
   if (s_up.active && session && session[0] && !session_matches(session)) {
     return 410; // someone else's upload: leave it alone
   }
@@ -437,6 +445,51 @@ int file_transfer_cancel(const char *session) {
   led_set_state(LED_STATE_IDLE);
   int code = file_transfer_cancel_receiver();
   return code == 200 ? 200 : 502;
+}
+
+int file_transfer_begin(const char *name, size_t size, const char *md5, bool force,
+                        char *session_out, size_t session_len, char *msg, size_t msg_len) {
+  up_lock();
+  int r = begin_locked(name, size, md5, force, session_out, session_len, msg, msg_len);
+  up_unlock();
+  return r;
+}
+
+int file_transfer_chunk(const char *session, int index, const char *data, int len,
+                        uint64_t *acked_out, char *msg, size_t msg_len) {
+  up_lock();
+  int r = chunk_locked(session, index, data, len, acked_out, msg, msg_len);
+  up_unlock();
+  return r;
+}
+
+int file_transfer_finish(const char *session, char *msg, size_t msg_len) {
+  up_lock();
+  int r = finish_locked(session, msg, msg_len);
+  up_unlock();
+  return r;
+}
+
+int file_transfer_cancel(const char *session) {
+  up_lock();
+  int r = cancel_locked(session);
+  up_unlock();
+  return r;
+}
+
+// Called by the poller: expire a session the browser abandoned (closes its receiver socket)
+static void expire_idle_session(void) {
+  if (s_up_mutex == NULL || xSemaphoreTake(s_up_mutex, 0) != pdTRUE) {
+    return; // a handler is using the session right now, so it isn't idle
+  }
+  if (s_up.active && esp_timer_get_time() - s_up.last_activity_us > SESSION_IDLE_TIMEOUT_US) {
+    ESP_LOGW(TAG, "Upload session %s idle > %lld s, expiring", s_up.id,
+             (long long)(SESSION_IDLE_TIMEOUT_US / 1000000));
+    session_end();
+    led_set_state(LED_STATE_IDLE);
+    file_transfer_cancel_receiver();
+  }
+  xSemaphoreGive(s_up_mutex);
 }
 
 int file_transfer_get_receiver_status(char *out_state_str, size_t max_len) {
