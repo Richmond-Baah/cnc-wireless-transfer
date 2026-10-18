@@ -183,75 +183,200 @@ static esp_err_t login_post_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
-// ─── Upload Handler (multipart/form-data)
-// ───────────────────────────────────────
-//
-// The browser sends:  FormData { file: <blob>, filename: "...", md5: "..." }
-// Content-Type: multipart/form-data; boundary=----...
-//
-// Approach: We read the full body into a temp file on SPIFFS, then extract the
-// metadata from the multipart header fields, and finally forward the raw file
-// data to the receiver via file_transfer_forward_to_receiver.
-//
-// For ESP32 with limited RAM, we use a simpler approach: the JS client sends
-// the metadata as custom HTTP headers, and the body is the raw file binary.
-// This avoids multipart parsing entirely.
-//
-// Expected from app.js:
-//   X-Filename: job.nc
-//   X-Filesize: 102400
-//   X-MD5: abc123...
-//   Body: raw file bytes
-//
-static esp_err_t upload_post_handler(httpd_req_t *req) {
+// ─── Browser-driven chunked upload ──────────────────────────────────────────
+// POST /upload_begin   {name, size, md5}           -> {session, chunk_size}
+// POST /upload_chunk   X-Session, X-Chunk-Index, raw body (<= 32 KB) -> {acked}
+// POST /upload_finish  X-Session                   -> {status:"verified"}
+// POST /upload_cancel  X-Session (optional)        -> {status:"cancelled"}
+// Each request returns only after the receiver has answered, so the browser
+// drives pacing, retries and progress (acked bytes / total).
+
+static char s_chunk_buf[UPLOAD_CHUNK_MAX];
+
+// Sends an error with an arbitrary status code (httpd_resp_send_err only knows a few)
+static void send_status_text(httpd_req_t *req, int code, const char *msg) {
+  const char *status;
+  switch (code) {
+  case 400: status = "400 Bad Request"; break;
+  case 401: status = "401 Unauthorized"; break;
+  case 409: status = "409 Conflict"; break;
+  case 410: status = "410 Gone"; break;
+  case 413: status = "413 Payload Too Large"; break;
+  case 423: status = "423 Locked"; break;
+  case 502: status = "502 Bad Gateway"; break;
+  case 503: status = "503 Service Unavailable"; break;
+  default:  status = "500 Internal Server Error"; break;
+  }
+  httpd_resp_set_status(req, status);
+  httpd_resp_set_type(req, "text/plain; charset=utf-8");
+  httpd_resp_sendstr(req, (msg && msg[0]) ? msg : status);
+}
+
+// Reads exactly content_len bytes into buf. Returns false on error/too large.
+static bool read_full_body(httpd_req_t *req, char *buf, size_t cap) {
+  if (req->content_len > cap) {
+    return false;
+  }
+  size_t got = 0;
+  while (got < req->content_len) {
+    int r = httpd_req_recv(req, buf + got, req->content_len - got);
+    if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+      continue;
+    }
+    if (r <= 0) {
+      return false;
+    }
+    got += r;
+  }
+  return true;
+}
+
+static bool get_session_header(httpd_req_t *req, char *out, size_t len) {
+  return httpd_req_get_hdr_value_str(req, "X-Session", out, len) == ESP_OK && out[0];
+}
+
+static esp_err_t upload_begin_handler(httpd_req_t *req) {
   if (!is_authorized(req)) {
-    httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
-    return ESP_FAIL;
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
   }
-
-  char filename[128] = {0};
-  char md5[64] = {0};
-  char filesize_str[32] = {0};
-
-  if (httpd_req_get_hdr_value_str(req, "X-Filename", filename,
-                                  sizeof(filename)) != ESP_OK) {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                        "Missing X-Filename header");
-    return ESP_FAIL;
+  if (req->content_len >= SCRATCH_BUFSIZE || !read_full_body(req, scratch_buf, SCRATCH_BUFSIZE - 1)) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
   }
-  if (httpd_req_get_hdr_value_str(req, "X-MD5", md5, sizeof(md5)) != ESP_OK) {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing X-MD5 header");
-    return ESP_FAIL;
-  }
-  if (httpd_req_get_hdr_value_str(req, "X-Filesize", filesize_str,
-                                  sizeof(filesize_str)) != ESP_OK) {
-    snprintf(filesize_str, sizeof(filesize_str), "%d", req->content_len);
-  }
+  scratch_buf[req->content_len] = '\0';
 
-  size_t filesize = (size_t)atoi(filesize_str);
-  if (filesize == 0)
-    filesize = req->content_len;
+  cJSON *json = cJSON_Parse(scratch_buf);
+  cJSON *j_name = json ? cJSON_GetObjectItem(json, "name") : NULL;
+  cJSON *j_size = json ? cJSON_GetObjectItem(json, "size") : NULL;
+  cJSON *j_md5 = json ? cJSON_GetObjectItem(json, "md5") : NULL;
+  const char *name = (j_name && cJSON_IsString(j_name)) ? j_name->valuestring : NULL;
+  const char *md5 = (j_md5 && cJSON_IsString(j_md5)) ? j_md5->valuestring : NULL;
+  double size = (j_size && cJSON_IsNumber(j_size)) ? j_size->valuedouble : -1;
 
-  ESP_LOGI(TAG, "Upload request: file=%s size=%u md5=%s", filename,
-           (unsigned)filesize, md5);
+  // Transmitter-side checks; the receiver also validates the filename
+  const char *problem = NULL;
+  if (!name || !md5 || size < 0) {
+    problem = "Missing name, size or md5";
+  } else if (strlen(name) == 0 || strlen(name) > 127) {
+    problem = "Filename must be 1-127 characters";
+  } else if (strlen(md5) != 32 || strspn(md5, "0123456789abcdefABCDEF") != 32) {
+    problem = "md5 must be 32 hex characters";
+  } else if (size > 0xFFFFFFFFu) {
+    problem = "File too large";
+  }
+  if (problem) {
+    cJSON_Delete(json);
+    send_status_text(req, 400, problem);
+    return ESP_OK;
+  }
 
   char force_hdr[4] = {0};
-  bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr,
-                                           sizeof(force_hdr)) == ESP_OK &&
+  bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr, sizeof(force_hdr)) == ESP_OK &&
                strcmp(force_hdr, "1") == 0;
 
-  bool success =
-      file_transfer_forward_to_receiver(req, filename, md5, filesize, force);
-  if (!success && file_transfer_is_aborted()) {
-    file_transfer_clear_abort();
+  char session[24];
+  char msg[160];
+  int code = file_transfer_begin(name, (size_t)size, md5, force, session, sizeof(session),
+                                 msg, sizeof(msg));
+  cJSON_Delete(json);
+
+  if (code == 423) {
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
     return ESP_OK;
   }
-  if (!success && file_transfer_last_refused()) {
-    // 423/400 already sent; return OK so httpd drains the body instead of
-    // resetting the socket (the browser would see a network error)
+  if (code != 200) {
+    send_status_text(req, code, msg);
     return ESP_OK;
   }
-  return success ? ESP_OK : ESP_FAIL;
+  char resp[96];
+  snprintf(resp, sizeof(resp), "{\"session\":\"%s\",\"chunk_size\":%d}", session, UPLOAD_CHUNK_MAX);
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, resp);
+  return ESP_OK;
+}
+
+static esp_err_t upload_chunk_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char session[24] = {0};
+  char idx_hdr[16] = {0};
+  if (!get_session_header(req, session, sizeof(session)) ||
+      httpd_req_get_hdr_value_str(req, "X-Chunk-Index", idx_hdr, sizeof(idx_hdr)) != ESP_OK) {
+    send_status_text(req, 400, "Missing X-Session or X-Chunk-Index");
+    return ESP_OK;
+  }
+  char *end = NULL;
+  long index = strtol(idx_hdr, &end, 10);
+  if (end == idx_hdr || *end != '\0' || index < 0) {
+    send_status_text(req, 400, "Invalid X-Chunk-Index");
+    return ESP_OK;
+  }
+  if (req->content_len == 0 || req->content_len > UPLOAD_CHUNK_MAX) {
+    send_status_text(req, 413, "Chunk must be 1-32768 bytes");
+    return ESP_OK;
+  }
+  if (!read_full_body(req, s_chunk_buf, sizeof(s_chunk_buf))) {
+    send_status_text(req, 400, "Failed to read chunk from browser");
+    return ESP_OK;
+  }
+
+  uint64_t acked = 0;
+  char msg[160];
+  int code = file_transfer_chunk(session, (int)index, s_chunk_buf, req->content_len,
+                                 &acked, msg, sizeof(msg));
+  if (code != 200) {
+    send_status_text(req, code, msg);
+    return ESP_OK;
+  }
+  char resp[48];
+  snprintf(resp, sizeof(resp), "{\"acked\":%llu}", (unsigned long long)acked);
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, resp);
+  return ESP_OK;
+}
+
+static esp_err_t upload_finish_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char session[24] = {0};
+  if (!get_session_header(req, session, sizeof(session))) {
+    send_status_text(req, 400, "Missing X-Session");
+    return ESP_OK;
+  }
+  char msg[160];
+  int code = file_transfer_finish(session, msg, sizeof(msg));
+  if (code != 200) {
+    send_status_text(req, code, msg);
+    return ESP_OK;
+  }
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, "{\"status\":\"verified\"}");
+  return ESP_OK;
+}
+
+static esp_err_t upload_cancel_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char session[24] = {0};
+  get_session_header(req, session, sizeof(session)); // optional
+  int code = file_transfer_cancel(session);
+  if (code != 200) {
+    send_status_text(req, code, code == 410 ? "Session does not match the active upload"
+                                            : "Receiver did not confirm cancel");
+    return ESP_OK;
+  }
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, "{\"status\":\"cancelled\"}");
+  return ESP_OK;
 }
 
 // ─── Status
@@ -568,17 +693,6 @@ static esp_err_t format_post_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
-static esp_err_t upload_cancel_handler(httpd_req_t *req) {
-    if (!is_authorized(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
-        return ESP_FAIL;
-    }
-    file_transfer_abort();
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_sendstr(req, "{\"status\":\"aborting\"}");
-    return ESP_OK;
-}
-
 static esp_err_t receiver_list_get_handler(httpd_req_t *req) {
     if (!is_authorized(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -678,7 +792,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 20; // 17 registered
+  config.max_uri_handlers = 22; // 19 registered
   config.max_open_sockets = 7;
   config.recv_wait_timeout = 30; // large uploads
   config.send_wait_timeout = 30;
@@ -704,8 +818,12 @@ void web_server_start(void) {
     // APIs
     httpd_uri_t uri_login = {
         .uri = "/login", .method = HTTP_POST, .handler = login_post_handler};
-    httpd_uri_t uri_upload = {
-        .uri = "/upload", .method = HTTP_POST, .handler = upload_post_handler};
+    httpd_uri_t uri_upload_begin = {
+        .uri = "/upload_begin", .method = HTTP_POST, .handler = upload_begin_handler};
+    httpd_uri_t uri_upload_chunk = {
+        .uri = "/upload_chunk", .method = HTTP_POST, .handler = upload_chunk_handler};
+    httpd_uri_t uri_upload_finish = {
+        .uri = "/upload_finish", .method = HTTP_POST, .handler = upload_finish_handler};
     httpd_uri_t uri_status = {
         .uri = "/status", .method = HTTP_GET, .handler = status_get_handler};
     httpd_uri_t uri_config_get = {
@@ -728,7 +846,9 @@ void web_server_start(void) {
     httpd_register_uri_handler(server, &uri_js);
     httpd_register_uri_handler(server, &uri_md5);
     httpd_register_uri_handler(server, &uri_login);
-    httpd_register_uri_handler(server, &uri_upload);
+    httpd_register_uri_handler(server, &uri_upload_begin);
+    httpd_register_uri_handler(server, &uri_upload_chunk);
+    httpd_register_uri_handler(server, &uri_upload_finish);
     httpd_register_uri_handler(server, &uri_status);
     httpd_register_uri_handler(server, &uri_config_get);
     httpd_register_uri_handler(server, &uri_config_post);

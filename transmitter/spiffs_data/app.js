@@ -341,7 +341,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressText = document.getElementById('progressText');
     const uploadFeedback = document.getElementById('uploadFeedback');
     const cancelUploadBtn = document.getElementById('cancelUploadBtn');
-    let currentXhr = null;
 
     let currentFile = null;
 
@@ -369,22 +368,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
-        uploadBtn.addEventListener('click', startUpload);
-        
-        cancelUploadBtn.addEventListener('click', async () => {
-            currentFile = null;
-            if (currentXhr) {
-                currentXhr.abort();
-                currentXhr = null;
-            }
-            try {
-                await fetch('/upload_cancel', { 
-                    method: 'POST',
-                    headers: { 'Authorization': 'Bearer ' + token }
-                });
-            } catch(e) {}
-            showFeedback('Upload cancelled.', 'error');
-            resetUploadUI();
+        uploadBtn.addEventListener('click', () => startUpload(false));
+
+        cancelUploadBtn.addEventListener('click', () => {
+            // Takes effect between chunks; startUpload then calls /upload_cancel
+            cancelRequested = true;
+            cancelUploadBtn.disabled = true;
+            progressText.textContent = 'Cancelling after the current chunk...';
         });
     }
 
@@ -441,10 +431,89 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Browser-driven chunked upload: /upload_begin, /upload_chunk x N, /upload_finish.
+    // Each chunk request returns only after the receiver has acked it, so the
+    // progress bar shows bytes actually stored, not bytes handed to the network.
+    const CHUNK_SIZE = 32 * 1024;
+    const CHUNK_RETRIES = 3;
+    let cancelRequested = false;
+    let lastPct = 0;
+
+    class UploadError extends Error {
+        constructor(stage, reason, status) {
+            super(reason);
+            this.stage = stage;
+            this.status = status;
+        }
+    }
+
+    async function apiPost(path, headers, body) {
+        const res = await fetch(path, {
+            method: 'POST',
+            headers: Object.assign({ 'Authorization': 'Bearer ' + token }, headers),
+            body
+        });
+        if (res.status === 401) {
+            sessionStorage.removeItem('token');
+            setTimeout(() => { window.location.href = 'index.html'; }, 2000);
+        }
+        return res;
+    }
+
+    async function errorText(res) {
+        try {
+            return (await res.text()) || ('HTTP ' + res.status);
+        } catch (e) {
+            return 'HTTP ' + res.status;
+        }
+    }
+
+    async function sendChunk(session, index, blob) {
+        let lastErr = '';
+        for (let attempt = 1; attempt <= CHUNK_RETRIES; attempt++) {
+            try {
+                const res = await apiPost('/upload_chunk', {
+                    'X-Session': session,
+                    'X-Chunk-Index': String(index),
+                    'Content-Type': 'application/octet-stream'
+                }, blob);
+                if (res.ok) return (await res.json()).acked;
+                lastErr = await errorText(res);
+                // 4xx (expired session, out of order, too large, auth) won't succeed on retry
+                if (res.status >= 400 && res.status < 500) throw new UploadError('Uploading', lastErr, res.status);
+            } catch (e) {
+                if (e instanceof UploadError) throw e;
+                lastErr = 'network error: ' + e.message;
+            }
+            if (attempt < CHUNK_RETRIES) await new Promise(r => setTimeout(r, 500 * attempt));
+        }
+        throw new UploadError('Uploading', 'chunk ' + index + ' failed after ' + CHUNK_RETRIES + ' attempts: ' + lastErr);
+    }
+
+    // The receiver stays FILE_READY until its USB drive is reconnected
+    async function waitForDriveReconnect(timeoutMs) {
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeoutMs) {
+            await new Promise(r => setTimeout(r, 700));
+            try {
+                const res = await fetch('/status', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (res.ok) {
+                    const d = await res.json();
+                    // RECEIVING may still be the transmitter's cached value from mid-upload
+                    if (d.state && d.state !== 'FILE_READY' && d.state !== 'RECEIVING') return d.state;
+                }
+            } catch (e) { /* keep waiting */ }
+        }
+        return null;
+    }
+
     async function startUpload(force) {
         if (!currentFile) return;
-        force = (force === true); // click handler passes an Event
+        force = (force === true); // click handlers may pass an Event
+        const file = currentFile;
         if (forceUploadBtn) forceUploadBtn.style.display = 'none';
+        cancelRequested = false;
+        cancelUploadBtn.disabled = false;
 
         uploadBtn.disabled = true;
         fileInput.disabled = true;
@@ -453,82 +522,78 @@ document.addEventListener('DOMContentLoaded', () => {
         hideFeedback();
         clearInterval(statusInterval);
 
+        let stage = 'Checksum';
+        let session = null;
         try {
-            // Step 1: Calculate MD5 on client side
-            updateProgress(0, 'Calculating MD5 checksum...');
-            const md5 = await calculateMD5(currentFile);
-            updateProgress(5, 'MD5: ' + md5.substring(0, 8) + '...');
+            updateProgress(0, 'Calculating checksum...');
+            const md5 = await calculateMD5(file);
+            if (cancelRequested) throw new UploadError(stage, 'cancelled');
 
-            // Step 2: Upload raw file body with metadata in headers
-            // The ESP32 server reads X-Filename, X-MD5, X-Filesize headers
-            // and streams the body directly to the receiver.
-            updateProgress(5, 'Uploading to transmitter...');
-            currentXhr = new XMLHttpRequest();
-            const xhr = currentXhr;
-            xhr.open('POST', '/upload', true);
-            xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-            xhr.setRequestHeader('X-Filename', currentFile.name);
-            xhr.setRequestHeader('X-Filesize', currentFile.size.toString());
-            xhr.setRequestHeader('X-MD5', md5);
-            if (force) xhr.setRequestHeader('X-Force', '1');
-
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    const pct = Math.round((e.loaded / e.total) * 100);
-                    updateProgress(pct, 'Uploading... (' + formatBytes(e.loaded) + ' / ' + formatBytes(e.total) + ')');
-                }
-            };
-
-            xhr.onload = () => {
-                if (xhr.status === 200) {
-                    updateProgress(100, 'Transfer Complete!');
-                    showFeedback('✅ File transferred and verified successfully!', 'success');
-                    loadReceiverFiles();
-                    pollStatus(); // refresh free/total space
-                } else if (xhr.status === 423) {
-                    showFeedback('Machine is reading – stop the job or confirm it\'s idle', 'error');
-                    busyRetryFile = currentFile;
-                    if (forceUploadBtn) forceUploadBtn.style.display = 'block';
-                } else if (xhr.status === 503) {
-                    showFeedback('❌ Receiver is busy. Please wait a moment and try again.', 'error');
-                } else if (xhr.status === 400 && xhr.responseText) {
-                    // Receiver's reason (invalid filename, checksum mismatch, ...)
-                    showFeedback('Rejected: ' + xhr.responseText, 'error');
-                } else if (xhr.status === 400) {
-                    showFeedback('❌ Checksum verification failed. Please retry.', 'error');
-                } else if (xhr.status === 401) {
-                    showFeedback('❌ Session expired. Please login again.', 'error');
-                    setTimeout(() => { window.location.href = 'index.html'; }, 2000);
-                } else {
-                    showFeedback('❌ Transfer failed: ' + (xhr.responseText || 'Unknown error'), 'error');
-                }
+            stage = 'Starting';
+            updateProgress(0, 'Preparing receiver...');
+            const beginHeaders = { 'Content-Type': 'application/json' };
+            if (force) beginHeaders['X-Force'] = '1';
+            const res = await apiPost('/upload_begin', beginHeaders,
+                JSON.stringify({ name: file.name, size: file.size, md5 }));
+            if (res.status === 423) {
+                showFeedback('Machine is reading – stop the job or confirm it\'s idle', 'error');
+                busyRetryFile = file;
+                if (forceUploadBtn) forceUploadBtn.style.display = 'block';
                 resetUploadUI();
-                currentXhr = null;
-            };
+                return;
+            }
+            if (!res.ok) throw new UploadError(stage, await errorText(res), res.status);
+            session = (await res.json()).session;
 
-            xhr.onerror = () => {
-                showFeedback('❌ Network error during upload. Check Wi-Fi connection.', 'error');
-                resetUploadUI();
-            };
+            stage = 'Uploading';
+            const total = file.size;
+            let acked = 0;
+            const t0 = performance.now();
+            for (let index = 0, offset = 0; offset < total; index++, offset += CHUNK_SIZE) {
+                if (cancelRequested) throw new UploadError(stage, 'cancelled');
+                acked = await sendChunk(session, index, file.slice(offset, offset + CHUNK_SIZE));
+                const pct = total ? (acked / total) * 100 : 100;
+                const secs = (performance.now() - t0) / 1000;
+                const rate = secs > 0 ? acked / 1024 / secs : 0;
+                updateProgress(pct, 'Uploading ' + Math.floor(pct) + '% (' + formatBytes(acked) + ' / ' +
+                    formatBytes(total) + ', ' + rate.toFixed(0) + ' KB/s)');
+            }
+            if (cancelRequested) throw new UploadError(stage, 'cancelled');
 
-            xhr.ontimeout = () => {
-                showFeedback('❌ Upload timed out. File may be too large or connection lost.', 'error');
-                resetUploadUI();
-            };
+            stage = 'Verifying';
+            cancelUploadBtn.disabled = true; // past the point of a clean cancel
+            updateProgress(100, 'Verifying...');
+            const fin = await apiPost('/upload_finish', { 'X-Session': session }, '');
+            session = null; // the transmitter ends the session either way
+            if (!fin.ok) throw new UploadError(stage, await errorText(fin), fin.status);
 
-            xhr.timeout = 300000; // 5 minute timeout for large files
-
-            // Send raw file as body (not FormData)
-            xhr.send(currentFile);
-
-        } catch (error) {
-            showFeedback('❌ Error processing file: ' + error.message, 'error');
-            resetUploadUI();
+            stage = 'Reconnecting drive';
+            updateProgress(100, 'Reconnecting drive...');
+            const state = await waitForDriveReconnect(10000);
+            updateProgress(100, 'Done');
+            showFeedback(state ? '✅ File transferred and verified.'
+                               : '✅ File verified. The drive is taking longer than usual to reconnect.', 'success');
+            loadReceiverFiles();
+        } catch (e) {
+            const err = e instanceof UploadError ? e : new UploadError(stage, e.message || String(e));
+            if (session) {
+                try { await apiPost('/upload_cancel', { 'X-Session': session }, ''); } catch (x) { /* best effort */ }
+            }
+            if (err.message === 'cancelled') {
+                updateProgress(lastPct, 'Cancelled');
+                showFeedback('Upload cancelled.', 'error');
+            } else {
+                updateProgress(lastPct, 'Failed during ' + err.stage);
+                showFeedback('❌ Failed during ' + err.stage + ': ' + err.message, 'error');
+            }
         }
+        resetUploadUI();
+        pollStatus(); // refresh state + free/total space
     }
 
     function updateProgress(percent, text) {
         const p = Math.min(100, Math.max(0, Math.round(percent)));
+        lastPct = p;
         progressBar.style.width = p + '%';
         progressPercent.textContent = p + '%';
         progressText.textContent = text;

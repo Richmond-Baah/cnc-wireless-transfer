@@ -4,15 +4,26 @@
 #include "esp_http_server.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
+// ─── Browser-driven upload (one session at a time) ──────────────────────────
+// All return an HTTP status for the browser (200 on success) and put a
+// human-readable reason in msg on failure.
+#define UPLOAD_CHUNK_MAX (32 * 1024)
 
-// Forward incoming multipart body to the receiver in chunks
-bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
-                                       const char *expected_md5,
-                                       size_t filesize, bool force);
-// True if the last forward was refused by the receiver at /prepare (423
-// machine_busy or 400 invalid request); the response was already sent.
-bool file_transfer_last_refused(void);
+// Calls receiver /prepare (force = bypass machine-busy guard); on success
+// writes the session id (16 hex chars) to session_out.
+int file_transfer_begin(const char *name, size_t size, const char *md5, bool force,
+                        char *session_out, size_t session_len,
+                        char *msg, size_t msg_len);
+// Forwards one chunk to receiver /chunk and returns after the receiver acks;
+// acked_out = total bytes acknowledged so far.
+int file_transfer_chunk(const char *session, int index, const char *data, int len,
+                        uint64_t *acked_out, char *msg, size_t msg_len);
+// Calls receiver /finalize with the browser's MD5 and ends the session.
+int file_transfer_finish(const char *session, char *msg, size_t msg_len);
+// Ends the session (if it matches, or none is given) and calls receiver /cancel.
+int file_transfer_cancel(const char *session);
 
 // Get the current operational status of the receiver (polls receiver endpoint)
 int file_transfer_get_receiver_status(char *out_state_str, size_t max_len);
@@ -22,14 +33,11 @@ int file_transfer_clear_receiver(bool force); // sends {"confirm":"WIPE"}; force
 
 // Request the receiver to perform a full format of its storage
 int file_transfer_format_receiver(void);
-void file_transfer_abort(void);
 
 // Start the background task that polls the receiver status every 2 s.
 // Must be called once after Wi-Fi and the web server are both up.
 void file_transfer_status_task_start(void);
 int file_transfer_cancel_receiver(void);
-bool file_transfer_is_aborted(void);
-void file_transfer_clear_abort(void);
 
 // Fetch the list of files from the receiver
 int file_transfer_get_receiver_files(char *out_json, size_t max_len);

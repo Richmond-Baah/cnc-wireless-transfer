@@ -571,7 +571,11 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     storage_manager_flush_and_release_for_usb();
     TM_ADD(unmount);
 
-    state_machine_transition(STATE_IDLE);
+    // The file is safely on disk: answer now so the sender isn't held up by
+    // the USB reconnect wait. State stays FILE_READY until the drive is back
+    // (the transmitter UI shows "Reconnecting drive" meanwhile).
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
 
     // Drop the USB connection to signal disconnect to the PC
     usb_msc_disconnect();
@@ -581,6 +585,9 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     vTaskDelay(pdMS_TO_TICKS(1500));
     usb_msc_connect();
     TM_ADD(usb_reconnect);
+    if (state_machine_get() == STATE_FILE_READY) {
+        state_machine_transition(STATE_IDLE); // host mount then moves it to USB_ACTIVE
+    }
 
     int64_t total_us = esp_timer_get_time() - s_tm.t_start;
     ESP_LOGI(TAG, "XFER summary: %llu bytes, %lu chunks in %lld ms = %.1f KB/s | "
@@ -591,9 +598,6 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
              TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.open), TM_MS(s_tm.recv),
              TM_MS(s_tm.write), TM_MS(s_tm.md5), TM_MS(s_tm.commit), TM_MS(s_tm.snapshot),
              TM_MS(s_tm.unmount), TM_MS(s_tm.usb_reconnect));
-
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 

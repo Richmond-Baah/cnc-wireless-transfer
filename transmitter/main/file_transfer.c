@@ -4,10 +4,12 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "led.h"
-#include "mbedtls/md5.h"
+#include "cJSON.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -19,15 +21,6 @@ static const char *TAG = "TRANSFER";
 #define CONFIG_CNC_RECEIVER_IP "192.168.4.150"
 #endif
 
-#define SCRATCH_BUFSIZE (32 * 1024) // chunk size; receiver streams it in 16 KB pieces
-
-static char scratch_buf[SCRATCH_BUFSIZE];
-static volatile bool s_abort_transfer = false;
-static bool s_last_refused = false;
-
-bool file_transfer_last_refused(void) {
-  return s_last_refused;
-}
 
 // ─── Cached receiver status ─────────────────────────────────────────────────
 // The background task writes here; the HTTP handler reads from here.
@@ -166,18 +159,28 @@ void get_receiver_url(const char *path, char *out_url, size_t max_len) {
   ESP_LOGD("TRANSFER", "Receiver URL: %s", out_url); // called every 2 s by the poller
 }
 
-// Per-transfer stage timings, logged as one summary line at the end
-typedef struct {
-  int64_t t_start;
-  int64_t prepare_us;     // receiver /prepare round trip (USB release + mount on receiver)
-  int64_t browser_us;     // waiting for the browser's upload data
-  int64_t chunk_total_us; // receiver /chunk round trips, incl. retries
-  int64_t chunk_min_us;
-  int64_t chunk_max_us;
-  int64_t finalize_us;    // receiver /finalize round trip (MD5, unmount, USB reconnect)
+// ─── Browser-driven upload session ──────────────────────────────────────────
+// The browser slices the file and calls begin, chunk x N, finish. The receiver
+// handles one transfer at a time, so there is a single session.
+#define SESSION_IDLE_TIMEOUT_US (60LL * 1000 * 1000) // after this a session may be replaced
+
+static struct {
+  bool active;
+  char id[17];
+  char name[128];
+  char md5[33];
+  size_t size;
+  int next_index;          // first chunk index not yet acked by the receiver
+  uint64_t acked;          // bytes acked by the receiver
+  int64_t t_start_us;
+  int64_t prepare_us;
+  int64_t last_activity_us;
+  esp_http_client_handle_t chunk_client; // reused for all chunks (HTTP keep-alive)
+  int connects;            // TCP connects made by chunk_client (1 = full reuse)
   uint32_t chunks;
-  uint32_t retries;
-} xfer_timing_t;
+  int64_t chunk_total_us;
+  int64_t chunk_max_us;
+} s_up;
 
 static esp_err_t chunk_client_event(esp_http_client_event_t *evt) {
   if (evt->event_id == HTTP_EVENT_ON_CONNECTED && evt->user_data) {
@@ -186,287 +189,254 @@ static esp_err_t chunk_client_event(esp_http_client_event_t *evt) {
   return ESP_OK;
 }
 
-bool file_transfer_forward_to_receiver(httpd_req_t *req, const char *filename,
-                                       const char *expected_md5,
-                                       size_t filesize, bool force) {
-  int64_t t_start_us = esp_timer_get_time();
-  s_abort_transfer = false;
-  s_last_refused = false;
-  ESP_LOGI(TAG, "Starting transfer for %s (%u bytes, md5=%s)", filename,
-           (unsigned)filesize, expected_md5);
-  led_set_state(LED_STATE_SENDING);
+// POSTs a JSON body to a receiver endpoint. Returns the HTTP status, or -1 if
+// the receiver could not be reached; the response body (error text) goes to msg.
+static int receiver_post_json(const char *path, const char *json, bool force,
+                              int timeout_ms, char *msg, size_t msg_len) {
+  char url[128];
+  get_receiver_url(path, url, sizeof(url));
+  msg[0] = '\0';
 
-  char prepare_url[128];
-  get_receiver_url("/prepare", prepare_url, sizeof(prepare_url));
-
-  esp_http_client_config_t config = {
-      .url = prepare_url,
-      .timeout_ms = 5000,
+  esp_http_client_config_t cfg = {
+      .url = url,
+      .timeout_ms = timeout_ms,
   };
-  esp_http_client_handle_t client = esp_http_client_init(&config);
+  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  if (client == NULL) {
+    snprintf(msg, msg_len, "HTTP client init failed (bad receiver URL?)");
+    return -1;
+  }
   esp_http_client_set_method(client, HTTP_METHOD_POST);
   esp_http_client_set_header(client, "Content-Type", "application/json");
   if (force) {
     esp_http_client_set_header(client, "X-Force", "1");
   }
 
-  char payload[256];
-  snprintf(payload, sizeof(payload),
-           "{\"filename\":\"%s\",\"filesize\":%u,\"md5\":\"%s\"}", filename,
-           (unsigned)filesize, expected_md5);
-  // open/write/read instead of perform() so the receiver's error text can be relayed
-  int payload_len = strlen(payload);
-  int prepare_status = 0;
-  char prepare_msg[160] = {0};
-  esp_err_t err = esp_http_client_open(client, payload_len);
-  if (err == ESP_OK) {
-    if (esp_http_client_write(client, payload, payload_len) != payload_len) {
-      err = ESP_FAIL;
-    } else {
-      esp_http_client_fetch_headers(client);
-      prepare_status = esp_http_client_get_status_code(client);
-      int r = esp_http_client_read(client, prepare_msg, sizeof(prepare_msg) - 1);
-      if (r > 0) prepare_msg[r] = '\0';
-    }
-    esp_http_client_close(client);
+  int status = -1;
+  int len = strlen(json);
+  esp_err_t err = esp_http_client_open(client, len);
+  if (err != ESP_OK) {
+    snprintf(msg, msg_len, "Receiver unreachable: %s", esp_err_to_name(err));
+  } else if (esp_http_client_write(client, json, len) != len) {
+    snprintf(msg, msg_len, "Receiver unreachable: write failed");
+  } else if (esp_http_client_fetch_headers(client) < 0) {
+    snprintf(msg, msg_len, "No response from receiver (timeout)");
+  } else {
+    status = esp_http_client_get_status_code(client);
+    int r = esp_http_client_read(client, msg, msg_len - 1);
+    msg[r > 0 ? r : 0] = '\0';
   }
+  esp_http_client_close(client);
   esp_http_client_cleanup(client);
-
-  if (err == ESP_OK && prepare_status == 423) {
-    ESP_LOGW(TAG, "Receiver refused /prepare: machine is reading the drive");
-    s_last_refused = true;
-    led_set_state(LED_STATE_IDLE);
-    httpd_resp_set_status(req, "423 Locked");
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
-    return false;
+  if (status < 0) {
+    ESP_LOGW(TAG, "Receiver %s failed: %s", path, msg);
   }
+  return status;
+}
 
-  if (err == ESP_OK && prepare_status == 400) {
-    // e.g. invalid filename: pass the receiver's reason through to the UI
-    ESP_LOGW(TAG, "Receiver rejected /prepare: %s", prepare_msg);
-    s_last_refused = true;
-    led_set_state(LED_STATE_ERROR);
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                        prepare_msg[0] ? prepare_msg : "Receiver rejected the file");
-    return false;
+static void session_end(void) {
+  if (s_up.chunk_client) {
+    esp_http_client_cleanup(s_up.chunk_client);
   }
+  memset(&s_up, 0, sizeof(s_up));
+}
 
-  if (err != ESP_OK || prepare_status != 200) {
-    ESP_LOGE(TAG, "Receiver /prepare failed. Err: %s. Code: %d",
-             esp_err_to_name(err), prepare_status);
-    led_set_state(LED_STATE_ERROR);
-    if (prepare_status == 503) {
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                          "Receiver is busy (503).");
-    } else {
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                          "Receiver preparation failed.");
+static bool session_matches(const char *session) {
+  return s_up.active && session && strcmp(session, s_up.id) == 0;
+}
+
+int file_transfer_begin(const char *name, size_t size, const char *md5, bool force,
+                        char *session_out, size_t session_len,
+                        char *msg, size_t msg_len) {
+  int64_t now = esp_timer_get_time();
+  msg[0] = '\0';
+  if (s_up.active) {
+    if (now - s_up.last_activity_us < SESSION_IDLE_TIMEOUT_US) {
+      snprintf(msg, msg_len, "Another upload is in progress");
+      return 409;
     }
-    return false;
+    ESP_LOGW(TAG, "Replacing stale upload session %s (%s)", s_up.id, s_up.name);
+    file_transfer_cancel_receiver();
+    session_end();
   }
 
-  int64_t t_prep_done_us = esp_timer_get_time();
-  ESP_LOGI(TAG, "Stage prepare: %lld ms", (long long)((t_prep_done_us - t_start_us) / 1000));
+  // Build the /prepare body with cJSON so names with quotes stay valid JSON
+  cJSON *obj = cJSON_CreateObject();
+  cJSON_AddStringToObject(obj, "filename", name);
+  cJSON_AddNumberToObject(obj, "filesize", (double)size);
+  cJSON_AddStringToObject(obj, "md5", md5);
+  char *json = cJSON_PrintUnformatted(obj);
+  cJSON_Delete(obj);
+  if (json == NULL) {
+    snprintf(msg, msg_len, "Out of memory");
+    return 500;
+  }
 
-  // 2. Stream chunks directly from http_req body to the receiver
-  int remaining = (int)filesize;
-  int chunk_index = 0;
+  ESP_LOGI(TAG, "Upload begin: %s (%u bytes, md5=%s%s)", name, (unsigned)size, md5,
+           force ? ", forced" : "");
+  int status = receiver_post_json("/prepare", json, force, 10000, msg, msg_len);
+  if (status == 503) {
+    // Receiver is stuck RECEIVING from an abandoned transfer we no longer
+    // track (e.g. transmitter rebooted mid-upload): reset it once and retry.
+    ESP_LOGW(TAG, "Receiver busy with no session here; cancelling stale transfer and retrying");
+    file_transfer_cancel_receiver();
+    status = receiver_post_json("/prepare", json, force, 10000, msg, msg_len);
+  }
+  cJSON_free(json);
 
-  mbedtls_md5_context ctx;
-  mbedtls_md5_init(&ctx);
-  mbedtls_md5_starts(&ctx);
+  if (status != 200) {
+    led_set_state(status == 423 ? LED_STATE_IDLE : LED_STATE_ERROR);
+    if (status == 423) {
+      snprintf(msg, msg_len, "machine_busy");
+    } else if (msg[0] == '\0') {
+      snprintf(msg, msg_len, "Receiver /prepare failed (HTTP %d)", status);
+    }
+    return status < 0 ? 502 : status;
+  }
+
+  memset(&s_up, 0, sizeof(s_up));
+  snprintf(s_up.id, sizeof(s_up.id), "%08lx%08lx",
+           (unsigned long)esp_random(), (unsigned long)esp_random());
+  strlcpy(s_up.name, name, sizeof(s_up.name));
+  strlcpy(s_up.md5, md5, sizeof(s_up.md5));
+  s_up.size = size;
+  s_up.t_start_us = now;
+  s_up.prepare_us = esp_timer_get_time() - now;
+  s_up.last_activity_us = esp_timer_get_time();
 
   char chunk_url[128];
   get_receiver_url("/chunk", chunk_url, sizeof(chunk_url));
-
-  // One client handle for all chunks: esp_http_client keeps the TCP
-  // connection open between perform() calls (HTTP/1.1 keep-alive) unless the
-  // receiver closes it. Count connects to verify reuse in the summary log.
-  int chunk_connects = 0;
   esp_http_client_config_t chunk_cfg = {
       .url = chunk_url,
       .timeout_ms = 10000,
       .keep_alive_enable = true, // TCP keepalive probes
       .event_handler = chunk_client_event,
-      .user_data = &chunk_connects,
+      .user_data = &s_up.connects,
   };
-  esp_http_client_handle_t chunk_client = esp_http_client_init(&chunk_cfg);
-  esp_http_client_set_header(chunk_client, "Connection", "keep-alive");
-
-  xfer_timing_t tm = {.t_start = t_start_us, .prepare_us = t_prep_done_us - t_start_us};
-  tm.chunk_min_us = INT64_MAX;
-
-  while (remaining > 0) {
-    if (s_abort_transfer) {
-        ESP_LOGW(TAG, "Transfer aborted by user");
-        esp_http_client_cleanup(chunk_client);
-        file_transfer_cancel_receiver();
-        led_set_state(LED_STATE_IDLE);
-        return false;
-    }
-    // Fill a whole chunk from the browser before sending: httpd_req_recv()
-    // returns whatever has arrived (often ~1.4 KB), and every chunk costs a
-    // full round trip to the receiver.
-    int to_read = remaining < SCRATCH_BUFSIZE ? remaining : SCRATCH_BUFSIZE;
-    int read_len = 0;
-    int64_t t_rx = esp_timer_get_time();
-    while (read_len < to_read) {
-      int n = httpd_req_recv(req, scratch_buf + read_len, to_read - read_len);
-      if (n == HTTPD_SOCK_ERR_TIMEOUT) {
-        continue; // Retry
-      }
-      if (n <= 0) {
-        read_len = n;
-        break;
-      }
-      read_len += n;
-    }
-    tm.browser_us += esp_timer_get_time() - t_rx;
-    if (read_len <= 0) {
-      ESP_LOGE(TAG, "Failed reading client upload");
-      led_set_state(LED_STATE_ERROR);
-      mbedtls_md5_free(&ctx);
-      esp_http_client_cleanup(chunk_client);
-      file_transfer_cancel_receiver(); // release receiver storage + reconnect USB
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                          "Client read error");
-      return false;
-    }
-
-    // Update hash
-    mbedtls_md5_update(&ctx, (unsigned char *)scratch_buf, read_len);
-
-    esp_http_client_set_method(chunk_client, HTTP_METHOD_POST);
-    esp_http_client_set_header(chunk_client, "Content-Type", "application/octet-stream");
-    char chunk_hdr[32];
-    snprintf(chunk_hdr, sizeof(chunk_hdr), "%d", chunk_index);
-    esp_http_client_set_header(chunk_client, "X-Chunk-Index", chunk_hdr);
-    esp_http_client_set_post_field(chunk_client, scratch_buf, read_len);
-
-    esp_err_t err = ESP_FAIL;
-    int chunk_status = 500;
-    int max_retries = 3;
-    bool success = false;
-
-    int64_t t_chunk = esp_timer_get_time();
-    for (int retry = 0; retry < max_retries; retry++) {
-        err = esp_http_client_perform(chunk_client);
-        chunk_status = esp_http_client_get_status_code(chunk_client);
-        if (err == ESP_OK && chunk_status == 200) {
-            success = true;
-            break;
-        }
-        tm.retries++;
-        ESP_LOGW(TAG, "Chunk %d upload attempt %d failed (err %s, status %d). Retrying...",
-                 chunk_index, retry + 1, esp_err_to_name(err), chunk_status);
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    int64_t rtt = esp_timer_get_time() - t_chunk;
-    tm.chunk_total_us += rtt;
-    if (rtt > tm.chunk_max_us) tm.chunk_max_us = rtt;
-    if (rtt < tm.chunk_min_us) tm.chunk_min_us = rtt;
-    tm.chunks++;
-
-    if (s_abort_transfer) {
-        ESP_LOGW(TAG, "Transfer aborted after chunk %d", chunk_index);
-        esp_http_client_cleanup(chunk_client);
-        file_transfer_cancel_receiver();
-        led_set_state(LED_STATE_IDLE);
-        return false;
-    }
-
-    if (!success) {
-      ESP_LOGE(TAG, "Receiver /chunk failed at index %d after %d retries (err %s, status %d)",
-               chunk_index, max_retries, esp_err_to_name(err), chunk_status);
-      mbedtls_md5_free(&ctx);
-      led_set_state(LED_STATE_ERROR);
-      esp_http_client_cleanup(chunk_client);
-      file_transfer_cancel_receiver(); // release receiver storage + reconnect USB
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                          "Receiver chunk failure");
-      return false;
-    }
-
-    remaining -= read_len;
-    chunk_index++;
-  }
-
-  esp_http_client_cleanup(chunk_client);
-  ESP_LOGI(TAG, "Stage chunks: %lu x <=%d KB, rtt avg %lld / min %lld / max %lld ms, "
-                "browser wait %lld ms, connections %d, retries %lu",
-           (unsigned long)tm.chunks, SCRATCH_BUFSIZE / 1024,
-           (long long)(tm.chunks ? tm.chunk_total_us / tm.chunks / 1000 : 0),
-           (long long)(tm.chunks ? tm.chunk_min_us / 1000 : 0),
-           (long long)(tm.chunk_max_us / 1000), (long long)(tm.browser_us / 1000),
-           chunk_connects, (unsigned long)tm.retries);
-
-  // Compute final MD5
-  unsigned char hash[16];
-  mbedtls_md5_finish(&ctx, hash);
-  mbedtls_md5_free(&ctx);
-
-  char computed_md5[33] = {0};
-  for (int i = 0; i < 16; i++) {
-    snprintf(&computed_md5[i * 2], 3, "%02x", hash[i]);
-  }
-  ESP_LOGI(TAG, "Upload computed MD5: %s (expected: %s)", computed_md5,
-           expected_md5);
-
-  // 3. Finalize — send the computed checksum for the receiver to verify
-  if (s_abort_transfer) {
-    ESP_LOGW(TAG, "Transfer aborted just before finalize");
+  s_up.chunk_client = esp_http_client_init(&chunk_cfg);
+  if (s_up.chunk_client == NULL) {
     file_transfer_cancel_receiver();
-    led_set_state(LED_STATE_IDLE);
-    return false;
+    session_end();
+    snprintf(msg, msg_len, "HTTP client init failed");
+    return 500;
+  }
+  esp_http_client_set_method(s_up.chunk_client, HTTP_METHOD_POST);
+  esp_http_client_set_header(s_up.chunk_client, "Content-Type", "application/octet-stream");
+  esp_http_client_set_header(s_up.chunk_client, "Connection", "keep-alive");
+  s_up.active = true;
+
+  led_set_state(LED_STATE_SENDING);
+  ESP_LOGI(TAG, "Stage prepare: %lld ms, session %s", (long long)(s_up.prepare_us / 1000), s_up.id);
+  strlcpy(session_out, s_up.id, session_len);
+  return 200;
+}
+
+int file_transfer_chunk(const char *session, int index, const char *data, int len,
+                        uint64_t *acked_out, char *msg, size_t msg_len) {
+  msg[0] = '\0';
+  if (!session_matches(session)) {
+    snprintf(msg, msg_len, "Unknown or expired upload session");
+    return 410;
+  }
+  s_up.last_activity_us = esp_timer_get_time();
+  if (index > s_up.next_index) {
+    snprintf(msg, msg_len, "Out-of-order chunk %d (expected %d)", index, s_up.next_index);
+    return 409;
+  }
+  if (index == s_up.next_index && s_up.acked + (uint64_t)len > s_up.size) {
+    snprintf(msg, msg_len, "Chunk exceeds declared file size");
+    return 400;
   }
 
-  char fin_url[128];
-  get_receiver_url("/finalize", fin_url, sizeof(fin_url));
+  // index < next_index is a browser retry of an acked chunk: forward anyway,
+  // the receiver acknowledges duplicates without re-appending.
+  char idx[16];
+  snprintf(idx, sizeof(idx), "%d", index);
+  esp_http_client_set_header(s_up.chunk_client, "X-Chunk-Index", idx);
+  esp_http_client_set_post_field(s_up.chunk_client, data, len);
 
-  esp_http_client_config_t fin_cfg = {
-      .url = fin_url,
-      // receiver: fsync, rename, list snapshot, unmount, 1.5 s USB reconnect wait
-      .timeout_ms = 30000,
-  };
-  client = esp_http_client_init(&fin_cfg);
-  esp_http_client_set_method(client, HTTP_METHOD_POST);
-  esp_http_client_set_header(client, "Content-Type", "application/json");
+  int64_t t0 = esp_timer_get_time();
+  esp_err_t err = esp_http_client_perform(s_up.chunk_client);
+  int64_t rtt = esp_timer_get_time() - t0;
+  s_up.chunk_total_us += rtt;
+  if (rtt > s_up.chunk_max_us) s_up.chunk_max_us = rtt;
+  s_up.chunks++;
 
-  snprintf(payload, sizeof(payload), "{\"md5\":\"%s\"}", computed_md5);
-  esp_http_client_set_post_field(client, payload, strlen(payload));
+  if (err != ESP_OK) {
+    snprintf(msg, msg_len, "Receiver unreachable: %s", esp_err_to_name(err));
+    ESP_LOGW(TAG, "Chunk %d: %s", index, msg);
+    return 502;
+  }
+  int status = esp_http_client_get_status_code(s_up.chunk_client);
+  if (status != 200) {
+    snprintf(msg, msg_len, "Receiver rejected chunk %d (HTTP %d)", index, status);
+    ESP_LOGW(TAG, "%s", msg);
+    return status == 409 ? 409 : 502;
+  }
 
-  int64_t t_fin = esp_timer_get_time();
-  err = esp_http_client_perform(client);
-  int fin_status = esp_http_client_get_status_code(client);
-  esp_http_client_cleanup(client);
-  tm.finalize_us = esp_timer_get_time() - t_fin;
+  if (index == s_up.next_index) {
+    s_up.next_index++;
+    s_up.acked += len;
+  }
+  *acked_out = s_up.acked;
+  return 200;
+}
 
-  int64_t total_us = esp_timer_get_time() - tm.t_start;
-  ESP_LOGI(TAG, "XFER summary: %u bytes in %lld ms = %.1f KB/s | prepare %lld, browser %lld, "
-                "chunks %lld (avg %lld, max %lld), finalize %lld ms | %s",
-           (unsigned)filesize, (long long)(total_us / 1000),
-           total_us > 0 ? (double)filesize / 1024.0 / ((double)total_us / 1e6) : 0.0,
-           (long long)(tm.prepare_us / 1000), (long long)(tm.browser_us / 1000),
-           (long long)(tm.chunk_total_us / 1000),
-           (long long)(tm.chunks ? tm.chunk_total_us / tm.chunks / 1000 : 0),
-           (long long)(tm.chunk_max_us / 1000), (long long)(tm.finalize_us / 1000),
-           (err == ESP_OK && fin_status == 200) ? "OK" : "FAILED");
+int file_transfer_finish(const char *session, char *msg, size_t msg_len) {
+  msg[0] = '\0';
+  if (!session_matches(session)) {
+    snprintf(msg, msg_len, "Unknown or expired upload session");
+    return 410;
+  }
+  if (s_up.acked != s_up.size) {
+    snprintf(msg, msg_len, "Incomplete upload: %llu of %u bytes acknowledged",
+             (unsigned long long)s_up.acked, (unsigned)s_up.size);
+    return 400;
+  }
+  // Close the chunk connection first so it doesn't hold a receiver socket
+  esp_http_client_cleanup(s_up.chunk_client);
+  s_up.chunk_client = NULL;
 
-  if (err != ESP_OK || fin_status != 200) {
-    ESP_LOGE(TAG, "Receiver /finalize failed. Code: %d", fin_status);
+  char json[64];
+  snprintf(json, sizeof(json), "{\"md5\":\"%s\"}", s_up.md5); // browser MD5: end-to-end check
+  int64_t t0 = esp_timer_get_time();
+  // receiver: fsync, MD5 verify, rename, list snapshot, unmount (replies before USB reconnect)
+  int status = receiver_post_json("/finalize", json, false, 30000, msg, msg_len);
+  int64_t fin_us = esp_timer_get_time() - t0;
+
+  int64_t total_us = esp_timer_get_time() - s_up.t_start_us;
+  ESP_LOGI(TAG, "XFER summary: %u bytes in %lld ms = %.1f KB/s | prepare %lld ms, "
+                "%lu chunks (rtt avg %lld, max %lld ms, connections %d), finalize %lld ms | %s",
+           (unsigned)s_up.size, (long long)(total_us / 1000),
+           total_us > 0 ? (double)s_up.size / 1024.0 / ((double)total_us / 1e6) : 0.0,
+           (long long)(s_up.prepare_us / 1000), (unsigned long)s_up.chunks,
+           (long long)(s_up.chunks ? s_up.chunk_total_us / s_up.chunks / 1000 : 0),
+           (long long)(s_up.chunk_max_us / 1000), s_up.connects,
+           (long long)(fin_us / 1000), status == 200 ? "OK" : "FAILED");
+
+  session_end();
+  if (status != 200) {
     led_set_state(LED_STATE_ERROR);
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                        "Checksum mismatch on receiver side.");
-    return false;
+    if (msg[0] == '\0') {
+      snprintf(msg, msg_len, "Receiver /finalize failed (HTTP %d)", status);
+    }
+    return status < 0 ? 502 : status;
   }
-
-  ESP_LOGI(TAG, "File successfully transferred and verified.");
   led_set_state(LED_STATE_SUCCESS);
-  s_abort_transfer = false;
-  httpd_resp_set_type(req, "application/json; charset=utf-8");
-  httpd_resp_sendstr(req, "{\"status\":\"success\"}");
-  return true;
+  return 200;
+}
+
+int file_transfer_cancel(const char *session) {
+  if (s_up.active && session && session[0] && !session_matches(session)) {
+    return 410; // someone else's upload: leave it alone
+  }
+  if (s_up.active) {
+    ESP_LOGW(TAG, "Upload %s cancelled after %llu bytes", s_up.id, (unsigned long long)s_up.acked);
+  }
+  session_end();
+  led_set_state(LED_STATE_IDLE);
+  int code = file_transfer_cancel_receiver();
+  return code == 200 ? 200 : 502;
 }
 
 int file_transfer_get_receiver_status(char *out_state_str, size_t max_len) {
@@ -540,18 +510,6 @@ int file_transfer_format_receiver(void) {
   }
   esp_http_client_cleanup(client);
   return status_code;
-}
-
-void file_transfer_abort(void) {
-    s_abort_transfer = true;
-}
-
-bool file_transfer_is_aborted(void) {
-    return s_abort_transfer;
-}
-
-void file_transfer_clear_abort(void) {
-    s_abort_transfer = false;
 }
 
 int file_transfer_cancel_receiver(void) {
