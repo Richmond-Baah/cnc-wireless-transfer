@@ -794,6 +794,7 @@ void web_server_start(void) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 22; // 19 registered
   config.max_open_sockets = 7;
+  config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
   config.send_wait_timeout = 30;
   config.stack_size = 8192;
