@@ -8,6 +8,7 @@
 #include "lwip/ip4_addr.h"
 #include "nvs.h"
 #include "dhcpserver/dhcpserver.h"
+#include "mdns.h"
 #include <string.h>
 
 #ifndef CONFIG_CNC_DEFAULT_WIFI_SSID
@@ -24,6 +25,55 @@
 
 static const char *TAG = "WIFI_MGR";
 
+// STA (router) link state for /status. Written by the event task, read by httpd.
+#define STA_MAX_RETRIES 5 // then give up so channel scans stop disturbing the AP
+static portMUX_TYPE s_sta_mux = portMUX_INITIALIZER_UNLOCKED;
+static const char *s_sta_state = "disabled"; // disabled|connecting|connected|failed
+static char s_sta_reason[48] = "";
+static char s_sta_ip[16] = "";
+static int s_sta_retries = 0;
+static bool s_sta_was_connected = false;
+
+static void sta_set(const char *state, const char *reason, const char *ip) {
+  portENTER_CRITICAL(&s_sta_mux);
+  s_sta_state = state;
+  strlcpy(s_sta_reason, reason ? reason : "", sizeof(s_sta_reason));
+  strlcpy(s_sta_ip, ip ? ip : "", sizeof(s_sta_ip));
+  portEXIT_CRITICAL(&s_sta_mux);
+}
+
+void wifi_get_sta_status(char *state, size_t state_len, char *reason,
+                         size_t reason_len, char *ip, size_t ip_len) {
+  portENTER_CRITICAL(&s_sta_mux);
+  strlcpy(state, s_sta_state, state_len);
+  strlcpy(reason, s_sta_reason, reason_len);
+  strlcpy(ip, s_sta_ip, ip_len);
+  portEXIT_CRITICAL(&s_sta_mux);
+}
+
+static const char *sta_reason_text(uint8_t reason) {
+  switch (reason) {
+  case WIFI_REASON_NO_AP_FOUND:
+    return "network (SSID) not found";
+  case WIFI_REASON_AUTH_FAIL:
+  case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+  case WIFI_REASON_HANDSHAKE_TIMEOUT:
+  case WIFI_REASON_MIC_FAILURE:
+    return "wrong password";
+  case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+  case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+    return "security mode not supported";
+  case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+  case WIFI_REASON_BEACON_TIMEOUT:
+    return "signal too weak";
+  case WIFI_REASON_ASSOC_FAIL:
+  case WIFI_REASON_CONNECTION_FAIL:
+    return "router refused connection";
+  default:
+    return NULL;
+  }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
   if (event_id == WIFI_EVENT_AP_STACONNECTED) {
@@ -37,15 +87,55 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "Station " MACSTR " left, AID=%d", MAC2STR(event->mac),
              event->aid);
   } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    sta_set("connecting", NULL, NULL);
     esp_wifi_connect();
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
-    esp_wifi_connect();
-    ESP_LOGI(TAG, "Retry to connect to the AP");
+    wifi_event_sta_disconnected_t *event =
+        (wifi_event_sta_disconnected_t *)event_data;
+    char reason[48];
+    const char *txt = sta_reason_text(event->reason);
+    if (txt) {
+      snprintf(reason, sizeof(reason), "%s (%d)", txt, event->reason);
+    } else {
+      snprintf(reason, sizeof(reason), "disconnected (reason %d)", event->reason);
+    }
+    // A link that worked before (router reboot) keeps retrying; a new one that
+    // never connected (bad SSID/password) gives up so the AP stays usable.
+    if (s_sta_was_connected || ++s_sta_retries < STA_MAX_RETRIES) {
+      sta_set("connecting", reason, NULL);
+      ESP_LOGW(TAG, "STA disconnected: %s, retrying (%d/%d)", reason,
+               s_sta_retries, STA_MAX_RETRIES);
+      esp_wifi_connect();
+    } else {
+      sta_set("failed", reason, NULL);
+      ESP_LOGE(TAG, "STA connect FAILED: %s. Giving up; AP 192.168.4.1 stays up. "
+                    "Fix router SSID/password in Settings.", reason);
+    }
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    ESP_LOGI(TAG, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+    char ip[16];
+    snprintf(ip, sizeof(ip), IPSTR, IP2STR(&event->ip_info.ip));
+    s_sta_retries = 0;
+    s_sta_was_connected = true;
+    sta_set("connected", NULL, ip);
+    ESP_LOGI(TAG, "==================================================");
+    ESP_LOGI(TAG, " STA connected to router. STA IP: %s", ip);
+    ESP_LOGI(TAG, " Open http://%s or http://" MDNS_HOSTNAME ".local", ip);
+    ESP_LOGI(TAG, "==================================================");
   }
+}
+
+static void mdns_start(void) {
+  esp_err_t err = mdns_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "mDNS init failed: %s", esp_err_to_name(err));
+    return;
+  }
+  mdns_hostname_set(MDNS_HOSTNAME);
+  mdns_instance_name_set("CNC Wireless Transfer");
+  mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+  ESP_LOGI(TAG, "mDNS: http://" MDNS_HOSTNAME ".local");
 }
 
 void wifi_init(void) {
@@ -164,7 +254,8 @@ void wifi_init(void) {
   }
 
   if (strcmp(wifi_mode, "STA") == 0 && strlen(sta_ssid) > 0) {
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+    esp_netif_set_hostname(sta_netif, MDNS_HOSTNAME); // name in the router's DHCP list
     wifi_config_t sta_config;
     memset(&sta_config, 0, sizeof(wifi_config_t));
     strncpy((char *)sta_config.sta.ssid, sta_ssid, sizeof(sta_config.sta.ssid) - 1);
@@ -213,7 +304,8 @@ void wifi_init(void) {
     esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease));
     esp_netif_dhcps_start(ap_netif);
 
-    ESP_LOGI(TAG, "=== WiFi Started Successfully (PS_NONE, ch=%d, beacon=%d, BW=HT20) ===", 
+    ESP_LOGI(TAG, "=== WiFi Started Successfully (PS_NONE, ch=%d, beacon=%d, BW=HT20) ===",
              ap_config.ap.channel, ap_config.ap.beacon_interval);
+    mdns_start();
   }
 }

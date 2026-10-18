@@ -87,12 +87,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const settingsModal = document.getElementById('settingsModal');
     const settingsForm = document.getElementById('settingsForm');
     const settingsFeedback = document.getElementById('settingsFeedback');
+    let lastStaIp = ''; // from /status, for the post-save hint
 
     if (configBtn) {
         configBtn.addEventListener('click', () => {
             settingsModal.classList.add('show');
+            settingsFeedback.style.display = 'none';
             fetch('/config', { headers: { 'Authorization': 'Bearer ' + token } })
-                .then(r => r.json())
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
                 .then(data => {
                     document.getElementById('wifiMode').value = data.wifi_mode || 'AP';
                     document.getElementById('apSsid').value = data.ap_ssid || '';
@@ -103,7 +108,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     document.getElementById('receiverIp').value = data.receiver_ip || '';
                     document.getElementById('authUser').value = data.auth_user || '';
                     document.getElementById('authPass').value = '';
-                }).catch(e => console.error('Config fetch error:', e));
+                }).catch(e => {
+                    settingsFeedback.textContent = 'Could not load current settings (' + e.message + ').';
+                    settingsFeedback.className = 'feedback-msg error';
+                    settingsFeedback.style.display = 'block';
+                });
         });
 
         closeSettingsBtn.addEventListener('click', () => {
@@ -127,13 +136,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
 
                 if (res.ok) {
-                    settingsFeedback.textContent = "Settings saved. Device restarting...";
+                    let text = "Settings saved. Device restarting...";
+                    if (data.wifi_mode === 'STA') {
+                        text += ' On your router, open http://cnc-transfer.local or http://' +
+                            (lastStaIp || '<STA IP shown in status after restart>') + '.';
+                    }
+                    settingsFeedback.textContent = text;
                     settingsFeedback.className = "feedback-msg success";
                     settingsFeedback.style.display = 'block';
                     sessionStorage.removeItem('token');
-                    setTimeout(() => { window.location.href = 'index.html'; }, 5000);
+                    setTimeout(() => { window.location.href = 'index.html'; },
+                        data.wifi_mode === 'STA' ? 20000 : 5000);
                 } else {
-                    settingsFeedback.textContent = "Failed to save settings.";
+                    let reason = '';
+                    try { reason = (await res.text()).trim(); } catch (e2) {}
+                    settingsFeedback.textContent = "Failed to save settings" + (reason ? ': ' + reason : '.');
                     settingsFeedback.className = "feedback-msg error";
                     settingsFeedback.style.display = 'block';
                 }
@@ -185,6 +202,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (fwEl) {
                     fwEl.textContent = 'Firmware: transmitter ' + (data.tx_fw || '-') +
                         ' | receiver ' + (data.fw || '-');
+                }
+                const staEl = document.getElementById('staInfo');
+                if (staEl && data.sta) {
+                    const s = data.sta;
+                    if (s.ip) lastStaIp = s.ip;
+                    let t = '';
+                    if (s.state === 'connected') {
+                        t = 'Router Wi-Fi: connected, IP ' + s.ip + ' (http://cnc-transfer.local)';
+                    } else if (s.state === 'failed') {
+                        t = 'Router Wi-Fi: FAILED – ' + (s.reason || 'unknown error') +
+                            '. Fix SSID/password in Settings (this hotspot stays up).';
+                    } else if (s.state === 'connecting') {
+                        t = 'Router Wi-Fi: connecting...' + (s.reason ? ' (last error: ' + s.reason + ')' : '');
+                    }
+                    staEl.textContent = t;
+                    staEl.style.display = t ? 'block' : 'none';
                 }
             } else if (res.status === 401) {
                 sessionStorage.removeItem('token');
