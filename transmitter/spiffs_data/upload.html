@@ -97,7 +97,10 @@
         <div class="card" style="margin-top: 20px;">
             <div class="d-flex justify-between align-center" style="margin-bottom: 15px;">
                 <h2 style="margin: 0;">Files on Receiver</h2>
-                <button id="refreshFilesBtn" class="btn btn-secondary btn-sm">Refresh List</button>
+                <div class="d-flex align-center" style="gap: 8px;">
+                    <button id="deleteSelectedBtn" class="btn btn-danger btn-sm" disabled>Delete selected</button>
+                    <button id="refreshFilesBtn" class="btn btn-secondary btn-sm">Refresh List</button>
+                </div>
             </div>
             <p id="fileListNote" class="text-muted" style="display: none; font-size: 0.85rem; margin-bottom: 8px;">As of last transfer (the machine has the drive)</p>
             <div id="receiverFileList" class="file-list">

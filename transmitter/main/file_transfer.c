@@ -291,7 +291,7 @@ static int begin_locked(const char *name, size_t size, const char *md5, bool for
   cJSON_free(json);
 
   if (status != 200) {
-    led_set_state(status == 423 ? LED_STATE_IDLE : LED_STATE_ERROR);
+    led_set_state((status == 423 || status == 507) ? LED_STATE_IDLE : LED_STATE_ERROR);
     if (status == 423) {
       snprintf(msg, msg_len, "machine_busy");
     } else if (msg[0] == '\0') {
@@ -511,6 +511,11 @@ bool file_transfer_is_receiver_online(void) {
     xSemaphoreGive(s_status_mutex);
   }
   return online;
+}
+
+int file_transfer_delete_receiver(const char *json, bool force, char *resp, size_t resp_len) {
+  // Receiver body is {"deleted":[..],"skipped":[..],...} or an error text
+  return receiver_post_json("/delete", json, force, 20000, resp, resp_len);
 }
 
 int file_transfer_clear_receiver(bool force) {

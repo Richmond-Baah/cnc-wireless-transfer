@@ -165,6 +165,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── Status Polling ─────────────────────────────────────────────────
     const statusBadge = document.getElementById('receiverStatus');
     let statusInterval;
+    let lastFree = null, lastTotal = 0; // receiver drive space, for the pre-upload size check
 
     const pollStatus = async () => {
         try {
@@ -197,6 +198,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 if (sfreeEl && data.free_bytes !== undefined) {
                     sfreeEl.textContent = formatStorage(data.free_bytes);
+                }
+                if (typeof data.free_bytes === 'number' && data.state !== 'OFFLINE') {
+                    lastFree = data.free_bytes;
+                    lastTotal = data.total_bytes || 0;
+                    updateSpaceCheck();
                 }
                 const fwEl = document.getElementById('fwVersions');
                 if (fwEl) {
@@ -241,6 +247,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadReceiverFiles = async () => {
         if (!receiverFileList) return;
         receiverFileList.innerHTML = '<p class="text-muted">Fetching file list...</p>';
+        const dsb = document.getElementById('deleteSelectedBtn');
+        if (dsb) dsb.disabled = true; // selection is cleared by the re-render
         try {
             const res = await fetch('/receiver_list', {
                 headers: { 'Authorization': 'Bearer ' + token }
@@ -264,9 +272,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     </li>`;
                         return;
                     }
-                    html += `<li class="d-flex justify-between align-center">
-                        <span class="file-name">${escapeHtml(f.name)}</span>
+                    const n = escapeHtml(f.name);
+                    html += `<li class="d-flex justify-between align-center" style="gap: 8px;">
+                        <input type="checkbox" class="file-select" data-name="${n}" aria-label="Select ${n}">
+                        <span class="file-name">${n}</span>
                         <span class="file-size text-muted">${formatBytes(f.size)}</span>
+                        <button class="btn btn-danger btn-sm file-delete" data-name="${n}" title="Delete ${n}">Delete</button>
                     </li>`;
                 });
                 html += '</ul>';
@@ -283,6 +294,67 @@ document.addEventListener('DOMContentLoaded', () => {
     if (refreshFilesBtn) {
         refreshFilesBtn.addEventListener('click', loadReceiverFiles);
         loadReceiverFiles();
+    }
+
+    // ─── Delete Files ───────────────────────────────────────────────────
+    const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+    const selectedNames = () => Array.from(receiverFileList.querySelectorAll('.file-select:checked'))
+        .map(cb => cb.dataset.name);
+    const updateDeleteSelected = () => {
+        if (deleteSelectedBtn) deleteSelectedBtn.disabled = selectedNames().length === 0;
+    };
+
+    async function deleteFiles(names) {
+        if (!names.length) return;
+        if (!confirm('Delete ' + names.length + ' file(s) from the receiver?\n\n' + names.join('\n'))) return;
+        const send = (force) => {
+            const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+            if (force) headers['X-Force'] = '1';
+            return fetch('/receiver_delete', { method: 'POST', headers, body: JSON.stringify({ files: names }) });
+        };
+        if (deleteSelectedBtn) deleteSelectedBtn.disabled = true;
+        try {
+            let res = await send(false);
+            if (res.status === 423 &&
+                confirm('Machine is reading – stop the job or confirm it\'s idle.\nDelete anyway?')) {
+                res = await send(true);
+            }
+            if (res.ok) {
+                const d = await res.json();
+                let msg = 'Deleted ' + (d.deleted || []).length + ' file(s).';
+                if (d.skipped && d.skipped.length) {
+                    msg += ' Skipped: ' + d.skipped.map(s => s.name + ' (' + s.reason + ')').join(', ') + '.';
+                }
+                if (typeof d.free_bytes === 'number') {
+                    lastFree = d.free_bytes;
+                    if (d.total_bytes) lastTotal = d.total_bytes;
+                    updateSpaceCheck();
+                }
+                showFeedback(msg, d.skipped && d.skipped.length ? 'error' : 'success');
+            } else if (res.status === 423) {
+                showFeedback('Delete cancelled: machine is reading the drive.', 'error');
+            } else {
+                showFeedback('❌ Delete failed: ' + await errorText(res), 'error');
+            }
+        } catch (e) {
+            showFeedback('❌ Network error deleting files.', 'error');
+        }
+        loadReceiverFiles();
+        pollStatus(); // free space -> re-checks whether the selected file fits
+        updateDeleteSelected();
+    }
+
+    if (receiverFileList) {
+        receiverFileList.addEventListener('change', (e) => {
+            if (e.target.classList.contains('file-select')) updateDeleteSelected();
+        });
+        receiverFileList.addEventListener('click', (e) => {
+            const btn = e.target.closest('.file-delete');
+            if (btn) deleteFiles([btn.dataset.name]);
+        });
+    }
+    if (deleteSelectedBtn) {
+        deleteSelectedBtn.addEventListener('click', () => deleteFiles(selectedNames()));
     }
 
     // ─── Clear Storage ──────────────────────────────────────────────────
@@ -427,9 +499,37 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedFileName.textContent = file.name;
         selectedFileSize.textContent = formatBytes(file.size);
         selectedFileInfo.style.display = 'block';
-        uploadBtn.disabled = false;
         hideFeedback();
         progressContainer.style.display = 'none';
+        updateSpaceCheck();
+    }
+
+    // Same rule as the receiver's /prepare check: size + max(64 KB, 1% of drive)
+    let uploading = false;
+    let spaceWarningShown = false;
+    function spaceNeeded(size, total) {
+        return size + Math.max(64 * 1024, Math.floor((total || 0) / 100));
+    }
+    function spaceMessage(size, free, needed) {
+        return 'File is ' + formatBytes(size) + ', drive has ' + formatBytes(free) +
+            ' free. Delete about ' + formatBytes(Math.max(0, needed - free)) + ' below.';
+    }
+    function updateSpaceCheck() {
+        if (!uploadBtn || uploading) return;
+        if (!currentFile) {
+            uploadBtn.disabled = true;
+            return;
+        }
+        const needed = spaceNeeded(currentFile.size, lastTotal);
+        const fits = lastFree === null || lastFree >= needed; // unknown: the receiver re-checks
+        uploadBtn.disabled = !fits;
+        if (!fits) {
+            showFeedback(spaceMessage(currentFile.size, lastFree, needed), 'error');
+            spaceWarningShown = true;
+        } else if (spaceWarningShown) {
+            hideFeedback();
+            spaceWarningShown = false;
+        }
     }
 
     function formatBytes(bytes) {
@@ -441,6 +541,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showFeedback(msg, type) {
+        spaceWarningShown = false; // callers showing the space warning set it again
         uploadFeedback.textContent = msg;
         uploadFeedback.className = 'feedback-msg ' + type;
         uploadFeedback.style.display = 'block';
@@ -448,6 +549,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function hideFeedback() {
         uploadFeedback.style.display = 'none';
+        spaceWarningShown = false;
     }
 
     // ─── Upload Logic ───────────────────────────────────────────────────
@@ -548,6 +650,7 @@ document.addEventListener('DOMContentLoaded', () => {
         cancelRequested = false;
         cancelUploadBtn.disabled = false;
 
+        uploading = true;
         uploadBtn.disabled = true;
         fileInput.disabled = true;
         progressContainer.style.display = 'block';
@@ -573,6 +676,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 busyRetryFile = file;
                 if (forceUploadBtn) forceUploadBtn.style.display = 'block';
                 resetUploadUI();
+                return;
+            }
+            if (res.status === 507) {
+                // Receiver re-checked the real drive: keep the file selected so
+                // Start re-enables once enough is deleted below
+                const raw = await errorText(res);
+                let d = {};
+                try { d = JSON.parse(raw); } catch (x) { /* plain text */ }
+                if (typeof d.free_bytes === 'number') lastFree = d.free_bytes;
+                updateProgress(0, 'Not enough space on the drive');
+                showFeedback(typeof d.free_bytes === 'number'
+                    ? spaceMessage(d.file_size, d.free_bytes, d.needed_bytes)
+                    : 'Not enough space on the drive: ' + raw, 'error');
+                spaceWarningShown = true;
+                resetUploadUI(true);
                 return;
             }
             if (!res.ok) throw new UploadError(stage, await errorText(res), res.status);
@@ -632,8 +750,9 @@ document.addEventListener('DOMContentLoaded', () => {
         progressText.textContent = text;
     }
 
-    function resetUploadUI() {
-        currentFile = null;
+    function resetUploadUI(keepFile) {
+        uploading = false;
+        if (keepFile !== true) currentFile = null;
         fileInput.disabled = false;
         uploadBtn.disabled = true;
         document.getElementById('floatingCancel').style.display = 'none';

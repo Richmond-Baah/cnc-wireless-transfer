@@ -199,6 +199,13 @@ static bool filename_is_valid(const char *name) {
     return !dots_only;
 }
 
+// Headroom required beyond the file size (cluster rounding, FAT updates):
+// max(64 KB, 1% of the volume). The web UI applies the same rule.
+static uint64_t space_margin(uint64_t total) {
+    uint64_t pct = total / 100;
+    return pct > 64 * 1024 ? pct : 64 * 1024;
+}
+
 // Helper to sanitize filename and prevent path traversal
 static void sanitize_filename(const char *input, char *output, size_t max_len) {
     const char *basename = strrchr(input, '/');
@@ -354,6 +361,33 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "File system error");
         cJSON_Delete(json);
         return ESP_FAIL;
+    }
+
+    // Space check on the real volume before writing anything. A same-name file
+    // stays on the card until /finalize renames over it, so it is not counted free.
+    cJSON *fsize = cJSON_GetObjectItem(json, "filesize");
+    uint64_t vol_total = 0, vol_free = 0;
+    const char *vol_type = NULL;
+    if (cJSON_IsNumber(fsize) && fsize->valuedouble >= 0 &&
+        storage_manager_get_info(&vol_total, &vol_free, &vol_type) == ESP_OK) {
+        uint64_t need = (uint64_t)fsize->valuedouble + space_margin(vol_total);
+        if (vol_free < need) {
+            ESP_LOGW(TAG, "Not enough space for %s: size %.0f, free %llu, need %llu",
+                     sanitized, fsize->valuedouble, vol_free, need);
+            snapshot_storage(); // still mounted: /status and /list now show live free space
+            state_machine_transition(STATE_IDLE);
+            storage_manager_flush_and_release_for_usb();
+            usb_msc_connect();
+            char body[160];
+            snprintf(body, sizeof(body),
+                     "{\"error\":\"insufficient_space\",\"file_size\":%.0f,\"free_bytes\":%llu,"
+                     "\"needed_bytes\":%llu}", fsize->valuedouble, vol_free, need);
+            httpd_resp_set_status(req, "507 Insufficient Storage");
+            httpd_resp_set_type(req, "application/json; charset=utf-8");
+            httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+            cJSON_Delete(json);
+            return ESP_OK;
+        }
     }
 
     // Build paths only after the active storage path has been resolved
@@ -711,6 +745,125 @@ static esp_err_t clear_files_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// POST /delete {"files":["a.nc","b.nc"]}: deletes files in the storage root in
+// one mount cycle. Names use the upload validation (no path parts), folders are
+// refused, missing files are skipped and reported. Busy guard as for /clear.
+#define DELETE_MAX_FILES FILE_CACHE_MAX
+static esp_err_t delete_post_handler(httpd_req_t *req) {
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len >= (int)sizeof(chunk_buf)) {
+        drain_request_body(req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body missing or too large");
+        return ESP_FAIL;
+    }
+    int cur_len = 0;
+    while (cur_len < total_len) {
+        int r = httpd_req_recv(req, chunk_buf + cur_len, total_len - cur_len);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive Error");
+            return ESP_FAIL;
+        }
+        cur_len += r;
+    }
+    chunk_buf[cur_len] = '\0';
+
+    cJSON *json = cJSON_Parse(chunk_buf);
+    cJSON *files = json ? cJSON_GetObjectItem(json, "files") : NULL;
+    int count = cJSON_IsArray(files) ? cJSON_GetArraySize(files) : 0;
+    const char *problem = NULL;
+    if (count == 0) {
+        problem = "Expected {\"files\":[names]}";
+    } else if (count > DELETE_MAX_FILES) {
+        problem = "Too many files in one request";
+    }
+    for (int i = 0; !problem && i < count; i++) {
+        cJSON *item = cJSON_GetArrayItem(files, i);
+        if (!cJSON_IsString(item) || strlen(item->valuestring) > 127 ||
+            !filename_is_valid(item->valuestring)) {
+            problem = "Invalid filename: no / \\ : .. or control characters, not empty or dots-only";
+        }
+    }
+    if (problem) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, problem);
+        return ESP_FAIL;
+    }
+    if (state_machine_get() == STATE_RECEIVING) {
+        cJSON_Delete(json);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_send(req, "Receiver Busy", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    if (sd_card_has_card_error()) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Card unreadable - format FAT32 on PC or use Format");
+        return ESP_FAIL;
+    }
+    if (reject_if_machine_busy(req)) {
+        cJSON_Delete(json);
+        return ESP_OK;
+    }
+
+    // One cycle: USB off -> mount -> delete all -> snapshot -> unmount -> USB on
+    usb_msc_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    if (!storage_manager_fatfs_available() || (storage_manager_is_sd_present() && !sd_card_is_mounted())) {
+        storage_manager_remount();
+    }
+    if (!active_storage_mounted()) {
+        cJSON_Delete(json);
+        storage_manager_flush_and_release_for_usb();
+        usb_msc_connect();
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot mount storage");
+        return ESP_FAIL;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON *deleted = cJSON_AddArrayToObject(resp, "deleted");
+    cJSON *skipped = cJSON_AddArrayToObject(resp, "skipped");
+    for (int i = 0; i < count; i++) {
+        const char *name = cJSON_GetArrayItem(files, i)->valuestring;
+        char path[320];
+        snprintf(path, sizeof(path), "%s/%s", STORAGE_PATH, name);
+        struct stat st;
+        const char *why = NULL;
+        if (stat(path, &st) != 0) {
+            why = "not found";
+        } else if (S_ISDIR(st.st_mode)) {
+            why = "is a folder";
+        } else if (remove(path) != 0) {
+            why = "delete failed";
+        }
+        if (why) {
+            cJSON *s = cJSON_CreateObject();
+            cJSON_AddStringToObject(s, "name", name);
+            cJSON_AddStringToObject(s, "reason", why);
+            cJSON_AddItemToArray(skipped, s);
+            ESP_LOGW(TAG, "Delete skipped %s: %s", name, why);
+        } else {
+            cJSON_AddItemToArray(deleted, cJSON_CreateString(name));
+            ESP_LOGI(TAG, "Deleted %s", path);
+        }
+    }
+    cJSON_Delete(json);
+
+    snapshot_storage(); // still mounted: cache the new list + free space
+    cJSON_AddNumberToObject(resp, "free_bytes", (double)s_cache_free);
+    cJSON_AddNumberToObject(resp, "total_bytes", (double)s_cache_total);
+    storage_manager_flush_and_release_for_usb();
+    vTaskDelay(pdMS_TO_TICKS(1000)); // let the host notice the disconnect
+    usb_msc_connect();
+
+    char *out = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_send(req, out ? out : "{}", HTTPD_RESP_USE_STRLEN);
+    cJSON_free(out);
+    return ESP_OK;
+}
+
 static esp_err_t format_storage_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Full format requested");
 
@@ -946,6 +1099,7 @@ void file_receiver_init(void) {
         httpd_uri_t uri_cancel = {.uri = "/cancel", .method = HTTP_POST, .handler = cancel_post_handler};
         httpd_uri_t uri_index = {.uri = "/", .method = HTTP_GET, .handler = index_get_handler};
         httpd_uri_t uri_settings = {.uri = "/settings", .method = HTTP_POST, .handler = settings_post_handler};
+        httpd_uri_t uri_delete = {.uri = "/delete", .method = HTTP_POST, .handler = delete_post_handler};
 
         httpd_register_uri_handler(server, &uri_prepare);
         httpd_register_uri_handler(server, &uri_chunk);
@@ -958,6 +1112,7 @@ void file_receiver_init(void) {
         httpd_register_uri_handler(server, &uri_cancel);
         httpd_register_uri_handler(server, &uri_index);
         httpd_register_uri_handler(server, &uri_settings);
+        httpd_register_uri_handler(server, &uri_delete);
 
         ESP_LOGI(TAG, "File receiver HTTP server started on port %d", config.server_port);
     } else {

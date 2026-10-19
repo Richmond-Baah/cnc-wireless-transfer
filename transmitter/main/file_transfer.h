@@ -29,6 +29,8 @@ int file_transfer_cancel(const char *session);
 int file_transfer_get_receiver_status(char *out_state_str, size_t max_len);
 
 // Request the receiver to clear its storage
+// POSTs {"files":[...]} to the receiver /delete; resp gets its body. Returns HTTP status or -1.
+int file_transfer_delete_receiver(const char *json, bool force, char *resp, size_t resp_len);
 int file_transfer_clear_receiver(bool force); // sends {"confirm":"WIPE"}; force bypasses busy guard
 
 // Request the receiver to perform a full format of its storage

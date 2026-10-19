@@ -207,6 +207,7 @@ static void send_status_text(httpd_req_t *req, int code, const char *msg) {
   case 423: status = "423 Locked"; break;
   case 502: status = "502 Bad Gateway"; break;
   case 503: status = "503 Service Unavailable"; break;
+  case 507: status = "507 Insufficient Storage"; break;
   default:  status = "500 Internal Server Error"; break;
   }
   httpd_resp_set_status(req, status);
@@ -287,6 +288,13 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
     httpd_resp_set_status(req, "423 Locked");
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
+    return ESP_OK;
+  }
+  if (code == 507) {
+    // Receiver's JSON {file_size, free_bytes, needed_bytes} passes through as-is
+    httpd_resp_set_status(req, "507 Insufficient Storage");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, msg);
     return ESP_OK;
   }
   if (code != 200) {
@@ -689,6 +697,38 @@ static esp_err_t clear_post_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// Proxies {"files":[...]} to the receiver /delete (validation happens there);
+// X-Force: 1 overrides the machine-busy guard. Status and body pass through.
+static char s_delete_resp[4096];
+static esp_err_t delete_post_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  if (req->content_len >= SCRATCH_BUFSIZE || !read_full_body(req, scratch_buf, SCRATCH_BUFSIZE - 1)) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  scratch_buf[req->content_len] = '\0';
+  if (!file_transfer_is_receiver_online()) {
+    send_status_text(req, 502, "Receiver offline");
+    return ESP_OK;
+  }
+
+  char force_hdr[4] = {0};
+  bool force = httpd_req_get_hdr_value_str(req, "X-Force", force_hdr, sizeof(force_hdr)) == ESP_OK &&
+               strcmp(force_hdr, "1") == 0;
+  int code = file_transfer_delete_receiver(scratch_buf, force, s_delete_resp, sizeof(s_delete_resp));
+  if (code == 200 || code == 423) {
+    httpd_resp_set_status(req, code == 200 ? "200 OK" : "423 Locked");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, s_delete_resp);
+  } else {
+    send_status_text(req, code < 0 ? 502 : code, s_delete_resp);
+  }
+  return ESP_OK;
+}
+
 // Proxies a full storage format to the receiver. Body must be
 // {"confirm":"FORMAT"} so a stray request can't wipe the card.
 static esp_err_t format_post_handler(httpd_req_t *req) {
@@ -817,7 +857,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 22; // 19 registered
+  config.max_uri_handlers = 22; // 20 registered
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
@@ -879,6 +919,9 @@ void web_server_start(void) {
     httpd_register_uri_handler(server, &uri_config_get);
     httpd_register_uri_handler(server, &uri_config_post);
     httpd_register_uri_handler(server, &uri_clear);
+    httpd_uri_t uri_delete = {
+        .uri = "/receiver_delete", .method = HTTP_POST, .handler = delete_post_handler};
+    httpd_register_uri_handler(server, &uri_delete);
     httpd_register_uri_handler(server, &uri_upload_cancel);
     httpd_register_uri_handler(server, &uri_receiver_list);
     httpd_register_uri_handler(server, &uri_ping);

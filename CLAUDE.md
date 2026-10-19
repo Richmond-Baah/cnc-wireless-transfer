@@ -12,7 +12,9 @@ Two ESP32-S3 boards. Transmitter: SoftAP "CNC_WIRELESS" 192.168.4.1, web UI + au
 - Never auto-format. Mount failure → CARD_ERROR. Format/Wipe need typed FORMAT/WIPE, checked server-side.
 - Every error path: delete .tmp before unmount, release storage, reconnect USB.
 - Chunks: indexed; dup = ack+discard, out-of-order = 409.
-- Busy guard: /prepare and /clear → 423 if host read <10 s ago, unless X-Force: 1.
+- Busy guard: /prepare, /clear and /delete → 423 if host read <10 s ago, unless X-Force: 1.
+- Space: need size + max(64 KB, 1% of drive); UI blocks Start, /prepare re-checks after mount (same-name file still counts as used) → 507 before writing, release, USB on.
+- /delete {"files":[...]}: one mount cycle, root files only (upload name rules), missing = skipped+reported, then snapshot + USB on.
 - Filenames: reject / \ : control chars, empty/dots-only.
 - Upload is browser-driven chunking: /upload_begin, /upload_chunk, /upload_finish, /upload_cancel.
 
@@ -22,6 +24,7 @@ Two ESP32-S3 boards. Transmitter: SoftAP "CNC_WIRELESS" 192.168.4.1, web UI + au
 - ".." rejected anywhere in name (too strict; only whole-name matters).
 - Busy-guard threshold untuned (polling machines trigger it).
 - Commercial: own USB VID/PID (not SanDisk), per-device credentials, signed OTA, certified module.
+- Transmitter chip has 4 MB flash + 2 MB PSRAM; sdkconfig set to 2 MB flash. Fix before OTA.
 
 ## Working rules
 - Minimal changes. Cite file:line. Build both boards, commit. Short replies.
