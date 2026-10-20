@@ -104,8 +104,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     document.getElementById('apPass').value = '';
                     document.getElementById('staSsid').value = data.sta_ssid || '';
                     document.getElementById('staPass').value = '';
-
-                    document.getElementById('receiverIp').value = data.receiver_ip || '';
                     document.getElementById('authUser').value = data.auth_user || '';
                     document.getElementById('authPass').value = '';
                 }).catch(e => {

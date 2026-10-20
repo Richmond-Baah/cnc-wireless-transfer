@@ -6,6 +6,7 @@
 #include "wifi_manager.h"
 #include "web_server.h"
 #include "file_transfer.h"
+#include "rx_registry.h"
 #include "led.h"
 
 static const char *TAG = "MAIN";
@@ -47,12 +48,12 @@ void app_main(void)
         }
     }
 
-    // 5. Start Web Server
-    web_server_start();
+    // 5. Receiver registry (paired list from NVS) and upload session reaper
+    rx_registry_init();
+    file_transfer_start();
 
-    // 6. Start background receiver status poller
-    //    This runs every 2 s and caches the result so /status HTTP calls never block.
-    file_transfer_status_task_start();
+    // 6. Start Web Server (receivers announce themselves via /rx/heartbeat)
+    web_server_start();
 
     ESP_LOGI(TAG, "Transmitter Init Complete. Free Heap: %u", (unsigned)esp_get_free_heap_size());
 }

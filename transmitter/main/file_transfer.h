@@ -2,21 +2,23 @@
 #define FILE_TRANSFER_H
 
 #include "esp_http_server.h"
+#include "rx_registry.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-// ─── Browser-driven upload (one session at a time) ──────────────────────────
+// ─── Browser-driven upload (one session at a time, across all receivers) ────
 // All return an HTTP status for the browser (200 on success) and put a
 // human-readable reason in msg on failure.
 #define UPLOAD_CHUNK_MAX (32 * 1024)
 
-// Calls receiver /prepare (force = bypass machine-busy guard); on success
-// writes the session id (16 hex chars) to session_out.
-int file_transfer_begin(const char *name, size_t size, const char *md5, bool force,
+// Calls /prepare on receiver rx_id (force = bypass machine-busy guard); on
+// success writes the session id (16 hex chars) to session_out. 409 if another
+// receiver has an active session.
+int file_transfer_begin(const char *rx_id, const char *name, size_t size, const char *md5, bool force,
                         char *session_out, size_t session_len,
                         char *msg, size_t msg_len);
-// Forwards one chunk to receiver /chunk and returns after the receiver acks;
+// Forwards one chunk to the session's receiver and returns after it acks;
 // acked_out = total bytes acknowledged so far.
 int file_transfer_chunk(const char *session, int index, const char *data, int len,
                         uint64_t *acked_out, char *msg, size_t msg_len);
@@ -24,30 +26,20 @@ int file_transfer_chunk(const char *session, int index, const char *data, int le
 int file_transfer_finish(const char *session, char *msg, size_t msg_len);
 // Ends the session (if it matches, or none is given) and calls receiver /cancel.
 int file_transfer_cancel(const char *session);
+// True while a session is active; rx_id_out gets its receiver.
+bool file_transfer_active_rx(char *rx_id_out, size_t len);
 
-// Get the current operational status of the receiver (polls receiver endpoint)
-int file_transfer_get_receiver_status(char *out_state_str, size_t max_len);
+// Creates the session lock and the idle-session reaper task.
+void file_transfer_start(void);
 
-// Request the receiver to clear its storage
-// POSTs {"files":[...]} to the receiver /delete; resp gets its body. Returns HTTP status or -1.
-int file_transfer_delete_receiver(const char *json, bool force, char *resp, size_t resp_len);
-int file_transfer_clear_receiver(bool force); // sends {"confirm":"WIPE"}; force bypasses busy guard
-
-// Request the receiver to perform a full format of its storage
-int file_transfer_format_receiver(void);
-
-// Start the background task that polls the receiver status every 2 s.
-// Must be called once after Wi-Fi and the web server are both up.
-void file_transfer_status_task_start(void);
-int file_transfer_cancel_receiver(void);
-
-// Fetch the list of files from the receiver
-int file_transfer_get_receiver_files(char *out_json, size_t max_len);
-
-// Helper to check if receiver is currently online (cached, non-blocking)
-bool file_transfer_is_receiver_online(void);
-
-// Helper to get the full URL for a receiver endpoint
-void get_receiver_url(const char *path, char *out_url, size_t max_len);
+// ─── Per-receiver proxies (rx_id = paired receiver; 404 unknown, 502 offline) ─
+// Receiver status JSON (live when reachable, else the last heartbeat).
+int file_transfer_get_receiver_status(const char *rx_id, char *out, size_t out_len);
+// POSTs {"files":[...]} to /delete; resp gets the receiver's body.
+int file_transfer_delete_receiver(const char *rx_id, const char *json, bool force, char *resp, size_t resp_len);
+// Sends {"confirm":"WIPE"} to /clear; force bypasses the busy guard.
+int file_transfer_clear_receiver(const char *rx_id, bool force, char *resp, size_t resp_len);
+int file_transfer_format_receiver(const char *rx_id, char *resp, size_t resp_len);
+int file_transfer_get_receiver_files(const char *rx_id, char *out_json, size_t max_len);
 
 #endif // FILE_TRANSFER_H

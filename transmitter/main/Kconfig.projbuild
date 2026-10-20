@@ -30,11 +30,5 @@ config CNC_DEFAULT_WEB_PASS
         IMPORTANT: Change this before deploying to production!
         Can be changed via the web UI Settings panel after first login.
 
-config CNC_RECEIVER_IP
-    string "Receiver Static IP Address"
-    default "192.168.4.150"
-    help
-        Static IP assigned to the receiver device on the local network.
-        The transmitter uses this IP to reach the receiver's HTTP API.
 
 endmenu
