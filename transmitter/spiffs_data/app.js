@@ -89,9 +89,52 @@ document.addEventListener('DOMContentLoaded', () => {
     const settingsFeedback = document.getElementById('settingsFeedback');
     let lastStaIp = ''; // from /status, for the post-save hint
 
+    const receiverSettingsList = document.getElementById('receiverSettingsList');
+    function renderReceiverSettings() {
+        if (!receiverSettingsList) return;
+        if (!receivers.length) {
+            receiverSettingsList.innerHTML = '<p class="text-muted">No receivers paired.</p>';
+            return;
+        }
+        receiverSettingsList.innerHTML = receivers.map(r => `
+            <div class="rs-row">
+                <input type="text" maxlength="31" value="${escapeHtml(r.name)}" data-id="${escapeHtml(r.id)}" aria-label="Name of ${escapeHtml(r.id)}">
+                <button type="button" class="btn btn-secondary btn-sm rs-rename" data-id="${escapeHtml(r.id)}">Rename</button>
+                <button type="button" class="btn btn-danger btn-sm rs-unpair" data-id="${escapeHtml(r.id)}">Unpair</button>
+                <div class="rs-id">${escapeHtml(r.id)} · ${r.online ? 'online, ' + escapeHtml(r.ip) : 'offline'}</div>
+            </div>`).join('');
+    }
+    if (receiverSettingsList) {
+        receiverSettingsList.addEventListener('click', async (e) => {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            const id = btn.dataset.id;
+            const r = receivers.find(x => x.id === id);
+            let err = null;
+            if (btn.classList.contains('rs-rename')) {
+                const input = receiverSettingsList.querySelector(`input[data-id="${CSS.escape(id)}"]`);
+                const name = input ? input.value.trim() : '';
+                if (!name) return;
+                err = await postReceiverAction('rename', { id, name });
+            } else if (btn.classList.contains('rs-unpair')) {
+                if (!confirm('Unpair "' + (r ? r.name : id) + '"? It must be approved again before it can be used.' +
+                    (r && !r.online ? '\nIt is offline: also hold its BOOT button 10 s to reset it.' : ''))) return;
+                err = await postReceiverAction('unpair', { id });
+            } else {
+                return;
+            }
+            settingsFeedback.textContent = err ? 'Failed: ' + err : 'Saved.';
+            settingsFeedback.className = 'feedback-msg ' + (err ? 'error' : 'success');
+            settingsFeedback.style.display = 'block';
+            await loadReceivers();
+            renderReceiverSettings();
+        });
+    }
+
     if (configBtn) {
         configBtn.addEventListener('click', () => {
             settingsModal.classList.add('show');
+            renderReceiverSettings();
             settingsFeedback.style.display = 'none';
             fetch('/config', { headers: { 'Authorization': 'Bearer ' + token } })
                 .then(r => {
@@ -160,19 +203,152 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ─── Machines (receivers) ───────────────────────────────────────────
+    // Upload, file list, delete, wipe and format act on the selected receiver.
+    const RX_STORAGE_KEY = 'cnc.selectedRx';
+    let selectedRx = null;
+    try { selectedRx = localStorage.getItem(RX_STORAGE_KEY); } catch (e) { /* storage blocked */ }
+    let receivers = [];
+    let pendingKey = '';
+    const machineCards = document.getElementById('machineCards');
+    const newDeviceBanner = document.getElementById('newDeviceBanner');
+
+    // Adds the selected receiver to request headers
+    const rxHeaders = (h) => Object.assign({ 'Authorization': 'Bearer ' + token }, h || {},
+        selectedRx ? { 'X-Rx-Id': selectedRx } : {});
+    const selectedReceiver = () => receivers.find(r => r.id === selectedRx) || null;
+
+    function rememberRx(id) {
+        selectedRx = id;
+        try {
+            if (id) localStorage.setItem(RX_STORAGE_KEY, id);
+            else localStorage.removeItem(RX_STORAGE_KEY);
+        } catch (e) { /* storage blocked */ }
+    }
+
+    function selectRx(id) {
+        if (uploading || id === selectedRx) return;
+        rememberRx(id);
+        lastFree = null; // the next status poll fills in this drive's space
+        lastTotal = 0;
+        renderMachines();
+        loadReceiverFiles();
+        pollStatus();
+    }
+
+    function renderMachines() {
+        if (!machineCards) return;
+        const nameEl = document.getElementById('selectedRxName');
+        const sel = selectedReceiver();
+        if (nameEl) nameEl.textContent = sel ? sel.name : 'No machine selected';
+        if (!receivers.length) {
+            machineCards.innerHTML = '<p class="text-muted">No receivers paired yet. Power one on near this transmitter; it appears above as a new device.</p>';
+            return;
+        }
+        machineCards.innerHTML = receivers.map(r => {
+            const state = r.online ? (STATE_TEXT[r.state] || r.state) : 'Offline';
+            return `<button type="button" class="machine-card${r.id === selectedRx ? ' selected' : ''}" data-id="${escapeHtml(r.id)}"${uploading ? ' disabled' : ''}>
+                <div class="mc-name">${escapeHtml(r.name)}</div>
+                <div class="mc-line"><span class="mc-dot${r.online ? ' online' : ''}"></span>${r.online ? 'Online' : 'Offline'} · ${escapeHtml(state)}</div>
+                <div class="mc-line">Free: ${r.online || r.total_bytes ? formatStorage(r.free_bytes) : '-'}</div>
+                ${r.busy && r.online ? '<div class="mc-line mc-busy">Machine is reading the drive</div>' : ''}
+            </button>`;
+        }).join('');
+    }
+
+    function renderPending(pending) {
+        if (!newDeviceBanner) return;
+        const key = pending.map(p => p.id).join(',');
+        if (key === pendingKey) return; // keep names being typed
+        pendingKey = key;
+        if (!pending.length) {
+            newDeviceBanner.style.display = 'none';
+            newDeviceBanner.innerHTML = '';
+            return;
+        }
+        newDeviceBanner.innerHTML = '<h2 style="margin-bottom: 4px;">New device found</h2>' + pending.map(p => `
+            <div class="new-device-row">
+                <span class="text-muted">${escapeHtml(p.id)} (${escapeHtml(p.ip)})${p.repair ? ' – was reset, approve again' : ''}</span>
+                <input type="text" maxlength="31" value="${escapeHtml(p.name)}" data-id="${escapeHtml(p.id)}" aria-label="Name for ${escapeHtml(p.id)}">
+                <button type="button" class="btn btn-primary btn-sm approve-rx" data-id="${escapeHtml(p.id)}">Approve</button>
+            </div>`).join('');
+        newDeviceBanner.style.display = 'block';
+    }
+
+    async function loadReceivers() {
+        try {
+            const res = await fetch('/receivers', { headers: { 'Authorization': 'Bearer ' + token } });
+            if (!res.ok) return;
+            const d = await res.json();
+            receivers = d.receivers || [];
+            if (!selectedReceiver() && !uploading) {
+                const prev = selectedRx;
+                rememberRx(receivers.length ? receivers[0].id : null);
+                if (selectedRx !== prev) {
+                    lastFree = null;
+                    loadReceiverFiles();
+                    pollStatus();
+                }
+            }
+            renderMachines();
+            renderPending(d.pending || []);
+        } catch (e) { /* transmitter unreachable: status badge shows it */ }
+    }
+
+    async function postReceiverAction(action, body) {
+        const res = await fetch('/receivers/' + action, {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        return res.ok ? null : await errorText(res);
+    }
+
+    if (machineCards) {
+        machineCards.addEventListener('click', (e) => {
+            const card = e.target.closest('.machine-card');
+            if (card && !card.disabled) selectRx(card.dataset.id);
+        });
+    }
+    if (newDeviceBanner) {
+        newDeviceBanner.addEventListener('click', async (e) => {
+            const btn = e.target.closest('.approve-rx');
+            if (!btn) return;
+            const id = btn.dataset.id;
+            const input = newDeviceBanner.querySelector(`input[data-id="${CSS.escape(id)}"]`);
+            const name = input ? input.value.trim() : '';
+            if (!name) { showFeedback('Enter a name for the new device.', 'error'); return; }
+            btn.disabled = true;
+            const err = await postReceiverAction('approve', { id, name });
+            btn.disabled = false;
+            if (err) {
+                showFeedback('Pairing failed: ' + err, 'error');
+                return;
+            }
+            showFeedback('Paired "' + name + '".', 'success');
+            pendingKey = ''; // re-render the banner without it
+            if (!selectedReceiver()) rememberRx(id);
+            await loadReceivers();
+            loadReceiverFiles();
+            pollStatus();
+        });
+    }
+
     // ─── Status Polling ─────────────────────────────────────────────────
     const statusBadge = document.getElementById('receiverStatus');
     let statusInterval;
     let lastFree = null, lastTotal = 0; // receiver drive space, for the pre-upload size check
 
+    const STATE_TEXT = { IDLE: 'Ready', FILE_READY: 'File ready', RECEIVING: 'Receiving', USB_ACTIVE: 'Ready (USB linked)',
+                         ERROR: 'Error', CARD_ERROR: 'Card unreadable', UNKNOWN: 'Waiting for status' };
+
     const pollStatus = async () => {
         try {
-            const res = await fetch('/status', {
-                headers: { 'Authorization': 'Bearer ' + token }
-            });
+            const res = await fetch('/status', { headers: rxHeaders() });
             if (res.ok) {
                 const data = await res.json();
                 const stateMap = {
+                    'NO_RECEIVER': { text: 'No machine selected', cls: 'status-offline' },
                     'IDLE': { text: 'Ready', cls: 'status-ready' },
                     'FILE_READY': { text: 'File Ready', cls: 'status-ready' },
                     'RECEIVING': { text: 'Receiving...', cls: 'status-receiving' },
@@ -237,6 +413,10 @@ document.addEventListener('DOMContentLoaded', () => {
         pollStatus();
         statusInterval = setInterval(pollStatus, 3000);
     }
+    if (machineCards) {
+        loadReceivers();
+        setInterval(loadReceivers, 4000);
+    }
 
     // ─── Receiver File List ────────────────────────────────────────────
     const receiverFileList = document.getElementById('receiverFileList');
@@ -244,18 +424,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const loadReceiverFiles = async () => {
         if (!receiverFileList) return;
+        if (!selectedRx) {
+            receiverFileList.innerHTML = '<p class="text-muted">Select a machine to see its files.</p>';
+            return;
+        }
         receiverFileList.innerHTML = '<p class="text-muted">Fetching file list...</p>';
         const dsb = document.getElementById('deleteSelectedBtn');
         if (dsb) dsb.disabled = true; // selection is cleared by the re-render
         try {
-            const res = await fetch('/receiver_list', {
-                headers: { 'Authorization': 'Bearer ' + token }
-            });
+            const res = await fetch('/receiver_list', { headers: rxHeaders() });
             if (res.ok) {
                 const data = await res.json();
                 // cached = the machine owns the drive; list is the receiver's last snapshot
                 const note = document.getElementById('fileListNote');
                 if (note) note.style.display = data.cached ? 'block' : 'none';
+                if (data.reason === 'receiver_offline') {
+                    receiverFileList.innerHTML = '<p class="text-muted">Machine is offline.</p>';
+                    return;
+                }
                 if (!data.files || data.files.length === 0) {
                     receiverFileList.innerHTML = '<p class="text-muted">No files on storage.</p>';
                     return;
@@ -304,9 +490,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function deleteFiles(names) {
         if (!names.length) return;
-        if (!confirm('Delete ' + names.length + ' file(s) from the receiver?\n\n' + names.join('\n'))) return;
+        const rxName = selectedReceiver() ? selectedReceiver().name : 'the receiver';
+        if (!confirm('Delete ' + names.length + ' file(s) from ' + rxName + '?\n\n' + names.join('\n'))) return;
         const send = (force) => {
-            const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+            const headers = rxHeaders({ 'Content-Type': 'application/json' });
             if (force) headers['X-Force'] = '1';
             return fetch('/receiver_delete', { method: 'POST', headers, body: JSON.stringify({ files: names }) });
         };
@@ -359,7 +546,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const clearBtn = document.getElementById('clearReceiverBtn');
     if (clearBtn) {
         const sendWipe = (force) => {
-            const headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+            const headers = rxHeaders({ 'Content-Type': 'application/json' });
             if (force) headers['X-Force'] = '1';
             return fetch('/receiver_clear', {
                 method: 'POST',
@@ -368,7 +555,9 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         };
         clearBtn.addEventListener('click', async () => {
-            const typed = prompt('Permanently delete ALL files from receiver storage?\nType WIPE to continue:');
+            if (!selectedRx) { showFeedback('Select a machine first.', 'error'); return; }
+            const rxName = selectedReceiver() ? selectedReceiver().name : 'the receiver';
+            const typed = prompt('Permanently delete ALL files on ' + rxName + '?\nType WIPE to continue:');
             if (typed !== 'WIPE') {
                 if (typed !== null) showFeedback('Wipe cancelled: you must type WIPE exactly.', 'error');
                 return;
@@ -412,7 +601,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const res = await fetch('/receiver_format', {
                     method: 'POST',
-                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    headers: rxHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({ confirm: 'FORMAT' })
                 });
                 if (res.ok) {
@@ -629,7 +818,7 @@ document.addEventListener('DOMContentLoaded', () => {
         while (Date.now() - t0 < timeoutMs) {
             await new Promise(r => setTimeout(r, 700));
             try {
-                const res = await fetch('/status', { headers: { 'Authorization': 'Bearer ' + token } });
+                const res = await fetch('/status', { headers: rxHeaders() });
                 if (res.ok) {
                     const d = await res.json();
                     // RECEIVING may still be the transmitter's cached value from mid-upload
@@ -642,6 +831,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function startUpload(force) {
         if (!currentFile) return;
+        if (!selectedRx) { showFeedback('Select a machine first.', 'error'); return; }
         force = (force === true); // click handlers may pass an Event
         const file = currentFile;
         if (forceUploadBtn) forceUploadBtn.style.display = 'none';
@@ -649,6 +839,7 @@ document.addEventListener('DOMContentLoaded', () => {
         cancelUploadBtn.disabled = false;
 
         uploading = true;
+        renderMachines(); // lock the selection while uploading
         uploadBtn.disabled = true;
         fileInput.disabled = true;
         progressContainer.style.display = 'block';
@@ -665,7 +856,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             stage = 'Starting';
             updateProgress(0, 'Preparing receiver...');
-            const beginHeaders = { 'Content-Type': 'application/json' };
+            const beginHeaders = { 'Content-Type': 'application/json', 'X-Rx-Id': selectedRx || '' };
             if (force) beginHeaders['X-Force'] = '1';
             const res = await apiPost('/upload_begin', beginHeaders,
                 JSON.stringify({ name: file.name, size: file.size, md5 }));
@@ -750,6 +941,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function resetUploadUI(keepFile) {
         uploading = false;
+        renderMachines();
         if (keepFile !== true) currentFile = null;
         fileInput.disabled = false;
         uploadBtn.disabled = true;

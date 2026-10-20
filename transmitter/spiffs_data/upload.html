@@ -29,9 +29,19 @@
             </div>
         </div>
 
+        <!-- Receivers that announced themselves but are not paired yet -->
+        <div id="newDeviceBanner" class="card new-device-banner" style="display: none;"></div>
+
+        <div class="machines-panel card">
+            <h2 style="margin-bottom: 12px;">Machines</h2>
+            <div id="machineCards" class="machine-cards">
+                <p class="text-muted">Looking for receivers...</p>
+            </div>
+        </div>
+
         <div class="status-panel card d-flex justify-between align-center">
             <div class="d-flex align-center status-main" style="gap:15px">
-                <h2 style="margin-bottom: 0; border: none; padding: 0;">Receiver Status</h2>
+                <h2 id="selectedRxName" style="margin-bottom: 0; border: none; padding: 0;">Receiver Status</h2>
                 <div id="receiverStatus" class="status-badge status-checking">Checking...</div>
             </div>
             <button id="clearReceiverBtn" class="btn btn-danger btn-sm" title="Clear all files on receiver storage">
@@ -140,6 +150,12 @@
                     <div class="form-group">
                         <label>STA Password</label>
                         <input type="password" id="staPass" name="sta_pass" placeholder="Leave blank to keep unchanged">
+                    </div>
+
+                    <hr>
+                    <h4>Receivers</h4>
+                    <div id="receiverSettingsList" class="receiver-settings-list">
+                        <p class="text-muted">No receivers paired.</p>
                     </div>
 
                     <hr>

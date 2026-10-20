@@ -1,5 +1,9 @@
 # CNC Wireless Transfer (commercial product)
-Two ESP32-S3 boards. Transmitter: SoftAP "CNC_WIRELESS" 192.168.4.1, web UI + auth, forwards uploads. Receiver: Wi-Fi client 192.168.4.150, USB mass-storage drive for CNC/laser/printer, SD over SPI (fallback: internal flash).
+ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "CNC_WIRELESS" 192.168.4.1, web UI + auth, forwards uploads. Receiver: Wi-Fi client (DHCP), USB mass-storage drive for CNC/laser/printer, SD over SPI (fallback: internal flash).
+- Receiver ID "rx-"+last 3 MAC bytes; heartbeat POST <gateway>/rx/heartbeat every 10 s (receiver/main/pairing.c).
+- Transmitter rx_registry: paired list (id, name, key) in NVS, pending list in RAM, online = heartbeat < 30 s.
+- UI selects a machine; every receiver proxy takes X-Rx-Id (or ?rx=) and sends that receiver's X-Auth-Key.
+- AP creds: change bumps config_version; receivers pull GET /rx/config; transmitter restarts after they fetch (max 30 s).
 
 ## Build / flash
 - ESP-IDF 5.5.1. `idf.py build` in receiver/ and transmitter/ (or build_all.ps1).
@@ -17,6 +21,9 @@ Two ESP32-S3 boards. Transmitter: SoftAP "CNC_WIRELESS" 192.168.4.1, web UI + au
 - /delete {"files":[...]}: one mount cycle, root files only (upload name rules), missing = skipped+reported, then snapshot + USB on.
 - Filenames: reject / \ : control chars, empty/dots-only.
 - Upload is browser-driven chunking: /upload_begin, /upload_chunk, /upload_finish, /upload_cancel.
+- Pairing: receiver /pair only while unpaired; once paired every receiver API needs X-Auth-Key; receiver "/" is info only.
+- Pairing reset only by holding BOOT 10 s (or transmitter /unpair with the key); never automatic.
+- One upload session at a time across all receivers (409 for another receiver).
 
 ## Open items
 - Receiver API + its / page have no auth.
