@@ -447,6 +447,7 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
   if (file_transfer_active_rx(active, sizeof(active))) {
     cJSON_AddStringToObject(obj, "upload_rx", active);
   }
+  cJSON_AddNumberToObject(obj, "recovery_s", wifi_recovery_seconds_left());
 
   char *out = cJSON_PrintUnformatted(obj);
   cJSON_Delete(obj);
@@ -882,11 +883,36 @@ static esp_err_t receivers_manage_handler(httpd_req_t *req) {
   }
   cJSON_Delete(json);
   if (code == 200) {
+    cJSON *ok = cJSON_CreateObject();
+    cJSON_AddStringToObject(ok, "status", "ok");
+    if (msg[0]) cJSON_AddStringToObject(ok, "message", msg);
+    char *out = cJSON_PrintUnformatted(ok);
+    cJSON_Delete(ok);
     httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    httpd_resp_sendstr(req, out ? out : "{\"status\":\"ok\"}");
+    cJSON_free(out);
   } else {
     send_status_text(req, code, msg);
   }
+  return ESP_OK;
+}
+
+// POST /recovery {"confirm":"RECOVERY"}: AP on factory credentials for 5 min
+// so receivers that missed a credential change can rejoin and pull them.
+#define RECOVERY_SECONDS 300
+static esp_err_t recovery_post_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  if (!body_confirms(req, "RECOVERY")) {
+    return ESP_FAIL;
+  }
+  // Reply first: switching the AP drops this browser's connection
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, "{\"status\":\"ok\",\"ssid\":\"" CONFIG_CNC_DEFAULT_WIFI_SSID "\",\"seconds\":300}");
+  vTaskDelay(pdMS_TO_TICKS(300));
+  wifi_recovery_start(RECOVERY_SECONDS);
   return ESP_OK;
 }
 
@@ -943,7 +969,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 30; // 25 registered
+  config.max_uri_handlers = 30; // 26 registered
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
@@ -1039,6 +1065,9 @@ void web_server_start(void) {
     httpd_register_uri_handler(server, &uri_rx_approve);
     httpd_register_uri_handler(server, &uri_rx_rename);
     httpd_register_uri_handler(server, &uri_rx_unpair);
+    httpd_uri_t uri_recovery = {
+        .uri = "/recovery", .method = HTTP_POST, .handler = recovery_post_handler};
+    httpd_register_uri_handler(server, &uri_recovery);
 
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
   } else {

@@ -33,7 +33,7 @@ bool file_transfer_active_rx(char *rx_id_out, size_t len);
 void file_transfer_start(void);
 
 // ─── Per-receiver proxies (rx_id = paired receiver; 404 unknown, 502 offline) ─
-// Receiver status JSON (live when reachable, else the last heartbeat).
+// Receiver status JSON from the heartbeat cache (never contacts the receiver).
 int file_transfer_get_receiver_status(const char *rx_id, char *out, size_t out_len);
 // POSTs {"files":[...]} to /delete; resp gets the receiver's body.
 int file_transfer_delete_receiver(const char *rx_id, const char *json, bool force, char *resp, size_t resp_len);

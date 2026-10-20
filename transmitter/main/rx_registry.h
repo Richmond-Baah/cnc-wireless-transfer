@@ -46,7 +46,7 @@ bool rx_registry_target(const char *id, rx_target_t *out, bool *known);
 // Receiver auth for /rx/config (constant-time key compare).
 bool rx_registry_check_key(const char *id, const char *key);
 
-// Merges a live /status reply into the cached runtime info.
+// Merges status fields (heartbeat, /delete reply) into the cached runtime info.
 void rx_registry_update_status(const char *id, const cJSON *status);
 // Adds the cached runtime fields (online, state, storage, busy...) of id to obj.
 bool rx_registry_add_cached_status(const char *id, cJSON *obj);
@@ -54,6 +54,7 @@ bool rx_registry_add_cached_status(const char *id, cJSON *obj);
 // Pairing management. Return an HTTP status; msg gets a reason on failure.
 int rx_registry_approve(const char *id, const char *name, char *msg, size_t msg_len);
 int rx_registry_rename(const char *id, const char *name, char *msg, size_t msg_len);
+// unpair: 200 with msg set when the receiver was offline (BOOT reset still needed)
 int rx_registry_unpair(const char *id, char *msg, size_t msg_len);
 
 // {"receivers":[...],"pending":[...]} for the UI; caller frees with cJSON_free.

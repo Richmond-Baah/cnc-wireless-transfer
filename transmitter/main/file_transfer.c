@@ -91,7 +91,7 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
   }
   if (s_up.active) {
     if (strcmp(s_up.rx.id, rx.id) != 0) {
-      snprintf(msg, msg_len, "Another upload is in progress (to %s)", s_up.rx.name);
+      snprintf(msg, msg_len, "Busy: uploading to %s", s_up.rx.name);
       return 409;
     }
     // Same receiver: a new begin closes the old session and its receiver socket
@@ -356,18 +356,7 @@ void file_transfer_start(void) {
 
 // ─── Per-receiver proxies ───────────────────────────────────────────────────
 int file_transfer_get_receiver_status(const char *rx_id, char *out, size_t out_len) {
-  rx_target_t rx;
-  char msg[64];
-  cJSON *obj = NULL;
-  if (resolve(rx_id, &rx, msg, sizeof(msg)) == 0) {
-    // Live, short timeout: the receiver's server is single-threaded (finalize, list)
-    if (rx_http(&rx, HTTP_METHOD_GET, "/status", NULL, false, 2000, out, out_len, NULL) == 200) {
-      obj = cJSON_Parse(out);
-      if (obj) rx_registry_update_status(rx_id, obj);
-    }
-  }
-  cJSON_Delete(obj);
-  // Answer from the registry (just updated if the live call worked)
+  // Heartbeat cache only: never block a request handler on the receiver
   cJSON *res = cJSON_CreateObject();
   bool known = rx_registry_add_cached_status(rx_id, res);
   char *s = cJSON_PrintUnformatted(res);
@@ -381,8 +370,14 @@ int file_transfer_delete_receiver(const char *rx_id, const char *json, bool forc
   rx_target_t rx;
   int code = resolve(rx_id, &rx, resp, resp_len);
   if (code) return code;
-  // Receiver body is {"deleted":[..],"skipped":[..],...} or an error text
-  return rx_http(&rx, HTTP_METHOD_POST, "/delete", json, force, 20000, resp, resp_len, NULL);
+  // Receiver body is {"deleted":[..],"skipped":[..],free_bytes,total_bytes} or an error text
+  int status = rx_http(&rx, HTTP_METHOD_POST, "/delete", json, force, 20000, resp, resp_len, NULL);
+  if (status == 200) {
+    cJSON *r = cJSON_Parse(resp);
+    if (r) rx_registry_update_status(rx_id, r); // free space now, not at the next heartbeat
+    cJSON_Delete(r);
+  }
+  return status;
 }
 
 int file_transfer_clear_receiver(const char *rx_id, bool force, char *resp, size_t resp_len) {

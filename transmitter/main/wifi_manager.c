@@ -30,6 +30,12 @@ static const char *TAG = "WIFI_MGR";
 #define STA_MAX_RETRIES 5   // fast retries, then slow down so scans don't disturb the AP
 #define STA_SLOW_RETRY_S 60 // one attempt per minute after that
 static esp_timer_handle_t s_sta_retry_timer;
+
+// Recovery mode: AP temporarily on factory credentials so receivers that
+// missed a credential change can rejoin and pull the current ones.
+static wifi_config_t s_ap_saved;          // AP config from NVS, restored afterwards
+static esp_timer_handle_t s_recovery_timer;
+static int64_t s_recovery_end_us;         // 0 = not active
 static portMUX_TYPE s_sta_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *s_sta_state = "disabled"; // disabled|connecting|connected|failed
 static char s_sta_reason[48] = "";
@@ -134,6 +140,38 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, " Open http://%s or http://" MDNS_HOSTNAME ".local", ip);
     ESP_LOGI(TAG, "==================================================");
   }
+}
+
+static void recovery_end(void *arg) {
+  s_recovery_end_us = 0;
+  esp_wifi_set_config(WIFI_IF_AP, &s_ap_saved);
+  ESP_LOGW(TAG, "Recovery mode over: AP back on [%s]", (char *)s_ap_saved.ap.ssid);
+}
+
+esp_err_t wifi_recovery_start(int seconds) {
+  if (s_recovery_timer == NULL) {
+    const esp_timer_create_args_t args = {.callback = recovery_end, .name = "ap_recovery"};
+    esp_err_t err = esp_timer_create(&args, &s_recovery_timer);
+    if (err != ESP_OK) return err;
+  }
+  esp_timer_stop(s_recovery_timer); // restart the window if already active
+  wifi_config_t cfg = s_ap_saved;
+  memset(cfg.ap.ssid, 0, sizeof(cfg.ap.ssid));
+  memset(cfg.ap.password, 0, sizeof(cfg.ap.password));
+  strlcpy((char *)cfg.ap.ssid, DEFAULT_AP_SSID, sizeof(cfg.ap.ssid));
+  strlcpy((char *)cfg.ap.password, DEFAULT_AP_PASS, sizeof(cfg.ap.password));
+  cfg.ap.ssid_len = strlen(DEFAULT_AP_SSID);
+  cfg.ap.authmode = strlen(DEFAULT_AP_PASS) >= 8 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+  s_recovery_end_us = esp_timer_get_time() + (int64_t)seconds * 1000000;
+  esp_timer_start_once(s_recovery_timer, (uint64_t)seconds * 1000000ULL);
+  ESP_LOGW(TAG, "Recovery mode: AP on factory SSID [%s] for %d s", DEFAULT_AP_SSID, seconds);
+  return esp_wifi_set_config(WIFI_IF_AP, &cfg);
+}
+
+int wifi_recovery_seconds_left(void) {
+  int64_t end = s_recovery_end_us;
+  int64_t left = end ? (end - esp_timer_get_time()) / 1000000 : 0;
+  return left > 0 ? (int)left : 0;
 }
 
 static void mdns_start(void) {
@@ -262,6 +300,8 @@ void wifi_init(void) {
     ap_config.ap.authmode = WIFI_AUTH_OPEN;
     ESP_LOGW(TAG, "AP password too short (<8 chars), using OPEN auth");
   }
+
+  s_ap_saved = ap_config;
 
   if (strcmp(wifi_mode, "STA") == 0 && strlen(sta_ssid) > 0) {
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();

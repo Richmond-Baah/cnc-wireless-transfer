@@ -88,6 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const settingsForm = document.getElementById('settingsForm');
     const settingsFeedback = document.getElementById('settingsFeedback');
     let lastStaIp = ''; // from /status, for the post-save hint
+    let loadedApSsid = ''; // to detect an AP SSID change on save
 
     const receiverSettingsList = document.getElementById('receiverSettingsList');
     function renderReceiverSettings() {
@@ -110,24 +111,49 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!btn) return;
             const id = btn.dataset.id;
             const r = receivers.find(x => x.id === id);
-            let err = null;
+            let result;
             if (btn.classList.contains('rs-rename')) {
                 const input = receiverSettingsList.querySelector(`input[data-id="${CSS.escape(id)}"]`);
                 const name = input ? input.value.trim() : '';
                 if (!name) return;
-                err = await postReceiverAction('rename', { id, name });
+                result = await postReceiverAction('rename', { id, name });
             } else if (btn.classList.contains('rs-unpair')) {
-                if (!confirm('Unpair "' + (r ? r.name : id) + '"? It must be approved again before it can be used.' +
-                    (r && !r.online ? '\nIt is offline: also hold its BOOT button 10 s to reset it.' : ''))) return;
-                err = await postReceiverAction('unpair', { id });
+                if (!confirm('Unpair "' + (r ? r.name : id) + '"? It must be approved again before it can be used.')) return;
+                result = await postReceiverAction('unpair', { id });
             } else {
                 return;
             }
-            settingsFeedback.textContent = err ? 'Failed: ' + err : 'Saved.';
-            settingsFeedback.className = 'feedback-msg ' + (err ? 'error' : 'success');
+            // Unpairing an offline receiver: "Hold its BOOT button 10 s to finish"
+            settingsFeedback.textContent = result.error ? 'Failed: ' + result.error : (result.message || 'Saved.');
+            settingsFeedback.className = 'feedback-msg ' + (result.error ? 'error' : 'success');
             settingsFeedback.style.display = 'block';
             await loadReceivers();
             renderReceiverSettings();
+        });
+    }
+
+    const recoveryBtn = document.getElementById('recoveryBtn');
+    if (recoveryBtn) {
+        recoveryBtn.addEventListener('click', async () => {
+            const typed = prompt('Recovery mode: for 5 minutes the hotspot uses the FACTORY name and password ' +
+                'so receivers that missed a Wi-Fi change can reconnect and update.\n' +
+                'This page disconnects; rejoin the factory hotspot to watch.\nType RECOVERY to continue:');
+            if (typed !== 'RECOVERY') return;
+            try {
+                const res = await fetch('/recovery', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ confirm: 'RECOVERY' })
+                });
+                settingsFeedback.textContent = res.ok
+                    ? 'Recovery mode on for 5 min: hotspot is now the factory network. Settings revert automatically.'
+                    : 'Recovery mode failed: ' + await errorText(res);
+                settingsFeedback.className = 'feedback-msg ' + (res.ok ? 'success' : 'error');
+            } catch (e) {
+                settingsFeedback.textContent = 'Recovery mode started; this connection dropped as expected.';
+                settingsFeedback.className = 'feedback-msg success';
+            }
+            settingsFeedback.style.display = 'block';
         });
     }
 
@@ -144,6 +170,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 .then(data => {
                     document.getElementById('wifiMode').value = data.wifi_mode || 'AP';
                     document.getElementById('apSsid').value = data.ap_ssid || '';
+                    loadedApSsid = data.ap_ssid || '';
                     document.getElementById('apPass').value = '';
                     document.getElementById('staSsid').value = data.sta_ssid || '';
                     document.getElementById('staPass').value = '';
@@ -165,6 +192,14 @@ document.addEventListener('DOMContentLoaded', () => {
             e.preventDefault();
             const formData = new FormData(settingsForm);
             const data = Object.fromEntries(formData.entries());
+            const apChanged = (data.ap_pass && data.ap_pass.length > 0) ||
+                (data.ap_ssid && data.ap_ssid !== loadedApSsid);
+            const offline = receivers.filter(r => !r.online).map(r => r.name);
+            if (apChanged && offline.length &&
+                !confirm('These receivers are offline and will not get the new Wi-Fi settings:\n\n' +
+                    offline.join('\n') + '\n\nThey reconnect later via Recovery mode. Save anyway?')) {
+                return;
+            }
 
             try {
                 const res = await fetch('/config', {
@@ -301,7 +336,8 @@ document.addEventListener('DOMContentLoaded', () => {
             headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
         });
-        return res.ok ? null : await errorText(res);
+        if (!res.ok) return { error: await errorText(res) };
+        try { return { message: (await res.json()).message || '' }; } catch (e) { return { message: '' }; }
     }
 
     if (machineCards) {
@@ -319,10 +355,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const name = input ? input.value.trim() : '';
             if (!name) { showFeedback('Enter a name for the new device.', 'error'); return; }
             btn.disabled = true;
-            const err = await postReceiverAction('approve', { id, name });
+            const { error } = await postReceiverAction('approve', { id, name });
             btn.disabled = false;
-            if (err) {
-                showFeedback('Pairing failed: ' + err, 'error');
+            if (error) {
+                showFeedback('Pairing failed: ' + error, 'error');
                 return;
             }
             showFeedback('Paired "' + name + '".', 'success');
@@ -382,6 +418,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (fwEl) {
                     fwEl.textContent = 'Firmware: transmitter ' + (data.tx_fw || '-') +
                         ' | receiver ' + (data.fw || '-');
+                }
+                const recEl = document.getElementById('recoveryInfo');
+                if (recEl) {
+                    const left = data.recovery_s || 0;
+                    recEl.textContent = left ? 'Recovery mode: hotspot on factory settings for ' +
+                        Math.ceil(left / 60) + ' more min' : '';
+                    recEl.style.display = left ? 'block' : 'none';
                 }
                 const staEl = document.getElementById('staInfo');
                 if (staEl && data.sta) {
@@ -879,6 +922,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     ? spaceMessage(d.file_size, d.free_bytes, d.needed_bytes)
                     : 'Not enough space on the drive: ' + raw, 'error');
                 spaceWarningShown = true;
+                resetUploadUI(true);
+                return;
+            }
+            if (res.status === 409) {
+                showFeedback(await errorText(res), 'error'); // "Busy: uploading to <name>"
                 resetUploadUI(true);
                 return;
             }

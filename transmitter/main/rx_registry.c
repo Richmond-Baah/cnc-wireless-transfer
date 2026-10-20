@@ -466,6 +466,9 @@ int rx_registry_unpair(const char *id, char *msg, size_t msg_len) {
   }
   unlock();
   ESP_LOGI(TAG, "Unpaired %s%s", id, online ? "" : " (offline: hold its BOOT 10 s to reset it)");
+  if (!online) {
+    snprintf(msg, msg_len, "Hold its BOOT button 10 s to finish");
+  }
   return 200;
 }
 

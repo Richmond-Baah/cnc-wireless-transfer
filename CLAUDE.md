@@ -24,6 +24,8 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "CNC_WIR
 - Pairing: receiver /pair only while unpaired; once paired every receiver API needs X-Auth-Key; receiver "/" is info only.
 - Pairing reset only by holding BOOT 10 s (or transmitter /unpair with the key); never automatic.
 - One upload session at a time across all receivers (409 for another receiver).
+- Status/cards come from the heartbeat cache only; request handlers never call receiver /status.
+- Recovery: receiver alternates saved/factory AP creds every 10 failed connects; transmitter /recovery = factory AP for 5 min, then reverts.
 
 ## Open items
 - Unpaired receiver API is open; key travels in plain HTTP (WPA2 AP only). /debug shows AP password.

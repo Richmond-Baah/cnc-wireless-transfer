@@ -50,6 +50,7 @@
             </button>
             <div id="fwVersions" class="text-muted fw-line">Firmware: transmitter - | receiver -</div>
             <div id="staInfo" class="text-muted fw-line" style="display: none;"></div>
+            <div id="recoveryInfo" class="text-muted fw-line" style="display: none;"></div>
         </div>
 
         <div class="upload-panel card">
@@ -157,6 +158,9 @@
                     <div id="receiverSettingsList" class="receiver-settings-list">
                         <p class="text-muted">No receivers paired.</p>
                     </div>
+
+                    <button type="button" id="recoveryBtn" class="btn btn-secondary btn-sm">Recovery mode (5 min)</button>
+                    <p class="text-muted" style="font-size: 0.85rem;">Use if a receiver missed a Wi-Fi name/password change.</p>
 
                     <hr>
                     <h4>System Settings</h4>
