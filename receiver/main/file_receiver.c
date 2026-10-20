@@ -9,6 +9,7 @@
 #include "usb_msc.h"
 #include "storage_manager.h"
 #include "sd_card.h"
+#include "pairing.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/param.h>
@@ -78,6 +79,25 @@ static void drain_request_body(httpd_req_t *req) {
         if (r <= 0) break;
         remaining -= r;
     }
+}
+
+// Once paired, every API request must carry the pairing key (X-Auth-Key).
+// Sends 401 and returns true when it doesn't.
+static bool reject_unauthorized(httpd_req_t *req) {
+    if (!pairing_is_paired()) {
+        return false;
+    }
+    char key[PAIRING_KEY_HEX_LEN + 2] = {0};
+    if (httpd_req_get_hdr_value_str(req, "X-Auth-Key", key, sizeof(key)) == ESP_OK &&
+        pairing_key_matches(key)) {
+        return false;
+    }
+    drain_request_body(req);
+    ESP_LOGW(TAG, "Rejected %s: missing/wrong X-Auth-Key", req->uri);
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, "Unauthorized");
+    return true;
 }
 
 // Host busy guard: the machine read the drive recently (likely running a job
@@ -251,6 +271,7 @@ static void cleanup_orphan_temp_files(void) {
 }
 
 static esp_err_t prepare_post_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     app_state_t cur = state_machine_get();
     if (cur == STATE_RECEIVING) {
         httpd_resp_set_status(req, "503 Service Unavailable");
@@ -433,6 +454,7 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
 }
 
 static esp_err_t chunk_post_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     if (state_machine_get() != STATE_RECEIVING || !active_file) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not in RECEIVING state");
         return ESP_FAIL;
@@ -512,6 +534,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
 }
 
 static esp_err_t finalize_post_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     if (state_machine_get() != STATE_RECEIVING || !active_file) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not in RECEIVING state");
         return ESP_FAIL;
@@ -636,6 +659,7 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
 }
 
 static esp_err_t cancel_post_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     if (active_file) {
         fclose(active_file);
         active_file = NULL;
@@ -655,7 +679,8 @@ static esp_err_t cancel_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-static esp_err_t status_get_handler(httpd_req_t *req) {
+// Adds fw, state, storage type/total/free, card_error and busy to obj.
+void file_receiver_add_status_fields(cJSON *obj) {
     uint64_t total = 0, free_bytes = 0;
     const char *stype = "Unknown";
     storage_manager_get_info(&total, &free_bytes, &stype);
@@ -664,19 +689,31 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
         total = s_cache_total;
         free_bytes = s_cache_free;
     }
+    cJSON_AddStringToObject(obj, "fw", esp_app_get_description()->version);
+    cJSON_AddStringToObject(obj, "state", state_to_string(state_machine_get()));
+    cJSON_AddStringToObject(obj, "storage_type", stype);
+    cJSON_AddNumberToObject(obj, "total_bytes", (double)total);
+    cJSON_AddNumberToObject(obj, "free_bytes", (double)free_bytes);
+    cJSON_AddBoolToObject(obj, "card_error", sd_card_has_card_error());
+    // Same rule as the busy guard: the machine read the drive in the last 10 s
+    cJSON_AddBoolToObject(obj, "busy", usb_msc_ms_since_host_read() < 10000);
+}
 
-    char resp[320];
-    snprintf(resp, sizeof(resp),
-             "{\"state\":\"%s\",\"storage_type\":\"%s\",\"total_bytes\":%llu,\"free_bytes\":%llu,\"card_error\":%s,\"fw\":\"%s\"}",
-             state_to_string(state_machine_get()), stype, total, free_bytes,
-             sd_card_has_card_error() ? "true" : "false",
-             esp_app_get_description()->version);
+static esp_err_t status_get_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "id", pairing_get_id());
+    file_receiver_add_status_fields(obj);
+    char *out = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
     httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, out ? out : "{}", HTTPD_RESP_USE_STRLEN);
+    cJSON_free(out);
     return ESP_OK;
 }
 
 static esp_err_t clear_files_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     // Require {"confirm":"WIPE"} so a stray POST can't delete everything
     char body[64] = {0};
     int len = 0;
@@ -750,6 +787,7 @@ static esp_err_t clear_files_handler(httpd_req_t *req) {
 // refused, missing files are skipped and reported. Busy guard as for /clear.
 #define DELETE_MAX_FILES FILE_CACHE_MAX
 static esp_err_t delete_post_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     int total_len = req->content_len;
     if (total_len <= 0 || total_len >= (int)sizeof(chunk_buf)) {
         drain_request_body(req);
@@ -865,6 +903,7 @@ static esp_err_t delete_post_handler(httpd_req_t *req) {
 }
 
 static esp_err_t format_storage_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     ESP_LOGI(TAG, "Full format requested");
 
     // Disconnect USB so no raw sector access races with the format
@@ -896,6 +935,7 @@ static esp_err_t format_storage_handler(httpd_req_t *req) {
 }
 
 static esp_err_t list_get_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     httpd_resp_set_type(req, "application/json; charset=utf-8");
 
     // While the USB host has the drive, never mount it: serve the snapshot
@@ -928,48 +968,42 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-static const char INDEX_HTML[] =
-"<!DOCTYPE html><html><head><meta charset='utf-8'><title>CNC Files</title>"
-"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<style>"
-"body{font-family:Arial;margin:40px;background:#1a1a2e;color:#fff}"
-"h1{color:#e94560}"
-"ul{list-style:none;padding:0}"
-"li{padding:12px;border-bottom:1px solid #333;display:flex;justify-content:space-between}"
-"a{color:#4cc9f0;text-decoration:none}"
-"a:hover{text-decoration:underline}"
-".btn{background:#e94560;color:#fff;padding:8px 16px;border:none;border-radius:4px;cursor:pointer}"
-".btn:hover{background:#ff6b6b}"
-"</style></head><body>"
-"<h1>CNC File Receiver</h1>"
-"<p>Connected to <b>CNC_WIRELESS</b></p>"
-"<div style='display:flex;justify-content:space-between;align-items:center'>"
-"<h2>Uploaded Files</h2>"
-"<button class='btn' onclick='clearAll()'>Clear All</button>"
-"</div>"
-"<ul id='filelist'><li>Loading...</li></ul>"
-"<script>"
-"function clearAll(){if(prompt('Type WIPE to delete all files')!=='WIPE')return;"
-"fetch('/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:'WIPE'})})"
-".then(r=>{if(r.status==423)alert('Machine is reading the drive - stop the job first.');location.reload();});}"
-"fetch('/list').then(r=>r.json()).then(d=>{"
-"  var l=document.getElementById('filelist');"
-"  if(!d.files || d.files.length==0){l.innerHTML='<li>No files uploaded</li>';return;}"
-"  l.innerHTML='';"
-"  d.files.forEach(f=>{"
-"    var fname = f.name || f;"
-"    l.innerHTML+=\"<li><span>\"+fname+\"</span><a href='/download/\"+fname+\"' download style='margin-left:auto;margin-right:15px'>Download</a></li>\";"
-"  });"
-"});"
-"</script></body></html>";
-
+// Receiver's own page: information only, no actions (those go through the transmitter).
 static esp_err_t index_get_handler(httpd_req_t *req) {
+    cJSON *st = cJSON_CreateObject();
+    file_receiver_add_status_fields(st);
+    char name[32];
+    pairing_get_name(name, sizeof(name));
+    cJSON *j_state = cJSON_GetObjectItem(st, "state");
+    cJSON *j_type = cJSON_GetObjectItem(st, "storage_type");
+    cJSON *j_fw = cJSON_GetObjectItem(st, "fw");
+    cJSON *j_total = cJSON_GetObjectItem(st, "total_bytes");
+    cJSON *j_free = cJSON_GetObjectItem(st, "free_bytes");
+
+    char page[1024];
+    snprintf(page, sizeof(page),
+             "<!DOCTYPE html><html><head><meta charset='utf-8'><title>CNC Receiver</title>"
+             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+             "<style>body{font-family:Arial;margin:24px;background:#1a1a2e;color:#fff}"
+             "h1{color:#e94560;font-size:1.4em}td{padding:6px 12px 6px 0}</style></head><body>"
+             "<h1>CNC Wireless Receiver</h1><table>"
+             "<tr><td>ID</td><td>%s</td></tr><tr><td>Name</td><td>%s</td></tr>"
+             "<tr><td>Paired</td><td>%s</td></tr><tr><td>State</td><td>%s</td></tr>"
+             "<tr><td>Storage</td><td>%s, %.1f MB free of %.1f MB</td></tr>"
+             "<tr><td>Firmware</td><td>%s</td></tr></table>"
+             "<p>Upload and manage files from the transmitter page.%s</p></body></html>",
+             pairing_get_id(), name, pairing_is_paired() ? "yes" : "no - approve it on the transmitter",
+             j_state->valuestring, j_type->valuestring, j_free->valuedouble / 1048576.0,
+             j_total->valuedouble / 1048576.0, j_fw->valuestring,
+             pairing_is_paired() ? " To re-pair, hold BOOT for 10 s." : "");
+    cJSON_Delete(st);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
 static esp_err_t download_get_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
     char filename[256];
     char filepath[300];
 
@@ -1005,71 +1039,49 @@ static esp_err_t download_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-static void restart_delayed_task(void *arg) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
+// POST /pair {"key":"<64 hex>","name":"..."}: accepted only while unpaired.
+static esp_err_t pair_post_handler(httpd_req_t *req) {
+    char buf[192];
+    int len = 0;
+    if (req->content_len <= 0 || req->content_len >= (int)sizeof(buf)) {
+        drain_request_body(req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body missing or too large");
+        return ESP_FAIL;
+    }
+    while (len < req->content_len) {
+        int r = httpd_req_recv(req, buf + len, req->content_len - len);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) return ESP_FAIL;
+        len += r;
+    }
+    buf[len] = '\0';
+    if (pairing_is_paired()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "Already paired - hold BOOT 10 s on the receiver to reset");
+        return ESP_OK;
+    }
+    cJSON *json = cJSON_Parse(buf);
+    cJSON *key = json ? cJSON_GetObjectItem(json, "key") : NULL;
+    cJSON *name = json ? cJSON_GetObjectItem(json, "name") : NULL;
+    esp_err_t err = pairing_set(cJSON_IsString(key) ? key->valuestring : NULL,
+                                cJSON_IsString(name) ? name->valuestring : NULL);
+    cJSON_Delete(json);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "key must be 64 lowercase hex characters");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, "{\"status\":\"paired\"}");
+    return ESP_OK;
 }
 
-static esp_err_t settings_post_handler(httpd_req_t *req) {
-    char buf[512];
-    if (req->content_len <= 0 || req->content_len >= (int)sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
-        return ESP_FAIL;
-    }
-    int received = 0;
-    while (received < req->content_len) {
-        int r = httpd_req_recv(req, buf + received, req->content_len - received);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (r <= 0) {
-            return ESP_FAIL;
-        }
-        received += r;
-    }
-    buf[received] = '\0';
-
-    cJSON *json = cJSON_Parse(buf);
-    if (!json) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_FAIL;
-    }
-
-    // Must fit sta_ssid[32] / sta_pass[64] in wifi_manager.c
-    cJSON *chk_ssid = cJSON_GetObjectItem(json, "ap_ssid");
-    cJSON *chk_pass = cJSON_GetObjectItem(json, "ap_pass");
-    if ((chk_ssid && chk_ssid->valuestring && strlen(chk_ssid->valuestring) > 31) ||
-        (chk_pass && chk_pass->valuestring && strlen(chk_pass->valuestring) > 63)) {
-        cJSON_Delete(json);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID or password too long");
-        return ESP_FAIL;
-    }
-
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("wifi_cfg", NVS_READWRITE, &nvs_handle);
-    if (err == ESP_OK) {
-        cJSON *j_wifi_mode = cJSON_GetObjectItem(json, "wifi_mode");
-        cJSON *j_ap_ssid = cJSON_GetObjectItem(json, "ap_ssid");
-        cJSON *j_ap_pass = cJSON_GetObjectItem(json, "ap_pass");
-        cJSON *j_sta_ssid = cJSON_GetObjectItem(json, "sta_ssid");
-        cJSON *j_sta_pass = cJSON_GetObjectItem(json, "sta_pass");
-
-        // The receiver must ALWAYS connect to the transmitter's private AP SSID.
-        // It should never attempt to connect to the shop router SSID.
-        if (j_ap_ssid && j_ap_ssid->valuestring && strlen(j_ap_ssid->valuestring) > 0) {
-            nvs_set_str(nvs_handle, "sta_ssid", j_ap_ssid->valuestring);
-            ESP_LOGI(TAG, "Saved new STA SSID (Transmitter AP): %s", j_ap_ssid->valuestring);
-        }
-        if (j_ap_pass && j_ap_pass->valuestring && strlen(j_ap_pass->valuestring) > 0) {
-            nvs_set_str(nvs_handle, "sta_pass", j_ap_pass->valuestring);
-        }
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    }
-    cJSON_Delete(json);
-
+// POST /unpair (with X-Auth-Key): the transmitter removed this receiver.
+static esp_err_t unpair_post_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    drain_request_body(req);
+    pairing_clear();
     httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
-
-    xTaskCreate(restart_delayed_task, "restart_task", 2048, NULL, 5, NULL);
+    httpd_resp_sendstr(req, "{\"status\":\"unpaired\"}");
     return ESP_OK;
 }
 
@@ -1098,7 +1110,8 @@ void file_receiver_init(void) {
         httpd_uri_t uri_format = {.uri = "/format", .method = HTTP_POST, .handler = format_storage_handler};
         httpd_uri_t uri_cancel = {.uri = "/cancel", .method = HTTP_POST, .handler = cancel_post_handler};
         httpd_uri_t uri_index = {.uri = "/", .method = HTTP_GET, .handler = index_get_handler};
-        httpd_uri_t uri_settings = {.uri = "/settings", .method = HTTP_POST, .handler = settings_post_handler};
+        httpd_uri_t uri_pair = {.uri = "/pair", .method = HTTP_POST, .handler = pair_post_handler};
+        httpd_uri_t uri_unpair = {.uri = "/unpair", .method = HTTP_POST, .handler = unpair_post_handler};
         httpd_uri_t uri_delete = {.uri = "/delete", .method = HTTP_POST, .handler = delete_post_handler};
 
         httpd_register_uri_handler(server, &uri_prepare);
@@ -1111,7 +1124,8 @@ void file_receiver_init(void) {
         httpd_register_uri_handler(server, &uri_format);
         httpd_register_uri_handler(server, &uri_cancel);
         httpd_register_uri_handler(server, &uri_index);
-        httpd_register_uri_handler(server, &uri_settings);
+        httpd_register_uri_handler(server, &uri_pair);
+        httpd_register_uri_handler(server, &uri_unpair);
         httpd_register_uri_handler(server, &uri_delete);
 
         ESP_LOGI(TAG, "File receiver HTTP server started on port %d", config.server_port);

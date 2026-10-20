@@ -19,18 +19,6 @@
 #define CONFIG_CNC_DEFAULT_WIFI_PASSWORD "cnc12345"
 #endif
 
-#ifndef CONFIG_CNC_RECEIVER_IP
-#define CONFIG_CNC_RECEIVER_IP "192.168.4.150"
-#endif
-
-#ifndef CONFIG_CNC_RECEIVER_GATEWAY
-#define CONFIG_CNC_RECEIVER_GATEWAY "192.168.4.1"
-#endif
-
-#ifndef CONFIG_CNC_RECEIVER_NETMASK
-#define CONFIG_CNC_RECEIVER_NETMASK "255.255.255.0"
-#endif
-
 #define DEFAULT_STA_SSID CONFIG_CNC_DEFAULT_WIFI_SSID
 #define DEFAULT_STA_PASS CONFIG_CNC_DEFAULT_WIFI_PASSWORD
 
@@ -43,25 +31,6 @@ static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 
-static void apply_static_ip(void) {
-    if (!s_sta_netif) return;
-    esp_netif_dhcpc_stop(s_sta_netif);
-    esp_netif_ip_info_t ip_info;
-    ip4_addr_t ip, gw, mask;
-    ip4addr_aton(CONFIG_CNC_RECEIVER_IP, &ip);
-    ip4addr_aton(CONFIG_CNC_RECEIVER_GATEWAY, &gw);
-    ip4addr_aton(CONFIG_CNC_RECEIVER_NETMASK, &mask);
-    ip_info.ip.addr = ip.addr;
-    ip_info.gw.addr = gw.addr;
-    ip_info.netmask.addr = mask.addr;
-    esp_err_t err = esp_netif_set_ip_info(s_sta_netif, &ip_info);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "set_ip_info failed: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "Static IP set: %s (GW: %s)", CONFIG_CNC_RECEIVER_IP, CONFIG_CNC_RECEIVER_GATEWAY);
-    }
-}
-
 static char g_sta_ssid[32] = DEFAULT_STA_SSID;
 static char g_sta_pass[64] = DEFAULT_STA_PASS;
 static bool s_trying_default = false;
@@ -70,13 +39,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        apply_static_ip();
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
-        ESP_LOGI(TAG, "Connected to AP! Applying static IP...");
-        apply_static_ip();
+        ESP_LOGI(TAG, "Connected to AP, waiting for DHCP...");
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "DHCP IP: " IPSTR " (transmitter " IPSTR ")", IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw));
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_retry_num++;
         ESP_LOGW(TAG, "Disconnected. Retry %d/%d", s_retry_num, MAX_RETRY);
@@ -110,6 +80,54 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         // Never call vTaskDelay inside event loop handler
         esp_wifi_connect();
     }
+}
+
+bool wifi_manager_get_ip(char *out, size_t len) {
+    esp_netif_ip_info_t info;
+    if (!s_sta_netif || esp_netif_get_ip_info(s_sta_netif, &info) != ESP_OK || info.ip.addr == 0) {
+        return false;
+    }
+    snprintf(out, len, IPSTR, IP2STR(&info.ip));
+    return true;
+}
+
+bool wifi_manager_get_gateway(char *out, size_t len) {
+    esp_netif_ip_info_t info;
+    if (!s_sta_netif || esp_netif_get_ip_info(s_sta_netif, &info) != ESP_OK || info.gw.addr == 0) {
+        return false;
+    }
+    snprintf(out, len, IPSTR, IP2STR(&info.gw));
+    return true;
+}
+
+void wifi_manager_apply_creds(const char *ssid, const char *pass) {
+    if (strcmp(ssid, g_sta_ssid) == 0 && strcmp(pass, g_sta_pass) == 0) {
+        return; // already using them
+    }
+    nvs_handle_t h;
+    if (nvs_open("wifi_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "sta_ssid", ssid);
+        nvs_set_str(h, "sta_pass", pass);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    strlcpy(g_sta_ssid, ssid, sizeof(g_sta_ssid));
+    strlcpy(g_sta_pass, pass, sizeof(g_sta_pass));
+    s_trying_default = false;
+    s_retry_num = 0;
+    wifi_config_t wifi_config = {
+        .sta = {
+            .threshold.authmode = WIFI_AUTH_OPEN,
+            .scan_method        = WIFI_FAST_SCAN,
+            .sort_method        = WIFI_CONNECT_AP_BY_SIGNAL,
+        },
+    };
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, pass, sizeof(wifi_config.sta.password) - 1);
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    // The transmitter restarts on its new credentials; the disconnect handler reconnects
+    esp_wifi_disconnect();
+    ESP_LOGI(TAG, "Switched to SSID [%s]", ssid);
 }
 
 void wifi_init(void) {

@@ -3,10 +3,12 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "mdns.h"
+#include "pairing.h"
+#include <stdio.h>
 #include <string.h>
 
 #ifndef CONFIG_CNC_MDNS_HOSTNAME
-#define CONFIG_CNC_MDNS_HOSTNAME "cnc-receiver"
+#define CONFIG_CNC_MDNS_HOSTNAME "cnc"
 #endif
 
 #ifndef CONFIG_CNC_MDNS_SERVICE
@@ -22,13 +24,17 @@ void mdns_responder_init(void) {
         return;
     }
 
-    mdns_hostname_set(CONFIG_CNC_MDNS_HOSTNAME);
+    // Per-device hostname so several receivers can share the AP
+    char hostname[32];
+    snprintf(hostname, sizeof(hostname), "%s-%s", CONFIG_CNC_MDNS_HOSTNAME, pairing_get_id());
+    mdns_hostname_set(hostname);
     mdns_instance_name_set("CNC Wireless Receiver");
 
     mdns_txt_item_t txt_records[] = {
         { "role",   "receiver" },
         { "proto",  "http" },
         { "ver",    "1" },
+        { "id",     pairing_get_id() },
     };
 
     err = mdns_service_add(
@@ -46,5 +52,5 @@ void mdns_responder_init(void) {
     }
 
     ESP_LOGI(TAG, "mDNS advertising: %s.local as %s._tcp:80",
-             CONFIG_CNC_MDNS_HOSTNAME, CONFIG_CNC_MDNS_SERVICE);
+             hostname, CONFIG_CNC_MDNS_SERVICE);
 }

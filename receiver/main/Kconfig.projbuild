@@ -14,32 +14,12 @@ config CNC_DEFAULT_WIFI_PASSWORD
         Default password for the Wi-Fi network the receiver connects to.
         Must be at least 8 characters. Can be overridden via NVS at runtime.
 
-config CNC_RECEIVER_IP
-    string "Receiver Static IP Address"
-    default "192.168.4.150"
-    help
-        Static IP assigned to this receiver device on the local network.
-        The transmitter uses this IP to reach the receiver's HTTP API.
-
-config CNC_RECEIVER_NETMASK
-    string "Receiver Subnet Mask"
-    default "255.255.255.0"
-    help
-        Subnet mask for the static IP configuration.
-
-config CNC_RECEIVER_GATEWAY
-    string "Receiver Gateway IP"
-    default "192.168.4.1"
-    help
-        Gateway IP for the static IP configuration (typically the
-        transmitter's AP IP).
-
 config CNC_MDNS_HOSTNAME
     string "mDNS Hostname"
-    default "cnc-receiver"
+    default "cnc"
     help
-        Hostname advertised via mDNS. The device will be reachable at
-        <hostname>.local on networks that support mDNS.
+        mDNS hostname prefix; the receiver ID is appended
+        (e.g. cnc-rx-a1b2c3.local) so several receivers can coexist.
 
 config CNC_MDNS_SERVICE
     string "mDNS Service Type"

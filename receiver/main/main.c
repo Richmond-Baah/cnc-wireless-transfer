@@ -13,6 +13,7 @@
 #include "storage_manager.h"
 #include "tusb.h"
 #include "mdns_responder.h"
+#include "pairing.h"
 #include <stdio.h>
 #include <stdint.h>
 
@@ -59,6 +60,10 @@ void app_main(void) {
     storage_manager_init();
     ESP_LOGI(TAG, "Step 4b: DONE");
 
+    ESP_LOGI(TAG, "Step 4c: Pairing (ID, key)...");
+    pairing_init();
+    ESP_LOGI(TAG, "Step 4c: DONE");
+
     ESP_LOGI(TAG, "Step 5: Wi-Fi init...");
     wifi_init();
     ESP_LOGI(TAG, "Step 5: DONE");
@@ -70,6 +75,10 @@ void app_main(void) {
     ESP_LOGI(TAG, "Step 7: mDNS responder init...");
     mdns_responder_init();
     ESP_LOGI(TAG, "Step 7: DONE");
+
+    ESP_LOGI(TAG, "Step 7b: Heartbeat + BOOT-button tasks...");
+    pairing_start_tasks();
+    ESP_LOGI(TAG, "Step 7b: DONE");
 
     ESP_LOGI(TAG, "Step 8: Creating debug task...");
     xTaskCreate(usb_debug_task, "usb_debug", 2048, NULL, 3, NULL);
