@@ -26,7 +26,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "CNC_WIR
 - One upload session at a time across all receivers (409 for another receiver).
 
 ## Open items
-- Receiver API + its / page have no auth.
+- Unpaired receiver API is open; key travels in plain HTTP (WPA2 AP only). /debug shows AP password.
 - Compile out /debug for production.
 - ".." rejected anywhere in name (too strict; only whole-name matters).
 - Busy-guard threshold untuned (polling machines trigger it).
