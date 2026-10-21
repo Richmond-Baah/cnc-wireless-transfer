@@ -289,7 +289,7 @@ void wifi_init(void) {
   strncpy((char *)ap_config.ap.ssid, ap_ssid, sizeof(ap_config.ap.ssid) - 1);
   ap_config.ap.ssid_len = strlen(ap_ssid);
   strncpy((char *)ap_config.ap.password, ap_pass, sizeof(ap_config.ap.password));
-  ap_config.ap.max_connection = 4;
+  ap_config.ap.max_connection = ESP_WIFI_MAX_CONN_NUM; // 15 on ESP32-S3: receivers + phones/laptops
   ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
   ap_config.ap.channel = 1;
   ap_config.ap.beacon_interval = 50;

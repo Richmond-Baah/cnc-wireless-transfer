@@ -354,6 +354,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const input = newDeviceBanner.querySelector(`input[data-id="${CSS.escape(id)}"]`);
             const name = input ? input.value.trim() : '';
             if (!name) { showFeedback('Enter a name for the new device.', 'error'); return; }
+            // Every receiver uses one of the hotspot's 15 Wi-Fi slots
+            if (lastWifiMode === 'AP' && receivers.length >= 12 &&
+                !confirm('Leave room for phones/laptops; for more machines use router mode.\n\nApprove anyway?')) return;
             btn.disabled = true;
             const { error } = await postReceiverAction('approve', { id, name });
             btn.disabled = false;
@@ -373,7 +376,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── Status Polling ─────────────────────────────────────────────────
     const statusBadge = document.getElementById('receiverStatus');
     let statusInterval;
-    let lastFree = null, lastTotal = 0; // receiver drive space, for the pre-upload size check
+    let lastFree = null, lastTotal = 0;
+    let lastWifiMode = 'AP'; // from /status: AP = hotspot only, STA = router mode // receiver drive space, for the pre-upload size check
 
     const STATE_TEXT = { IDLE: 'Ready', FILE_READY: 'File ready', RECEIVING: 'Receiving', USB_ACTIVE: 'Ready (USB linked)',
                          ERROR: 'Error', CARD_ERROR: 'Card unreadable', UNKNOWN: 'Waiting for status' };
@@ -417,7 +421,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const fwEl = document.getElementById('fwVersions');
                 if (fwEl) {
                     fwEl.textContent = 'Firmware: transmitter ' + (data.tx_fw || '-') +
-                        ' | receiver ' + (data.fw || '-');
+                        ' | receiver ' + (data.fw || '-') +
+                        (typeof data.ap_clients === 'number'
+                            ? ' | Wi-Fi devices: ' + data.ap_clients + '/' + (data.ap_max_clients || 15) : '');
+                }
+                if (data.wifi_mode) {
+                    lastWifiMode = data.wifi_mode;
                 }
                 const recEl = document.getElementById('recoveryInfo');
                 if (recEl) {

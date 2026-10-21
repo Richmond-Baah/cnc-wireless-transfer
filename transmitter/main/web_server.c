@@ -449,6 +449,14 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
   }
   cJSON_AddNumberToObject(obj, "recovery_s", wifi_recovery_seconds_left());
 
+  // Devices on this AP (receivers + phones/laptops) vs the SoftAP limit
+  wifi_sta_list_t ap_sta;
+  wifi_mode_t mode = WIFI_MODE_AP;
+  esp_wifi_get_mode(&mode);
+  cJSON_AddStringToObject(obj, "wifi_mode", mode == WIFI_MODE_APSTA ? "STA" : "AP");
+  cJSON_AddNumberToObject(obj, "ap_clients", esp_wifi_ap_get_sta_list(&ap_sta) == ESP_OK ? ap_sta.num : 0);
+  cJSON_AddNumberToObject(obj, "ap_max_clients", ESP_WIFI_MAX_CONN_NUM);
+
   char *out = cJSON_PrintUnformatted(obj);
   cJSON_Delete(obj);
   httpd_resp_set_type(req, "application/json; charset=utf-8");
