@@ -209,8 +209,16 @@ void wifi_init(void) {
     };
     esp_wifi_set_country(&country);
 
-    // Set max TX power for better signal
-    esp_wifi_set_max_tx_power(78);
+    {
+        // Units of 0.25 dBm (CONFIG_CNC_WIFI_MAX_TX_POWER); max power can brown
+        // out small boards and leave the AP invisible
+        esp_err_t txp_err = esp_wifi_set_max_tx_power(CONFIG_CNC_WIFI_MAX_TX_POWER);
+        int8_t txp = 0;
+        esp_wifi_get_max_tx_power(&txp);
+        ESP_LOGI(TAG, "Wi-Fi max TX power: requested %d (%.2f dBm), actual %d (%.2f dBm)%s%s",
+                 CONFIG_CNC_WIFI_MAX_TX_POWER, CONFIG_CNC_WIFI_MAX_TX_POWER / 4.0, txp, txp / 4.0,
+                 txp_err == ESP_OK ? "" : ", set failed: ", txp_err == ESP_OK ? "" : esp_err_to_name(txp_err));
+    }
 
     // Non-blocking wait: Wait up to 500ms for initial connection bit, then proceed so USB MSC initializes immediately
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(500));

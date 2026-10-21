@@ -31,4 +31,14 @@ config CNC_DEFAULT_WEB_PASS
         Can be changed via the web UI Settings panel after first login.
 
 
+config CNC_WIFI_MAX_TX_POWER
+    int "Wi-Fi max TX power (units of 0.25 dBm)"
+    range 8 84
+    default 34
+    help
+        Applied with esp_wifi_set_max_tx_power() after esp_wifi_start().
+        34 = 8.5 dBm (default). 78 = 19.5 dBm, 84 = 21 dBm (max).
+        High power can brown out small ESP32-S3 boards (weak LDO/antenna)
+        and leave the AP invisible; raise only if the supply is solid.
+
 endmenu

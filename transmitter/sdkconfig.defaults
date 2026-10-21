@@ -32,3 +32,6 @@ CONFIG_MBEDTLS_MD5_C=y
 
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL=3
+
+# Wi-Fi TX power in 0.25 dBm units (34 = 8.5 dBm)
+CONFIG_CNC_WIFI_MAX_TX_POWER=34
