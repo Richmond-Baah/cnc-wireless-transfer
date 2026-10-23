@@ -18,6 +18,9 @@ bool pairing_key_matches(const char *hex); // constant time; false when unpaired
 
 // Accepted only while unpaired (ESP_ERR_INVALID_STATE otherwise).
 esp_err_t pairing_set(const char *hex_key, const char *name);
+// Key from ESP-NOW PAIR_CFG or pair.cfg: used like a pairing, but confirmed only
+// when a heartbeat reply says paired; 3 rejected heartbeats drop it again.
+esp_err_t pairing_set_provisional(const char *hex_key, const char *name, const char *tx_id);
 void pairing_clear(void);
 
 uint32_t pairing_config_version(void);

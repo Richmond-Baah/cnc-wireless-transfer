@@ -14,6 +14,7 @@
 #include "tusb.h"
 #include "mdns_responder.h"
 #include "pairing.h"
+#include "espnow_pair.h"
 #include <stdio.h>
 #include <stdint.h>
 
@@ -78,6 +79,7 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "Step 7b: Heartbeat + BOOT-button tasks...");
     pairing_start_tasks();
+    espnow_pair_start(); // "Add machine" radio pairing while unpaired
     ESP_LOGI(TAG, "Step 7b: DONE");
 
     ESP_LOGI(TAG, "Step 8: Creating debug task...");

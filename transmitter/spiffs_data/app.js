@@ -301,9 +301,10 @@ document.addEventListener('DOMContentLoaded', () => {
             newDeviceBanner.innerHTML = '';
             return;
         }
-        newDeviceBanner.innerHTML = '<h2 style="margin-bottom: 4px;">New device found</h2>' + pending.map(p => `
+        newDeviceBanner.innerHTML = '<h2 style="margin-bottom: 4px;">New device found</h2>' +
+            '<p class="text-muted" style="font-size: 0.85rem;">Check the ID matches the label on the device before approving.</p>' + pending.map(p => `
             <div class="new-device-row">
-                <span class="text-muted">${escapeHtml(p.id)} (${escapeHtml(p.ip)})${p.repair ? ' – was reset, approve again' : ''}</span>
+                <span class="text-muted"><strong>${escapeHtml(p.id)}</strong> (${p.radio ? 'by radio' : escapeHtml(p.ip)})${p.repair ? ' – was reset, approve again' : ''}</span>
                 <input type="text" maxlength="31" value="${escapeHtml(p.name)}" data-id="${escapeHtml(p.id)}" aria-label="Name for ${escapeHtml(p.id)}">
                 <button type="button" class="btn btn-primary btn-sm approve-rx" data-id="${escapeHtml(p.id)}">Approve</button>
             </div>`).join('');
@@ -327,7 +328,55 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             renderMachines();
             renderPending(d.pending || []);
+            renderAddWindow(d.add_window_s || 0);
         } catch (e) { /* transmitter unreachable: status badge shows it */ }
+    }
+
+    // "Add machine": 120 s window in which unpaired receivers are found by radio
+    const addMachineBtn = document.getElementById('addMachineBtn');
+    const addMachineInfo = document.getElementById('addMachineInfo');
+    let addWindowEnd = 0;
+    let addWindowTimer = null;
+    function renderAddWindow(seconds) {
+        if (seconds > 0) addWindowEnd = Date.now() + seconds * 1000;
+        else if (addWindowEnd && Date.now() < addWindowEnd - 5000) addWindowEnd = 0; // closed early (restart)
+        if (!addMachineInfo) return;
+        const tick = () => {
+            const left = Math.max(0, Math.round((addWindowEnd - Date.now()) / 1000));
+            if (!left) {
+                addMachineInfo.style.display = 'none';
+                if (addMachineBtn) addMachineBtn.disabled = false;
+                clearInterval(addWindowTimer);
+                addWindowTimer = null;
+                return;
+            }
+            addMachineInfo.textContent = 'Looking for new machines (' + left + ' s). Power on the receiver; ' +
+                'it appears above as a new device.';
+            addMachineInfo.style.display = 'block';
+            if (addMachineBtn) addMachineBtn.disabled = true;
+        };
+        tick();
+        if (addWindowEnd && !addWindowTimer) addWindowTimer = setInterval(tick, 1000);
+    }
+    if (addMachineBtn) {
+        addMachineBtn.addEventListener('click', async () => {
+            addMachineBtn.disabled = true;
+            try {
+                const res = await fetch('/receivers/add', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok) {
+                    showFeedback('Add machine failed: ' + await errorText(res), 'error');
+                    addMachineBtn.disabled = false;
+                    return;
+                }
+                renderAddWindow((await res.json()).seconds || 120);
+            } catch (e) {
+                showFeedback('Add machine failed: transmitter unreachable.', 'error');
+                addMachineBtn.disabled = false;
+            }
+        });
     }
 
     async function postReceiverAction(action, body) {
@@ -358,13 +407,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (lastWifiMode === 'AP' && receivers.length >= 12 &&
                 !confirm('Leave room for phones/laptops; for more machines use router mode.\n\nApprove anyway?')) return;
             btn.disabled = true;
-            const { error } = await postReceiverAction('approve', { id, name });
+            const { error, message } = await postReceiverAction('approve', { id, name });
             btn.disabled = false;
             if (error) {
                 showFeedback('Pairing failed: ' + error, 'error');
                 return;
             }
-            showFeedback('Paired "' + name + '".', 'success');
+            showFeedback(message ? '"' + name + '": ' + message + '.' : 'Paired "' + name + '".', 'success');
             pendingKey = ''; // re-render the banner without it
             if (!selectedReceiver()) rememberRx(id);
             await loadReceivers();

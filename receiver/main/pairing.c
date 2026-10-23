@@ -24,6 +24,9 @@ static char s_default_name[24];
 static char s_name[32];
 static char s_key[PAIRING_KEY_HEX_LEN + 1]; // empty = unpaired
 static uint32_t s_cfg_ver;
+static char s_tx_id[16];
+static bool s_provisional; // key not yet confirmed by a heartbeat reply
+#define PROVISIONAL_MAX_REJECTS 3
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void nvs_save(void) {
@@ -35,9 +38,13 @@ static void nvs_save(void) {
   if (s_key[0]) {
     nvs_set_str(h, "key", s_key);
     nvs_set_str(h, "name", s_name);
+    nvs_set_str(h, "tx_id", s_tx_id);
+    nvs_set_u8(h, "prov", s_provisional);
   } else {
     nvs_erase_key(h, "key");
     nvs_erase_key(h, "name");
+    nvs_erase_key(h, "tx_id");
+    nvs_erase_key(h, "prov");
   }
   nvs_set_u32(h, "cfg_ver", s_cfg_ver);
   nvs_commit(h);
@@ -64,7 +71,8 @@ void pairing_init(void) {
     nvs_close(h);
   }
   ESP_LOGI(TAG, "ID %s (%s), %s, config_version %lu", s_id, s_default_name,
-           s_key[0] ? "PAIRED" : "unpaired", (unsigned long)s_cfg_ver);
+           s_key[0] ? (s_provisional ? "PAIRED (provisional)" : "PAIRED") : "unpaired",
+           (unsigned long)s_cfg_ver);
 }
 
 const char *pairing_get_id(void) { return s_id; }
@@ -88,7 +96,7 @@ bool pairing_key_matches(const char *hex) {
   return diff == 0;
 }
 
-esp_err_t pairing_set(const char *hex_key, const char *name) {
+static esp_err_t set_key(const char *hex_key, const char *name, const char *tx_id, bool provisional) {
   if (pairing_is_paired()) {
     return ESP_ERR_INVALID_STATE;
   }
@@ -99,10 +107,21 @@ esp_err_t pairing_set(const char *hex_key, const char *name) {
   portENTER_CRITICAL(&s_mux);
   strlcpy(s_key, hex_key, sizeof(s_key));
   strlcpy(s_name, name ? name : "", sizeof(s_name));
+  strlcpy(s_tx_id, tx_id ? tx_id : "", sizeof(s_tx_id));
+  s_provisional = provisional;
   portEXIT_CRITICAL(&s_mux);
   nvs_save();
-  ESP_LOGI(TAG, "Paired with transmitter (name \"%s\")", s_name);
+  ESP_LOGI(TAG, "Paired with transmitter %s (name \"%s\")%s", s_tx_id[0] ? s_tx_id : "",
+           s_name, provisional ? ", provisional until it confirms" : "");
   return ESP_OK;
+}
+
+esp_err_t pairing_set(const char *hex_key, const char *name) {
+  return set_key(hex_key, name, NULL, false);
+}
+
+esp_err_t pairing_set_provisional(const char *hex_key, const char *name, const char *tx_id) {
+  return set_key(hex_key, name, tx_id, true);
 }
 
 void pairing_clear(void) {
@@ -175,6 +194,7 @@ static void pull_config(uint32_t tx_ver) {
 static void heartbeat_task(void *arg) {
   (void)arg;
   char resp[160];
+  int rejects = 0;
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
     char ip[16];
@@ -206,6 +226,20 @@ static void heartbeat_task(void *arg) {
     cJSON *r = cJSON_Parse(resp);
     cJSON *paired = r ? cJSON_GetObjectItem(r, "paired") : NULL;
     cJSON *ver = r ? cJSON_GetObjectItem(r, "config_version") : NULL;
+    if (pairing_is_paired() && s_provisional && r != NULL) {
+      if (cJSON_IsTrue(paired)) {
+        s_provisional = false;
+        rejects = 0;
+        nvs_save();
+        ESP_LOGI(TAG, "Pairing confirmed by transmitter");
+      } else if (++rejects >= PROVISIONAL_MAX_REJECTS) {
+        // Expired pair.cfg or an approval that never completed: unpaired again
+        // so the transmitter can approve it normally
+        rejects = 0;
+        ESP_LOGW(TAG, "Transmitter rejected the provisional key %d times", PROVISIONAL_MAX_REJECTS);
+        pairing_clear();
+      }
+    }
     if (pairing_is_paired() && cJSON_IsTrue(paired) && cJSON_IsNumber(ver) &&
         (uint32_t)ver->valuedouble > s_cfg_ver) {
       pull_config((uint32_t)ver->valuedouble);

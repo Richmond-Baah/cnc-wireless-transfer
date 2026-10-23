@@ -17,6 +17,7 @@
 #include "esp_spiffs.h"
 #include "esp_system.h"
 #include "file_transfer.h"
+#include "espnow_pair.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -905,6 +906,24 @@ static esp_err_t receivers_manage_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// POST /receivers/add: opens the 120 s "Add machine" window (ESP-NOW pairing).
+static esp_err_t receivers_add_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  esp_err_t err = espnow_pair_open_window(ESPNOW_PAIR_WINDOW_S);
+  if (err != ESP_OK) {
+    send_status_text(req, 500, "Could not start radio pairing");
+    return ESP_OK;
+  }
+  char resp[48];
+  snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"seconds\":%d}", ESPNOW_PAIR_WINDOW_S);
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, resp);
+  return ESP_OK;
+}
+
 // POST /recovery {"confirm":"RECOVERY"}: AP on factory credentials for 5 min
 // so receivers that missed a credential change can rejoin and pull them.
 #define RECOVERY_SECONDS 300
@@ -977,7 +996,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 30; // 26 registered
+  config.max_uri_handlers = 32; // 28 registered
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
@@ -1073,6 +1092,9 @@ void web_server_start(void) {
     httpd_register_uri_handler(server, &uri_rx_approve);
     httpd_register_uri_handler(server, &uri_rx_rename);
     httpd_register_uri_handler(server, &uri_rx_unpair);
+    httpd_uri_t uri_rx_add = {
+        .uri = "/receivers/add", .method = HTTP_POST, .handler = receivers_add_handler};
+    httpd_register_uri_handler(server, &uri_rx_add);
     httpd_uri_t uri_recovery = {
         .uri = "/recovery", .method = HTTP_POST, .handler = recovery_post_handler};
     httpd_register_uri_handler(server, &uri_recovery);

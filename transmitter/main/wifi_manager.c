@@ -174,6 +174,15 @@ int wifi_recovery_seconds_left(void) {
   return left > 0 ? (int)left : 0;
 }
 
+void wifi_get_ap_creds(char *ssid, size_t ssid_len, char *pass, size_t pass_len) {
+  char tmp_ssid[33] = {0};
+  memcpy(tmp_ssid, s_ap_saved.ap.ssid, sizeof(s_ap_saved.ap.ssid)); // may lack a NUL
+  strlcpy(ssid, tmp_ssid, ssid_len);
+  char tmp_pass[65] = {0};
+  memcpy(tmp_pass, s_ap_saved.ap.password, sizeof(s_ap_saved.ap.password));
+  strlcpy(pass, tmp_pass, pass_len);
+}
+
 static void mdns_start(void) {
   esp_err_t err = mdns_init();
   if (err != ESP_OK) {

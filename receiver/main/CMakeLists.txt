@@ -8,7 +8,8 @@ idf_component_register(SRCS "main.c"
     "sd_card.c"
     "mdns_responder.c"
     "pairing.c"
+    "espnow_pair.c"
     INCLUDE_DIRS "."
     REQUIRES nvs_flash esp_wifi esp_event esp_netif lwip
     mbedtls esp_http_server esp_http_client fatfs vfs wear_levelling
-    esp_tinyusb driver json led_strip sdmmc spi_flash mdns esp_app_format esp_timer)
+    esp_tinyusb driver json led_strip sdmmc spi_flash mdns esp_app_format esp_timer pair_proto)

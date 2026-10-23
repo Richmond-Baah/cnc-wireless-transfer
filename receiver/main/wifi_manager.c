@@ -34,6 +34,7 @@ static esp_netif_t *s_sta_netif = NULL;
 static char g_sta_ssid[32] = DEFAULT_STA_SSID;
 static char g_sta_pass[64] = DEFAULT_STA_PASS;
 static bool s_trying_default = false;
+static volatile bool s_paused = false; // ESP-NOW pairing owns the channel
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
@@ -48,6 +49,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "DHCP IP: " IPSTR " (transmitter " IPSTR ")", IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw));
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        if (s_paused) {
+            return; // wifi_manager_pause_connect(false) reconnects
+        }
         s_retry_num++;
         ESP_LOGW(TAG, "Disconnected. Retry %d/%d", s_retry_num, MAX_RETRY);
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -128,6 +133,15 @@ void wifi_manager_apply_creds(const char *ssid, const char *pass) {
     // The transmitter restarts on its new credentials; the disconnect handler reconnects
     esp_wifi_disconnect();
     ESP_LOGI(TAG, "Switched to SSID [%s]", ssid);
+}
+
+void wifi_manager_pause_connect(bool pause) {
+    s_paused = pause;
+    if (pause) {
+        esp_wifi_disconnect(); // aborts a scan/connect in progress
+    } else {
+        esp_wifi_connect();
+    }
 }
 
 void wifi_init(void) {

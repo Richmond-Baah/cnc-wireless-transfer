@@ -38,7 +38,16 @@ void rx_registry_init(void);
 
 // Handles a heartbeat body. Returns true if it came from a paired receiver
 // with the right key; anything else lands in the pending list.
+// A pre-registered key (ESP-NOW approval, pairing file) pairs the receiver
+// that first heartbeats with it.
 bool rx_registry_heartbeat(const cJSON *hb);
+
+// PAIR_REQ heard during the add-machine window: listed as a new device.
+void rx_registry_espnow_found(const char *id, const char *fw, const uint8_t mac[6],
+                              const uint8_t pub[32]);
+
+// "tx-" + last 3 AP MAC bytes
+const char *rx_registry_tx_id(void);
 
 // Paired + online receiver -> target. False: unknown id (404) or offline (502).
 bool rx_registry_target(const char *id, rx_target_t *out, bool *known);

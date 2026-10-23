@@ -1,5 +1,7 @@
 #include "rx_registry.h"
+#include "espnow_pair.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -7,11 +9,14 @@
 #include "nvs.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 static const char *TAG = "RX_REG";
 
 #define RX_NVS_NS "rx_reg"
 #define PENDING_EXPIRE_US (60LL * 1000 * 1000)
+#define RX_MAX_PREREG 6
+#define ESPNOW_PREREG_US (10LL * 60 * 1000 * 1000) // radio-approved key valid 10 min
 
 typedef struct {
   // persisted
@@ -37,7 +42,20 @@ typedef struct {
   char ip[16];
   char fw[32];
   int64_t last_seen_us;
+  bool espnow; // last seen via ESP-NOW PAIR_REQ (no IP): approve sends PAIR_CFG
+  uint8_t mac[6];
+  uint8_t pub[32];
 } rx_pending_t;
+
+// Key handed out before the receiver has used it; its first heartbeat with the
+// key pairs it under this name.
+typedef struct {
+  char id[RX_ID_LEN];          // "" = any receiver (pairing file)
+  char name[RX_NAME_LEN];
+  char key[RX_KEY_HEX_LEN + 1];
+  int64_t expires_us;          // uptime deadline (ESP-NOW), 0 = none
+  int64_t expires_epoch;       // wall-clock deadline (pairing file), 0 = none
+} rx_prereg_t;
 
 // What NVS stores per paired receiver
 typedef struct {
@@ -49,8 +67,10 @@ typedef struct {
 static rx_entry_t s_rx[RX_MAX_PAIRED];
 static int s_rx_count;
 static rx_pending_t s_pending[RX_MAX_PENDING];
+static rx_prereg_t s_prereg[RX_MAX_PREREG];
 static uint32_t s_cfg_ver;
 static SemaphoreHandle_t s_mutex;
+static char s_tx_id[16];
 
 static void lock(void) { xSemaphoreTake(s_mutex, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_mutex); }
@@ -105,8 +125,57 @@ static void save_locked(void) {
   nvs_close(h);
 }
 
+const char *rx_registry_tx_id(void) { return s_tx_id; }
+
+static bool prereg_expired(const rx_prereg_t *p) {
+  return (p->expires_us && esp_timer_get_time() > p->expires_us) ||
+         (p->expires_epoch && (int64_t)time(NULL) > p->expires_epoch);
+}
+
+// Called with the lock held. Index of the live pre-registration matching key
+// (and id, if it names one), else -1. Drops expired ones on the way.
+static int find_prereg_locked(const char *id, const char *key) {
+  int found = -1;
+  for (int k = 0; k < RX_MAX_PREREG; k++) {
+    rx_prereg_t *p = &s_prereg[k];
+    if (p->key[0] == '\0') continue;
+    if (prereg_expired(p)) {
+      ESP_LOGI(TAG, "Pre-registered key for \"%s\" expired", p->name);
+      memset(p, 0, sizeof(*p));
+      continue;
+    }
+    if (found < 0 && key_equal(key, p->key) && (p->id[0] == '\0' || strcmp(p->id, id) == 0)) {
+      found = k;
+    }
+  }
+  return found;
+}
+
+// Called with the lock held; replaces the same id, else a free/expired/first slot.
+static void prereg_add_locked(const char *id, const char *name, const char *key,
+                              int64_t expires_us, int64_t expires_epoch) {
+  int slot = -1;
+  for (int k = 0; k < RX_MAX_PREREG && slot < 0; k++) {
+    if (id[0] && strcmp(s_prereg[k].id, id) == 0) slot = k;
+  }
+  for (int k = 0; k < RX_MAX_PREREG && slot < 0; k++) {
+    if (s_prereg[k].key[0] == '\0' || prereg_expired(&s_prereg[k])) slot = k;
+  }
+  if (slot < 0) slot = 0;
+  rx_prereg_t *p = &s_prereg[slot];
+  memset(p, 0, sizeof(*p));
+  strlcpy(p->id, id, sizeof(p->id));
+  strlcpy(p->name, name, sizeof(p->name));
+  strlcpy(p->key, key, sizeof(p->key));
+  p->expires_us = expires_us;
+  p->expires_epoch = expires_epoch;
+}
+
 void rx_registry_init(void) {
   s_mutex = xSemaphoreCreateMutex();
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+  snprintf(s_tx_id, sizeof(s_tx_id), "tx-%02x%02x%02x", mac[3], mac[4], mac[5]);
   nvs_handle_t h;
   if (nvs_open(RX_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
     static rx_saved_t saved[RX_MAX_PAIRED];
@@ -214,6 +283,7 @@ bool rx_registry_heartbeat(const cJSON *hb) {
   const char *key = json_str(hb, "key");
   int64_t now = esp_timer_get_time();
   bool paired = false;
+  int pr;
 
   lock();
   int i = find_paired(id);
@@ -225,6 +295,26 @@ bool rx_registry_heartbeat(const cJSON *hb) {
     strlcpy(e->ip, ip, sizeof(e->ip));
     apply_status_locked(e, hb);
     e->last_seen_us = now;
+    paired = true;
+  } else if ((pr = find_prereg_locked(id, key)) >= 0 && (i >= 0 || s_rx_count < RX_MAX_PAIRED)) {
+    // First heartbeat with a key handed out by ESP-NOW approval or pairing file
+    if (i < 0) {
+      i = s_rx_count++;
+      memset(&s_rx[i], 0, sizeof(s_rx[i]));
+      strlcpy(s_rx[i].id, id, sizeof(s_rx[i].id));
+    }
+    rx_entry_t *e = &s_rx[i];
+    strlcpy(e->name, s_prereg[pr].name, sizeof(e->name));
+    strlcpy(e->key, s_prereg[pr].key, sizeof(e->key));
+    strlcpy(e->ip, ip, sizeof(e->ip));
+    apply_status_locked(e, hb);
+    e->last_seen_us = now;
+    e->cfg_fetched = s_cfg_ver; // it just joined with the current AP credentials
+    memset(&s_prereg[pr], 0, sizeof(s_prereg[pr]));
+    save_locked();
+    int p = find_pending(id);
+    if (p >= 0) memset(&s_pending[p], 0, sizeof(s_pending[p]));
+    ESP_LOGI(TAG, "Paired %s as \"%s\" (pre-registered key) at %s", id, e->name, ip);
     paired = true;
   } else {
     // Unknown, or paired here but the receiver lost/has another key (BOOT reset):
@@ -247,9 +337,37 @@ bool rx_registry_heartbeat(const cJSON *hb) {
     strlcpy(s_pending[p].ip, ip, sizeof(s_pending[p].ip));
     strlcpy(s_pending[p].fw, fw ? fw : "", sizeof(s_pending[p].fw));
     s_pending[p].last_seen_us = now;
+    s_pending[p].espnow = false;
   }
   unlock();
   return paired;
+}
+
+void rx_registry_espnow_found(const char *id, const char *fw, const uint8_t mac[6],
+                              const uint8_t pub[32]) {
+  if (!id_is_valid(id)) return;
+  lock();
+  int p = find_pending(id);
+  if (p < 0) {
+    int oldest = 0;
+    for (int k = 0; k < RX_MAX_PENDING; k++) {
+      if (s_pending[k].id[0] == '\0') { oldest = k; break; }
+      if (s_pending[k].last_seen_us < s_pending[oldest].last_seen_us) oldest = k;
+    }
+    p = oldest;
+    memset(&s_pending[p], 0, sizeof(s_pending[p]));
+    strlcpy(s_pending[p].id, id, sizeof(s_pending[p].id));
+    snprintf(s_pending[p].name, sizeof(s_pending[p].name), "Receiver %s", id + 3);
+    ESP_LOGI(TAG, "New device found by radio: %s (" MACSTR ")%s", id, MAC2STR(mac),
+             find_paired(id) >= 0 ? " (re-pair needed)" : "");
+  }
+  s_pending[p].ip[0] = '\0';
+  strlcpy(s_pending[p].fw, fw, sizeof(s_pending[p].fw));
+  memcpy(s_pending[p].mac, mac, 6);
+  memcpy(s_pending[p].pub, pub, 32);
+  s_pending[p].espnow = true;
+  s_pending[p].last_seen_us = esp_timer_get_time();
+  unlock();
 }
 
 bool rx_registry_target(const char *id, rx_target_t *out, bool *known) {
@@ -335,10 +453,12 @@ char *rx_registry_list_json(void) {
     cJSON_AddStringToObject(o, "name", s_pending[k].name);
     cJSON_AddStringToObject(o, "ip", s_pending[k].ip);
     cJSON_AddStringToObject(o, "fw", s_pending[k].fw);
+    cJSON_AddBoolToObject(o, "radio", s_pending[k].espnow);
     cJSON_AddBoolToObject(o, "repair", find_paired(s_pending[k].id) >= 0);
     cJSON_AddItemToArray(pend, o);
   }
   unlock();
+  cJSON_AddNumberToObject(root, "add_window_s", espnow_pair_seconds_left());
   char *out = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
   return out;
@@ -375,12 +495,38 @@ int rx_registry_approve(const char *id, const char *name, char *msg, size_t msg_
   }
   strlcpy(t.id, s_pending[p].id, sizeof(t.id));
   strlcpy(t.ip, s_pending[p].ip, sizeof(t.ip));
+  bool via_espnow = s_pending[p].espnow;
+  uint8_t mac[6], pub[32];
+  memcpy(mac, s_pending[p].mac, sizeof(mac));
+  memcpy(pub, s_pending[p].pub, sizeof(pub));
   unlock();
 
   uint8_t raw[32];
   esp_fill_random(raw, sizeof(raw));
   char key[RX_KEY_HEX_LEN + 1];
   for (int k = 0; k < 32; k++) snprintf(key + 2 * k, 3, "%02x", raw[k]);
+
+  if (via_espnow) {
+    // Not on our Wi-Fi yet: pre-register the key and send Wi-Fi settings + key
+    // by radio; its first heartbeat with the key completes the pairing.
+    lock();
+    prereg_add_locked(t.id, name, key, esp_timer_get_time() + ESPNOW_PREREG_US, 0);
+    unlock();
+    int code = espnow_pair_send_cfg(t.id, mac, pub, key, name, msg, msg_len);
+    lock();
+    if (code != 200) {
+      int pr = find_prereg_locked(t.id, key);
+      if (pr >= 0) memset(&s_prereg[pr], 0, sizeof(s_prereg[pr]));
+    } else {
+      p = find_pending(t.id);
+      if (p >= 0) memset(&s_pending[p], 0, sizeof(s_pending[p]));
+      snprintf(msg, msg_len, "Wi-Fi settings sent; it shows as paired once it connects");
+    }
+    unlock();
+    memset(key, 0, sizeof(key));
+    if (code == 200) ESP_LOGI(TAG, "Approved %s as \"%s\" via ESP-NOW", t.id, name);
+    return code;
+  }
 
   cJSON *body = cJSON_CreateObject();
   cJSON_AddStringToObject(body, "key", key);

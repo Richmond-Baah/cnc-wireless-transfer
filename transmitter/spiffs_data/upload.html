@@ -33,7 +33,11 @@
         <div id="newDeviceBanner" class="card new-device-banner" style="display: none;"></div>
 
         <div class="machines-panel card">
-            <h2 style="margin-bottom: 12px;">Machines</h2>
+            <div class="d-flex justify-between align-center" style="margin-bottom: 12px; gap: 8px; flex-wrap: wrap;">
+                <h2 style="margin-bottom: 0;">Machines</h2>
+                <button type="button" id="addMachineBtn" class="btn btn-secondary btn-sm">Add machine</button>
+            </div>
+            <p id="addMachineInfo" class="text-muted" style="display: none; font-size: 0.85rem;"></p>
             <div id="machineCards" class="machine-cards">
                 <p class="text-muted">Looking for receivers...</p>
             </div>

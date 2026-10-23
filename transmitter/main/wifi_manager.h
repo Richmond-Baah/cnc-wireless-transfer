@@ -18,4 +18,7 @@ void wifi_get_sta_status(char *state, size_t state_len, char *reason,
 esp_err_t wifi_recovery_start(int seconds);
 int wifi_recovery_seconds_left(void); // 0 when not active
 
+// Saved AP SSID/password (not the recovery ones), for pairing new receivers.
+void wifi_get_ap_creds(char *ssid, size_t ssid_len, char *pass, size_t pass_len);
+
 #endif // WIFI_MANAGER_H
