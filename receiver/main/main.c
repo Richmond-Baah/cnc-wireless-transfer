@@ -17,6 +17,7 @@
 #include "espnow_pair.h"
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 static const char *TAG = "MAIN";
 
@@ -89,6 +90,16 @@ void app_main(void) {
     ESP_LOGI(TAG, "Step 8b: Preparing storage for USB MSC...");
     storage_manager_prepare_for_usb();
     ESP_LOGI(TAG, "Step 8b: DONE");
+
+    // USB is not connected yet: pairing file (fallback pairing) from the drive root
+    {
+        static char pair_file[768];
+        if (file_receiver_take_root_file("pair.cfg", pair_file, sizeof(pair_file))) {
+            ESP_LOGI(TAG, "Step 8b2: pair.cfg found");
+            pairing_apply_file(pair_file);
+            memset(pair_file, 0, sizeof(pair_file));
+        }
+    }
 
     // USB is not connected yet: safe to snapshot the file list + free space
     ESP_LOGI(TAG, "Step 8c: Caching file list...");

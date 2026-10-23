@@ -66,6 +66,13 @@ int rx_registry_rename(const char *id, const char *name, char *msg, size_t msg_l
 // unpair: 200 with msg set when the receiver was offline (BOOT reset still needed)
 int rx_registry_unpair(const char *id, char *msg, size_t msg_len);
 
+// Pairing file: pre-registers a new key (any receiver, 24 h) under name and
+// returns pair.cfg JSON {v, ssid, pass, key, tx_id, name, expiry} (caller frees
+// with cJSON_free). client_now (browser clock, epoch s) sets our clock if it is
+// unset or off by > 5 min. HTTP status; msg gets the reason on failure.
+int rx_registry_make_pair_file(const char *name, int64_t client_now, char **out, char *msg,
+                               size_t msg_len);
+
 // {"receivers":[...],"pending":[...]} for the UI; caller frees with cJSON_free.
 char *rx_registry_list_json(void);
 

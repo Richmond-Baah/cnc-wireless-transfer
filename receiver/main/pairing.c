@@ -133,6 +133,38 @@ void pairing_clear(void) {
   ESP_LOGW(TAG, "Pairing cleared; waiting to be approved again");
 }
 
+void pairing_apply_file(const char *json) {
+  cJSON *j = cJSON_Parse(json);
+  cJSON *v = cJSON_GetObjectItem(j, "v");
+  cJSON *ssid = cJSON_GetObjectItem(j, "ssid");
+  cJSON *pass = cJSON_GetObjectItem(j, "pass");
+  cJSON *key = cJSON_GetObjectItem(j, "key");
+  cJSON *tx_id = cJSON_GetObjectItem(j, "tx_id");
+  cJSON *name = cJSON_GetObjectItem(j, "name");
+  cJSON *expiry = cJSON_GetObjectItem(j, "expiry");
+  // No clock here: expiry is enforced by the transmitter (expired key -> rejected
+  // heartbeats -> provisional key dropped)
+  if (!cJSON_IsNumber(v) || v->valueint != 1 || !cJSON_IsString(ssid) || !cJSON_IsString(pass) ||
+      !cJSON_IsString(key) || !cJSON_IsString(tx_id) || !cJSON_IsString(name) ||
+      !cJSON_IsNumber(expiry) || expiry->valuedouble < 1700000000.0 ||
+      ssid->valuestring[0] == '\0' || strlen(ssid->valuestring) > 32 ||
+      strlen(pass->valuestring) > 63 || (pass->valuestring[0] && strlen(pass->valuestring) < 8) ||
+      strlen(tx_id->valuestring) >= sizeof(s_tx_id) || strlen(name->valuestring) >= sizeof(s_name)) {
+    ESP_LOGW(TAG, "pair.cfg invalid; deleted");
+  } else if (pairing_is_paired()) {
+    ESP_LOGW(TAG, "pair.cfg ignored and deleted: already paired (hold BOOT 10 s to reset first)");
+  } else if (pairing_set_provisional(key->valuestring, name->valuestring, tx_id->valuestring) != ESP_OK) {
+    ESP_LOGW(TAG, "pair.cfg invalid key; deleted");
+  } else {
+    ESP_LOGI(TAG, "pair.cfg applied (transmitter %s, SSID [%s]); deleted", tx_id->valuestring,
+             ssid->valuestring);
+    wifi_manager_apply_creds(ssid->valuestring, pass->valuestring);
+  }
+  if (cJSON_IsString(pass)) memset(pass->valuestring, 0, strlen(pass->valuestring));
+  if (cJSON_IsString(key)) memset(key->valuestring, 0, strlen(key->valuestring));
+  cJSON_Delete(j);
+}
+
 uint32_t pairing_config_version(void) { return s_cfg_ver; }
 
 // ─── Transmitter HTTP helpers ───────────────────────────────────────────────

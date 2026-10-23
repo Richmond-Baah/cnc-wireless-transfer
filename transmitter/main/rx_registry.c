@@ -4,10 +4,13 @@
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "wifi_manager.h"
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -17,6 +20,9 @@ static const char *TAG = "RX_REG";
 #define PENDING_EXPIRE_US (60LL * 1000 * 1000)
 #define RX_MAX_PREREG 6
 #define ESPNOW_PREREG_US (10LL * 60 * 1000 * 1000) // radio-approved key valid 10 min
+#define PAIR_FILE_VALID_S (24 * 3600)
+#define EPOCH_VALID 1700000000LL // clock below this = never set
+#define EPOCH_SAVE_US (30LL * 60 * 1000 * 1000)
 
 typedef struct {
   // persisted
@@ -71,6 +77,7 @@ static rx_prereg_t s_prereg[RX_MAX_PREREG];
 static uint32_t s_cfg_ver;
 static SemaphoreHandle_t s_mutex;
 static char s_tx_id[16];
+static int64_t s_epoch_saved_us; // last NVS save of the wall clock
 
 static void lock(void) { xSemaphoreTake(s_mutex, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_mutex); }
@@ -121,6 +128,24 @@ static void save_locked(void) {
     nvs_erase_key(h, "paired");
   }
   nvs_set_u32(h, "cfg_ver", s_cfg_ver);
+  // Pairing-file keys (24 h) survive a restart; radio approvals are RAM-only
+  static rx_prereg_t files[RX_MAX_PREREG];
+  int n = 0;
+  for (int k = 0; k < RX_MAX_PREREG; k++) {
+    if (s_prereg[k].key[0] && s_prereg[k].expires_epoch) files[n++] = s_prereg[k];
+  }
+  if (n > 0) {
+    nvs_set_blob(h, "prereg", files, sizeof(rx_prereg_t) * n);
+  } else {
+    nvs_erase_key(h, "prereg");
+  }
+  // Lower bound for the clock after a power loss (pair-file expiry)
+  time_t now = time(NULL);
+  if (now > EPOCH_VALID) {
+    nvs_set_i64(h, "epoch", (int64_t)now);
+    s_epoch_saved_us = esp_timer_get_time();
+  }
+  memset(files, 0, sizeof(files));
   nvs_commit(h);
   nvs_close(h);
 }
@@ -190,6 +215,16 @@ void rx_registry_init(void) {
       }
     }
     nvs_get_u32(h, "cfg_ver", &s_cfg_ver);
+    len = sizeof(s_prereg);
+    if (nvs_get_blob(h, "prereg", s_prereg, &len) != ESP_OK || len % sizeof(rx_prereg_t) != 0) {
+      memset(s_prereg, 0, sizeof(s_prereg));
+    }
+    int64_t epoch = 0;
+    if (time(NULL) < EPOCH_VALID && nvs_get_i64(h, "epoch", &epoch) == ESP_OK && epoch > EPOCH_VALID) {
+      // Power loss cleared the clock: resume from the last saved time (never later than real time)
+      struct timeval tv = {.tv_sec = (time_t)epoch};
+      settimeofday(&tv, NULL);
+    }
     nvs_close(h);
   }
   ESP_LOGI(TAG, "%d paired receiver(s), config_version %lu", s_rx_count, (unsigned long)s_cfg_ver);
@@ -311,7 +346,7 @@ bool rx_registry_heartbeat(const cJSON *hb) {
     e->last_seen_us = now;
     e->cfg_fetched = s_cfg_ver; // it just joined with the current AP credentials
     memset(&s_prereg[pr], 0, sizeof(s_prereg[pr]));
-    save_locked();
+    save_locked(); // also drops a used pairing-file key from NVS
     int p = find_pending(id);
     if (p >= 0) memset(&s_pending[p], 0, sizeof(s_pending[p]));
     ESP_LOGI(TAG, "Paired %s as \"%s\" (pre-registered key) at %s", id, e->name, ip);
@@ -338,6 +373,15 @@ bool rx_registry_heartbeat(const cJSON *hb) {
     strlcpy(s_pending[p].fw, fw ? fw : "", sizeof(s_pending[p].fw));
     s_pending[p].last_seen_us = now;
     s_pending[p].espnow = false;
+  }
+  // Keep the saved clock fresh while a pairing file is outstanding
+  if (now - s_epoch_saved_us > EPOCH_SAVE_US) {
+    for (int k = 0; k < RX_MAX_PREREG; k++) {
+      if (s_prereg[k].key[0] && s_prereg[k].expires_epoch) {
+        save_locked();
+        break;
+      }
+    }
   }
   unlock();
   return paired;
@@ -567,6 +611,61 @@ int rx_registry_approve(const char *id, const char *name, char *msg, size_t msg_
   memset(key, 0, sizeof(key));
   ESP_LOGI(TAG, "Paired %s as \"%s\"", id, name);
   return i >= 0 ? 200 : 409;
+}
+
+int rx_registry_make_pair_file(const char *name, int64_t client_now, char **out, char *msg,
+                               size_t msg_len) {
+  msg[0] = '\0';
+  *out = NULL;
+  if (!name_is_valid(name)) {
+    snprintf(msg, msg_len, "Name must be 1-%d printable characters", RX_NAME_LEN - 1);
+    return 400;
+  }
+  int64_t now = (int64_t)time(NULL);
+  if (client_now > EPOCH_VALID && (now < EPOCH_VALID || llabs(now - client_now) > 300)) {
+    struct timeval tv = {.tv_sec = (time_t)client_now};
+    settimeofday(&tv, NULL);
+    now = client_now;
+    ESP_LOGI(TAG, "Clock set from browser");
+  }
+  if (now < EPOCH_VALID) {
+    snprintf(msg, msg_len, "Transmitter clock unknown; reload the page and try again");
+    return 400;
+  }
+
+  uint8_t raw[32];
+  esp_fill_random(raw, sizeof(raw));
+  char key[RX_KEY_HEX_LEN + 1];
+  for (int k = 0; k < 32; k++) snprintf(key + 2 * k, 3, "%02x", raw[k]);
+  memset(raw, 0, sizeof(raw));
+  int64_t expiry = now + PAIR_FILE_VALID_S;
+
+  char ssid[33], pass[65];
+  wifi_get_ap_creds(ssid, sizeof(ssid), pass, sizeof(pass));
+  cJSON *o = cJSON_CreateObject();
+  cJSON_AddNumberToObject(o, "v", 1);
+  cJSON_AddStringToObject(o, "ssid", ssid);
+  cJSON_AddStringToObject(o, "pass", pass);
+  cJSON_AddStringToObject(o, "key", key);
+  cJSON_AddStringToObject(o, "tx_id", s_tx_id);
+  cJSON_AddStringToObject(o, "name", name);
+  cJSON_AddNumberToObject(o, "expiry", (double)expiry);
+  *out = cJSON_PrintUnformatted(o);
+  cJSON_Delete(o);
+  memset(pass, 0, sizeof(pass));
+  if (*out == NULL) {
+    memset(key, 0, sizeof(key));
+    snprintf(msg, msg_len, "Out of memory");
+    return 500;
+  }
+
+  lock();
+  prereg_add_locked("", name, key, 0, expiry);
+  save_locked();
+  unlock();
+  memset(key, 0, sizeof(key));
+  ESP_LOGI(TAG, "Pairing file for \"%s\" issued (valid 24 h)", name);
+  return 200;
 }
 
 int rx_registry_rename(const char *id, const char *name, char *msg, size_t msg_len) {

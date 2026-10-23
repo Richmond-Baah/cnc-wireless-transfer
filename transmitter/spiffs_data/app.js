@@ -379,6 +379,43 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Fallback pairing: pair.cfg copied to the receiver's drive, read at its next boot
+    const pairFileBtn = document.getElementById('pairFileBtn');
+    if (pairFileBtn) {
+        pairFileBtn.addEventListener('click', async () => {
+            const name = (prompt('Machine name for the new receiver:') || '').trim();
+            if (!name) return;
+            if (!confirm('The pairing file contains this hotspot\'s Wi-Fi password and is valid for 24 hours.\n\n' +
+                'Copy it to the root of the receiver\'s drive as pair.cfg, restart the receiver, ' +
+                'and delete any other copies.\n\nDownload it?')) return;
+            pairFileBtn.disabled = true;
+            try {
+                const res = await fetch('/receivers/pair_file', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, now: Math.floor(Date.now() / 1000) })
+                });
+                if (!res.ok) {
+                    showFeedback('Pairing file failed: ' + await errorText(res), 'error');
+                    return;
+                }
+                const url = URL.createObjectURL(await res.blob());
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'pair.cfg';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                showFeedback('Pairing file for "' + name + '" downloaded. It pairs automatically once the receiver restarts with it.', 'success');
+            } catch (e) {
+                showFeedback('Pairing file failed: transmitter unreachable.', 'error');
+            } finally {
+                pairFileBtn.disabled = false;
+            }
+        });
+    }
+
     async function postReceiverAction(action, body) {
         const res = await fetch('/receivers/' + action, {
             method: 'POST',

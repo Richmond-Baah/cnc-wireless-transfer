@@ -201,6 +201,37 @@ void file_receiver_refresh_cache(void) {
     }
 }
 
+bool file_receiver_take_root_file(const char *name, char *buf, size_t len) {
+    buf[0] = '\0';
+    if (storage_manager_is_sd_present() && sd_card_has_card_error()) {
+        return false;
+    }
+    bool mounted_here = false;
+    if (!active_storage_mounted()) {
+        mounted_here = (storage_manager_remount() == ESP_OK) && active_storage_mounted();
+    }
+    bool found = false;
+    if (active_storage_mounted()) {
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%s", storage_manager_get_base_path(), name);
+        FILE *f = fopen(path, "rb");
+        if (f != NULL) {
+            found = true;
+            size_t n = fread(buf, 1, len - 1, f);
+            bool too_large = n == len - 1 && fgetc(f) != EOF;
+            fclose(f);
+            buf[too_large ? 0 : n] = '\0';
+            if (unlink(path) != 0) {
+                ESP_LOGE(TAG, "Could not delete %s", path);
+            }
+        }
+    }
+    if (mounted_here) {
+        storage_manager_flush_and_release_for_usb();
+    }
+    return found;
+}
+
 // Rejects names with path separators, drive colons, "..", control characters,
 // or that are empty / consist only of dots.
 static bool filename_is_valid(const char *name) {

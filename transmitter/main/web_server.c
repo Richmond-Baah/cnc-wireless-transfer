@@ -924,6 +924,42 @@ static esp_err_t receivers_add_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// POST /receivers/pair_file {"name":"...","now":<browser epoch s>} -> pair.cfg
+// (contains the AP password and a new key, pre-registered for 24 h).
+static esp_err_t receivers_pair_file_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char body[128];
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body) ||
+      !read_full_body(req, body, sizeof(body) - 1)) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  body[req->content_len] = '\0';
+  cJSON *json = cJSON_Parse(body);
+  cJSON *j_name = json ? cJSON_GetObjectItem(json, "name") : NULL;
+  cJSON *j_now = json ? cJSON_GetObjectItem(json, "now") : NULL;
+  char msg[96];
+  char *out = NULL;
+  int code = rx_registry_make_pair_file(cJSON_IsString(j_name) ? j_name->valuestring : NULL,
+                                        cJSON_IsNumber(j_now) ? (int64_t)j_now->valuedouble : 0,
+                                        &out, msg, sizeof(msg));
+  cJSON_Delete(json);
+  if (code != 200) {
+    send_status_text(req, code, msg);
+    return ESP_OK;
+  }
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"pair.cfg\"");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_sendstr(req, out);
+  memset(out, 0, strlen(out));
+  cJSON_free(out);
+  return ESP_OK;
+}
+
 // POST /recovery {"confirm":"RECOVERY"}: AP on factory credentials for 5 min
 // so receivers that missed a credential change can rejoin and pull them.
 #define RECOVERY_SECONDS 300
@@ -996,7 +1032,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 32; // 28 registered
+  config.max_uri_handlers = 32; // 29 registered
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
@@ -1095,6 +1131,9 @@ void web_server_start(void) {
     httpd_uri_t uri_rx_add = {
         .uri = "/receivers/add", .method = HTTP_POST, .handler = receivers_add_handler};
     httpd_register_uri_handler(server, &uri_rx_add);
+    httpd_uri_t uri_rx_pair_file = {
+        .uri = "/receivers/pair_file", .method = HTTP_POST, .handler = receivers_pair_file_handler};
+    httpd_register_uri_handler(server, &uri_rx_pair_file);
     httpd_uri_t uri_recovery = {
         .uri = "/recovery", .method = HTTP_POST, .handler = recovery_post_handler};
     httpd_register_uri_handler(server, &uri_recovery);

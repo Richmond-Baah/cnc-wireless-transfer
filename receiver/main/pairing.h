@@ -23,6 +23,10 @@ esp_err_t pairing_set(const char *hex_key, const char *name);
 esp_err_t pairing_set_provisional(const char *hex_key, const char *name, const char *tx_id);
 void pairing_clear(void);
 
+// pair.cfg from the storage root (already read and deleted): validates, then
+// pairs provisionally and switches to its Wi-Fi settings. Logs why if not.
+void pairing_apply_file(const char *json);
+
 uint32_t pairing_config_version(void);
 
 // Heartbeat to the transmitter every 10 s (+ AP credential pull) and the

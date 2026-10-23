@@ -4,6 +4,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "CNC_WIR
 - Transmitter rx_registry: paired list (id, name, key) in NVS, pending list in RAM, online = heartbeat < 30 s.
 - UI selects a machine; every receiver proxy takes X-Rx-Id (or ?rx=) and sends that receiver's X-Auth-Key.
 - Add machine (ESP-NOW, components/pair_proto): UI opens 120 s window; unpaired off-Wi-Fi receiver bursts PAIR_REQ ch 1-13 every ~3 s; approve -> PAIR_CFG (X25519+AES-GCM: AP creds, key, tx id, name); key is pre-registered on tx and provisional on rx until a heartbeat confirms (3 rejects -> rx drops it).
+- Pairing file: UI "Download pairing file" -> pair.cfg {v,ssid,pass,key,tx_id,name,expiry}; key pre-registered 24 h (NVS, clock from browser); receiver reads+deletes /pair.cfg at boot before USB, pairs provisionally; expiry enforced by transmitter only (receiver has no clock).
 - AP creds: change bumps config_version; receivers pull GET /rx/config; transmitter restarts after they fetch (max 30 s).
 
 ## Build / flash
