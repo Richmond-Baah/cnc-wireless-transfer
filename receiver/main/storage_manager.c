@@ -23,8 +23,9 @@ bool storage_manager_is_flash_mounted(void) {
     return s_flash_mounted;
 }
 
+// With an SD card detected at boot it is the only storage; flash is never used.
 bool storage_manager_fatfs_available(void) {
-    return sd_card_is_mounted() || s_flash_mounted;
+    return (current_sd_card != NULL) ? sd_card_is_mounted() : s_flash_mounted;
 }
 
 bool storage_manager_is_sd_present(void) {
@@ -54,14 +55,15 @@ esp_err_t storage_manager_remount(void) {
         return ESP_OK;
     }
     // Transfer time: remount the SD card if present, else the internal flash.
+    // An SD mount failure is an error for the caller, never a switch to flash.
     if (current_sd_card != NULL) {
         esp_err_t sd_ret = sd_card_remount();
         if (sd_ret == ESP_OK) {
             ESP_LOGI(TAG, "SD card FatFS mounted at /sdcard");
-            return ESP_OK;
+        } else {
+            ESP_LOGE(TAG, "SD card FatFS mount failed: %s", esp_err_to_name(sd_ret));
         }
-        ESP_LOGW(TAG, "SD card present but FatFS mount failed (%s); falling back to internal storage",
-                 esp_err_to_name(sd_ret));
+        return sd_ret;
     }
 
     if (s_flash_mounted) {
@@ -88,7 +90,9 @@ esp_err_t storage_manager_init(void) {
     // Do NOT mount FatFS on it here - storage_manager_remount() does that
     // when a Wi-Fi transfer actually starts.
     if (current_sd_card != NULL) {
-        ESP_LOGI(TAG, "SD card present (raw for USB MSC); flash mounted as fallback storage");
+        // Flash is the storage only when no SD card was detected at boot
+        ESP_LOGI(TAG, "SD card present (raw for USB MSC); internal flash not used");
+        return ESP_OK;
     }
 
     if (s_flash_mounted && s_wl_handle != WL_INVALID_HANDLE) {

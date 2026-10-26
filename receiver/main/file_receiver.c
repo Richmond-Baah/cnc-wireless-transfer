@@ -440,11 +440,15 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     }
     TM_ADD(mount);
     if (!storage_manager_fatfs_available()) {
-        ESP_LOGE(TAG, "No storage filesystem available for transfer");
-        fail_transfer_and_release();
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "File system error");
+        // Active storage could not be mounted: USB straight back, nothing else used
+        ESP_LOGE(TAG, "%s could not be mounted; aborting prepare, USB reconnected",
+                 storage_manager_is_sd_present() ? "SD card" : "Internal storage");
+        prepare_abort_reconnect();
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        httpd_resp_sendstr(req, "Drive could not be mounted - try again or check the card");
         cJSON_Delete(json);
-        return ESP_FAIL;
+        return ESP_OK;
     }
 
     // Space check on the real volume before writing anything. A same-name file
