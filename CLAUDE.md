@@ -15,6 +15,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "CNC_WIR
 
 ## Invariants (do not break)
 - While USB owns storage, receiver FS stays unmounted. Transfer: USB off → mount → write .tmp → MD5 → rename → unmount → USB on.
+- Storage chosen at boot (SD if present, else flash); never switch at runtime — SD failure → 503/CARD_ERROR.
 - Never auto-format. Mount failure → CARD_ERROR. Format/Wipe need typed FORMAT/WIPE, checked server-side.
 - Every error path: delete .tmp before unmount, release storage, reconnect USB.
 - Chunks: indexed; dup = ack+discard, out-of-order = 409.
