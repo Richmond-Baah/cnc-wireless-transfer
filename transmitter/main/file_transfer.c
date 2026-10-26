@@ -63,6 +63,8 @@ static esp_err_t chunk_client_event(esp_http_client_event_t *evt) {
   return ESP_OK;
 }
 
+#define PREPARE_TIMEOUT_MS 10000
+
 static int cancel_on_receiver(const rx_target_t *t) {
   char resp[64];
   return rx_http(t, HTTP_METHOD_POST, "/cancel", "{}", false, 2000, resp, sizeof(resp), NULL);
@@ -114,15 +116,30 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
 
   ESP_LOGI(TAG, "Upload begin -> %s: %s (%u bytes, md5=%s%s)", rx.id, name, (unsigned)size, md5,
            force ? ", forced" : "");
-  int status = rx_http(&rx, HTTP_METHOD_POST, "/prepare", json, force, 10000, msg, msg_len, NULL);
+  // One 10 s budget for the whole prepare (incl. the stale-transfer retry)
+  int64_t deadline = now + PREPARE_TIMEOUT_MS * 1000LL;
+  int status = rx_http(&rx, HTTP_METHOD_POST, "/prepare", json, force, PREPARE_TIMEOUT_MS, msg, msg_len, NULL);
   if (status == 503) {
     // Receiver is stuck RECEIVING from an abandoned transfer we no longer
     // track (e.g. transmitter rebooted mid-upload): reset it once and retry.
     ESP_LOGW(TAG, "Receiver busy with no session here; cancelling stale transfer and retrying");
     cancel_on_receiver(&rx);
-    status = rx_http(&rx, HTTP_METHOD_POST, "/prepare", json, force, 10000, msg, msg_len, NULL);
+    int left_ms = (int)((deadline - esp_timer_get_time()) / 1000);
+    if (left_ms >= 1000) {
+      status = rx_http(&rx, HTTP_METHOD_POST, "/prepare", json, force, left_ms, msg, msg_len, NULL);
+    } else {
+      status = -1;
+    }
   }
   cJSON_free(json);
+  if (status < 0 && esp_timer_get_time() >= deadline - 500000) {
+    led_set_state(LED_STATE_ERROR);
+    ESP_LOGW(TAG, "Receiver %s did not answer /prepare within %d s", rx.id, PREPARE_TIMEOUT_MS / 1000);
+    snprintf(msg, msg_len, "Receiver did not respond within %d s while preparing. "
+             "If the machine is running a job from the drive, wait for it to finish; otherwise try again.",
+             PREPARE_TIMEOUT_MS / 1000);
+    return 504;
+  }
 
   if (status != 200) {
     led_set_state((status == 423 || status == 507) ? LED_STATE_IDLE : LED_STATE_ERROR);

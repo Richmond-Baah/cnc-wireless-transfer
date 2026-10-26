@@ -205,6 +205,7 @@ static void send_status_text(httpd_req_t *req, int code, const char *msg) {
   case 423: status = "423 Locked"; break;
   case 502: status = "502 Bad Gateway"; break;
   case 503: status = "503 Service Unavailable"; break;
+  case 504: status = "504 Gateway Timeout"; break;
   case 404: status = "404 Not Found"; break;
   case 507: status = "507 Insufficient Storage"; break;
   default:  status = "500 Internal Server Error"; break;

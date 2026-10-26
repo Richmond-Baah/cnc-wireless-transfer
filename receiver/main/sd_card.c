@@ -63,6 +63,19 @@ bool sd_card_acquire_io(void) {
     return io_lock_take(pdMS_TO_TICKS(1000));
 }
 
+// FatFS mount/unmount wait at most this long for a USB MSC sector access to
+// finish (each holds the lock for one READ10/WRITE10), then fail instead of
+// hanging the caller (e.g. /prepare) forever.
+#define MOUNT_LOCK_TIMEOUT_MS 5000
+
+static bool mount_lock_take(const char *what) {
+    if (io_lock_take(pdMS_TO_TICKS(MOUNT_LOCK_TIMEOUT_MS))) {
+        return true;
+    }
+    ESP_LOGE(TAG, "%s: SD IO lock busy for %d ms (USB host access?)", what, MOUNT_LOCK_TIMEOUT_MS);
+    return false;
+}
+
 void sd_card_release_io(void) {
     io_lock_give();
 }
@@ -273,7 +286,7 @@ esp_err_t sd_card_init_raw(void) {
 }
 
 esp_err_t sd_card_init(void) {
-    if (!io_lock_take(portMAX_DELAY)) {
+    if (!mount_lock_take("sd_card_init")) {
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t ret = ESP_OK;
@@ -296,7 +309,7 @@ bool sd_card_is_mounted(void) {
 }
 
 esp_err_t sd_card_unmount(void) {
-    if (!io_lock_take(portMAX_DELAY)) {
+    if (!mount_lock_take("sd_card_unmount")) {
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t ret = sd_card_unmount_fatfs_locked();
@@ -305,7 +318,7 @@ esp_err_t sd_card_unmount(void) {
 }
 
 esp_err_t sd_card_remount(void) {
-    if (!io_lock_take(portMAX_DELAY)) {
+    if (!mount_lock_take("sd_card_remount")) {
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t ret = sd_card_mount_fatfs_locked();

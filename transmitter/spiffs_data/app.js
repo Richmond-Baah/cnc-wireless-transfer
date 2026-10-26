@@ -907,12 +907,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function apiPost(path, headers, body) {
-        const res = await fetch(path, {
-            method: 'POST',
-            headers: Object.assign({ 'Authorization': 'Bearer ' + token }, headers),
-            body
-        });
+    async function apiPost(path, headers, body, timeoutMs) {
+        const ctrl = timeoutMs ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+        let res;
+        try {
+            res = await fetch(path, {
+                method: 'POST',
+                headers: Object.assign({ 'Authorization': 'Bearer ' + token }, headers),
+                body,
+                signal: ctrl ? ctrl.signal : undefined
+            });
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
         if (res.status === 401) {
             sessionStorage.removeItem('token');
             setTimeout(() => { window.location.href = 'index.html'; }, 2000);
@@ -996,8 +1004,16 @@ document.addEventListener('DOMContentLoaded', () => {
             updateProgress(0, 'Preparing receiver...');
             const beginHeaders = { 'Content-Type': 'application/json', 'X-Rx-Id': selectedRx || '' };
             if (force) beginHeaders['X-Force'] = '1';
-            const res = await apiPost('/upload_begin', beginHeaders,
-                JSON.stringify({ name: file.name, size: file.size, md5 }));
+            let res;
+            try {
+                // Transmitter gives up on the receiver after 10 s (504); this is the backstop
+                res = await apiPost('/upload_begin', beginHeaders,
+                    JSON.stringify({ name: file.name, size: file.size, md5 }), 12000);
+            } catch (e) {
+                if (e.name !== 'AbortError') throw e;
+                throw new UploadError(stage, 'Receiver did not respond within 10 s while preparing. ' +
+                    'If the machine is running a job from the drive, wait for it to finish; otherwise try again.');
+            }
             if (res.status === 423) {
                 showFeedback('Machine is reading – stop the job or confirm it\'s idle', 'error');
                 busyRetryFile = file;

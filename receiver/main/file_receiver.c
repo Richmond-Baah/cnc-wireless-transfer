@@ -302,7 +302,13 @@ static void cleanup_orphan_temp_files(void) {
 }
 
 static esp_err_t prepare_post_handler(httpd_req_t *req) {
-    if (reject_unauthorized(req)) return ESP_OK;
+    if (reject_unauthorized(req)) return ESP_OK; // header check only
+    // Busy guard first: no body read, state change, lock, unmount or USB
+    // disconnect while the machine is reading the drive (e.g. printing from it)
+    if (reject_if_machine_busy(req)) {
+        drain_request_body(req);
+        return ESP_OK;
+    }
     app_state_t cur = state_machine_get();
     if (cur == STATE_RECEIVING) {
         httpd_resp_set_status(req, "503 Service Unavailable");
@@ -356,11 +362,6 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
                             "Invalid filename: no / \\ : .. or control characters, not empty or dots-only");
         cJSON_Delete(json);
         return ESP_FAIL;
-    }
-
-    if (reject_if_machine_busy(req)) {
-        cJSON_Delete(json);
-        return ESP_OK;
     }
 
     // Card was unreadable: retry the mount (USB off so the host can't race it)
