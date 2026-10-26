@@ -278,7 +278,7 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.disabled = true;
         const { error } = await postReceiverAction('approve', { id, name });
         btn.disabled = false;
-        if (error) { showMsg({ kind: 'err', title: 'Pairing failed', why: error }); return; }
+        if (error) { setMsg({ type: 'error', title: t('msg.error.pairing'), why: error }); return; }
         pendingKey = '';
         if (!selectedReceiver()) rememberRx(id);
         await loadReceivers();
@@ -314,7 +314,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch('/receivers/add', { method: 'POST', headers: authHeaders() });
             if (!res.ok) {
-                showMsg({ kind: 'err', title: 'Add machine failed', why: await errorText(res) });
+                setMsg({ type: 'error', title: t('msg.error.add'), why: await errorText(res) });
                 addMachineBtn.disabled = false;
                 return;
             }
@@ -331,7 +331,7 @@ document.addEventListener('DOMContentLoaded', () => {
             'Copy it to the root of the receiver\'s drive as pair.cfg, restart the receiver, ' +
             'and delete any other copies.\n\nDownload it?')) return;
         const r = await downloadPairFile(name);
-        if (r.error) showMsg({ kind: 'err', title: 'Pairing file failed', why: r.error });
+        if (r.error) setMsg({ type: 'error', title: t('msg.error.pairFile'), why: r.error });
     });
     async function downloadPairFile(name) {
         try {
@@ -410,8 +410,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         uploadBtn.textContent = t('tx.send', { name: v ? v.name : '…' });
         uploadBtn.disabled = uploading || !currentFile || !v || !v.online || !fileFits() ||
-            v.state === 'CARD_ERROR' || !!v.card_error;
+            v.state === 'CARD_ERROR' || !!v.card_error || waitTimer !== null;
         cancelBtn.hidden = !uploading && !currentFile;
+        renderMsgArea();
     }
 
     function renderAll() {
@@ -420,19 +421,230 @@ document.addEventListener('DOMContentLoaded', () => {
         renderFilesHeading();
     }
 
-    // Messages (icon + title + one-line why + actions) in place of the progress area
-    let msg = null;
-    function showMsg(m) {
-        msg = m;
-        msgBox.className = 'msg msg-' + (m.kind || 'info');
-        msgBox.innerHTML = `<div class="msg-body"><div class="msg-title">${esc(m.title)}</div>` +
-            (m.why ? `<p class="msg-why">${esc(m.why)}</p>` : '') + '</div>';
+    // ─── Messages ───────────────────────────────────────────────────────
+    // Shown in place of the progress area (never pop-ups): icon + title +
+    // one-line why + actions. Explicit ones come from actions/outcomes;
+    // otherwise the selected machine's state may produce one (offline, card
+    // error, file too big). Re-rendered only when the content changes, so a
+    // half-typed FORMAT survives the status polls.
+    const ICONS = {
+        ok: '<path d="M22 11.1V12a10 10 0 1 1-5.9-9.1"/><path d="M22 4 12 14l-3-3"/>',
+        err: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>',
+        busy: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+        offline: '<path d="M2 2l20 20M8.5 16.4a5 5 0 0 1 7 0M5 12.6a10 10 0 0 1 5.2-2.7M19 12.6a10 10 0 0 0-2.2-1.6M2 8.8a15 15 0 0 1 4.2-2.6M10.7 5a15 15 0 0 1 11.3 3.8"/><path d="M12 20h.01"/>',
+        card: '<path d="M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><path d="M8 6v3M11 6v3M14 6v3"/><path d="M12 13v3M12 19h.01"/>',
+        big: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>'
+    };
+    const STAGE_KEYS = { Checksum: 'stage.checksum', Starting: 'stage.starting', Uploading: 'stage.uploading',
+                         Verifying: 'stage.verifying', 'Reconnecting drive': 'stage.reconnecting' };
+    let explicitMsg = null;
+    let msgKey = '';
+    let waitTimer = null;
+    let lastSent = null; // {file, rxId} for "Send it again to"
+
+    function setMsg(m) {
+        if (!m || m.type !== 'waiting') stopWaiting();
+        explicitMsg = m;
+        renderTransfer(); // also re-renders the message area
+    }
+    function clearMsg() { setMsg(null); }
+
+    function fmtDuration(secs) {
+        const s = Math.max(1, Math.round(secs));
+        return s < 60 ? t('dur.s', { n: s }) : t('dur.ms', { m: Math.floor(s / 60), s: s % 60 });
+    }
+
+    function derivedMsg(v) {
+        if (!v) return null;
+        if (!v.online) return { type: 'offline' };
+        if (v.card_error || v.state === 'CARD_ERROR') return { type: 'card' };
+        if (currentFile && !fileFits()) {
+            const need = spaceNeeded(currentFile.size, lastTotal);
+            return { type: 'big', file: currentFile.name, need, free: lastFree };
+        }
+        return null;
+    }
+
+    const btn = (act, label, cls) => `<button type="button" class="btn ${cls || ''}" data-msg-act="${act}">${esc(label)}</button>`;
+
+    // -> {key, kind, icon, title, why, extra, actions}
+    function buildMsg(m, v) {
+        const name = m.name || (v ? v.name : '');
+        switch (m.type) {
+        case 'busy':
+            return { key: 'busy', kind: 'busy', icon: 'busy', title: t('msg.busy.title', { name }), why: t('msg.busy.why'),
+                actions: btn('wait', t('msg.busy.wait'), 'btn-primary') + btn('force', t('msg.busy.force')) };
+        case 'waiting':
+            return { key: 'waiting', kind: 'busy', icon: 'busy', title: t('msg.wait.title', { name }),
+                why: t('msg.wait.why', { file: m.file }), actions: btn('stopwait', t('msg.wait.stop')) };
+        case 'big': {
+            const missing = Math.max(0, m.need - m.free);
+            const freePct = m.need ? Math.max(0, Math.min(100, (m.free / m.need) * 100)) : 0;
+            return { key: 'big:' + m.file + ':' + m.free + ':' + m.need, kind: 'err', icon: 'big',
+                title: t('msg.big.title', { file: m.file, name }),
+                why: t('msg.big.why', { need: fmtBytes(m.need), free: fmtBytes(m.free), missing: fmtBytes(missing) }),
+                extra: `<div class="split-bar" aria-hidden="true"><span class="split-free" style="width:${freePct.toFixed(1)}%"></span><span class="split-miss"></span></div>
+                    <div class="split-legend small"><span><i class="dot dot-free"></i>${esc(t('msg.big.free', { free: fmtBytes(m.free) }))}</span>
+                    <span><i class="dot dot-miss"></i>${esc(t('msg.big.missing', { missing: fmtBytes(missing) }))}</span></div>`,
+                actions: btn('pickdelete', t('msg.big.pick')) };
+        }
+        case 'card':
+            return { key: 'card:' + (v ? v.id : ''), kind: 'err', icon: 'card', title: t('msg.card.title', { name }), why: t('msg.card.why'),
+                extra: `<label class="label small" for="formatWord">${esc(t('msg.card.type'))}</label>`,
+                actions: `<input type="text" id="formatWord" class="confirm-word" autocomplete="off" autocapitalize="characters">` +
+                    `<button type="button" class="btn btn-danger" data-msg-act="format" disabled>${esc(t('msg.card.btn'))}</button>` };
+        case 'formatting':
+            return { key: 'formatting', kind: 'busy', icon: 'busy', title: t('msg.card.busy', { name }), why: t('msg.card.busyWhy') };
+        case 'formatted':
+            return { key: 'formatted', kind: 'ok', icon: 'ok', title: t('msg.card.done', { name }), why: t('msg.card.doneWhy') };
+        case 'done': {
+            const others = receivers.filter(r => r.id !== m.rxId && r.online && !(r.card_error || r.state === 'CARD_ERROR'));
+            const chips = others.map(r => {
+                const busy = r.busy || r.state === 'RECEIVING';
+                return `<button type="button" class="chip" data-msg-act="again" data-id="${esc(r.id)}"${busy ? ' disabled' : ''}>${esc(r.name)}${busy ? ' · ' + esc(t('pill.job')) : ''}</button>`;
+            }).join('');
+            return { key: 'done:' + others.map(r => r.id + (r.busy ? 'b' : '')).join(','), kind: 'ok', icon: 'ok',
+                title: t('msg.done.title', { file: m.file, name }),
+                why: t('msg.done.why', { size: fmtBytes(m.size), time: fmtDuration(m.secs) }) + (m.slow ? ' ' + t('msg.done.slow') : ''),
+                extra: chips ? `<div class="again"><span class="small muted">${esc(t('msg.done.again'))}</span><div class="chips">${chips}</div></div>` : '' };
+        }
+        case 'offline':
+            return { key: 'offline:' + (v ? v.id + ':' + Math.round((v.last_seen_s || 0) / 60) : ''), kind: 'info', icon: 'offline',
+                title: t('msg.offline.title', { name }), why: t('msg.offline.why', { seen: lastSeenText(v ? v.last_seen_s : -1) }) };
+        case 'failed': {
+            const title = m.notStarted ? t('msg.fail.notStarted')
+                : t(m.cancelled ? 'msg.fail.cancelled' : 'msg.fail.title', { pct: m.pct });
+            const details = `<p class="msg-why">${esc(t('msg.fail.safe'))}</p>` + (m.showDetails && m.details
+                ? `<pre class="details">${esc(m.details)}</pre>` : '');
+            return { key: 'failed:' + !!m.showDetails, kind: 'err', icon: 'err', title, why: m.reason, extra: details,
+                actions: (m.retry === false ? '' : btn('retry', t('msg.fail.retry'), 'btn-primary')) +
+                    (m.details ? btn('details', t(m.showDetails ? 'msg.fail.hide' : 'msg.fail.details'), 'btn-ghost') : '') };
+        }
+        default: // generic {title, why}
+            return { key: 'error:' + m.title + m.why, kind: m.kind || 'err', icon: m.kind === 'ok' ? 'ok' : 'err', title: m.title, why: m.why };
+        }
+    }
+
+    function renderMsgArea() {
+        progressBox.hidden = !uploading;
+        // A 507 from the receiver goes away once enough was deleted
+        if (explicitMsg && explicitMsg.type === 'big' && (!currentFile || (lastFree !== null && lastFree >= explicitMsg.need))) {
+            explicitMsg = null;
+        } else if (explicitMsg && explicitMsg.type === 'big') {
+            explicitMsg.free = lastFree;
+        }
+        const v = selectedView();
+        const m = uploading ? null : (explicitMsg || derivedMsg(v));
+        // Messages with their own actions replace Send; card errors replace the drop zone too
+        const type = m ? m.type : '';
+        uploadBtn.hidden = ['busy', 'waiting', 'card', 'formatting', 'failed'].includes(type) ||
+            (type === 'done' && !currentFile);
+        fileZone.hidden = type === 'card' || type === 'formatting';
+        if (!m) {
+            msgBox.hidden = true;
+            msgBox.innerHTML = '';
+            msgKey = '';
+            return;
+        }
+        const b = buildMsg(m, v);
+        const key = m.type + '|' + b.key + '|' + (v ? v.id + v.name : '');
+        if (key !== msgKey) {
+            msgKey = key;
+            msgBox.className = 'msg msg-' + b.kind;
+            msgBox.innerHTML = `<svg class="i msg-icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[b.icon] || ICONS.err}</svg>
+                <div class="msg-body"><div class="msg-title">${esc(b.title)}</div>
+                ${b.why ? `<p class="msg-why">${esc(b.why)}</p>` : ''}${b.extra || ''}
+                ${b.actions ? `<div class="msg-actions">${b.actions}</div>` : ''}</div>`;
+        }
         msgBox.hidden = false;
     }
-    function clearMsg() {
-        msg = null;
-        msgBox.hidden = true;
-        msgBox.innerHTML = '';
+
+    msgBox.addEventListener('input', (e) => {
+        if (e.target.id === 'formatWord') {
+            const go = msgBox.querySelector('[data-msg-act="format"]');
+            if (go) go.disabled = e.target.value.trim() !== 'FORMAT';
+        }
+    });
+    msgBox.addEventListener('click', (e) => {
+        const a = e.target.closest('[data-msg-act]');
+        if (!a || a.disabled) return;
+        const target = selectedReceiver();
+        switch (a.dataset.msgAct) {
+        case 'wait': if (target) startWaiting(target); break;
+        case 'force': startUpload(true); break;
+        case 'stopwait': clearMsg(); break;
+        case 'retry': clearMsg(); startUpload(false); break;
+        case 'details':
+            explicitMsg = Object.assign({}, explicitMsg, { showDetails: !explicitMsg.showDetails });
+            renderMsgArea();
+            break;
+        case 'pickdelete': {
+            const card = $('filesCard');
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            const first = card.querySelector('.file-select, #selectAllFiles');
+            if (first) setTimeout(() => first.focus({ preventScroll: true }), 300);
+            break;
+        }
+        case 'format': {
+            const word = $('formatWord');
+            if (word && word.value.trim() === 'FORMAT') formatCard();
+            break;
+        }
+        case 'again':
+            if (lastSent && !uploading) {
+                const id = a.dataset.id;
+                selectRx(id);
+                currentFile = lastSent.file;
+                renderTransfer();
+                startUpload(false);
+            }
+            break;
+        }
+    });
+
+    // Busy: re-check every 10 s and send once the machine stops reading
+    function startWaiting(target) {
+        stopWaiting();
+        const file = currentFile;
+        if (!file) return;
+        setMsg({ type: 'waiting', name: target.name, file: file.name });
+        waitTimer = setInterval(async () => {
+            try {
+                const res = await fetch('/status', { headers: authHeaders({ 'X-Rx-Id': target.id }) });
+                if (!res.ok) return;
+                const d = await res.json();
+                const idle = d.online !== false && d.state !== 'OFFLINE' && d.state !== 'RECEIVING' && !d.busy;
+                if (idle && selectedRx === target.id && currentFile === file && !uploading) {
+                    stopWaiting();
+                    explicitMsg = null;
+                    startUpload(false);
+                }
+            } catch (e) { /* keep waiting */ }
+        }, 10000);
+    }
+    function stopWaiting() {
+        clearInterval(waitTimer);
+        waitTimer = null;
+    }
+
+    // Card error: format from the message (typed FORMAT, checked server-side)
+    async function formatCard() {
+        const r = selectedReceiver();
+        if (!r) return;
+        setMsg({ type: 'formatting', name: r.name });
+        try {
+            const res = await fetch('/receiver_format', {
+                method: 'POST',
+                headers: rxHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ confirm: 'FORMAT' })
+            });
+            setMsg(res.ok ? { type: 'formatted', name: r.name }
+                : { type: 'error', title: t('msg.card.failed'), why: await errorText(res) });
+        } catch (e) {
+            setMsg({ type: 'error', title: t('msg.card.failed'), why: t('msg.fail.network') });
+        }
+        pollStatus();
+        loadReceiverFiles();
     }
 
     // File selection: drop zone, Choose file, Choose another file
@@ -457,7 +669,6 @@ document.addEventListener('DOMContentLoaded', () => {
     function handleFileSelect(file) {
         currentFile = file;
         clearMsg();
-        progressBox.hidden = true;
         renderTransfer();
     }
 
@@ -472,7 +683,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         currentFile = null;
         clearMsg();
-        progressBox.hidden = true;
         renderTransfer();
     });
 
@@ -804,15 +1014,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const file = currentFile;
         cancelRequested = false;
         cancelBtn.disabled = false;
-        uploading = true;
         clearMsg();
-        progressBox.hidden = false;
+        uploading = true;
         clearInterval(statusInterval);
         renderAll(); // lock the selection while uploading
 
         let stage = 'Checksum';
         let session = null;
         let outcome = null; // message shown in place of the progress area
+        const tStart = performance.now();
         try {
             setProgress(0, t('tx.checking'), 0);
             const md5 = await calculateMD5(file);
@@ -829,11 +1039,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     JSON.stringify({ name: file.name, size: file.size, md5 }), 12000);
             } catch (e) {
                 if (e.name !== 'AbortError') throw e;
-                throw new UploadError(stage, 'Receiver did not respond within 10 s while preparing. ' +
-                    'If the machine is running a job from the drive, wait for it to finish; otherwise try again.');
+                throw new UploadError(stage, t('msg.fail.timeout', { name: target.name }));
             }
             if (res.status === 423) {
-                outcome = { kind: 'busy', title: target.name + ' is reading its drive', why: 'Machine is reading – stop the job or confirm it\'s idle' };
+                outcome = { type: 'busy', name: target.name };
                 return;
             }
             if (res.status === 507) {
@@ -842,12 +1051,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 const raw = await errorText(res);
                 let d = {};
                 try { d = JSON.parse(raw); } catch (x) { /* plain text */ }
-                if (typeof d.free_bytes === 'number') lastFree = d.free_bytes;
-                outcome = { kind: 'err', title: 'Not enough space on the drive', why: raw };
+                if (typeof d.free_bytes === 'number') {
+                    lastFree = d.free_bytes;
+                    outcome = { type: 'big', name: target.name, file: file.name, free: d.free_bytes,
+                                need: d.needed_bytes || spaceNeeded(file.size, lastTotal) };
+                } else {
+                    outcome = { type: 'failed', notStarted: true, reason: raw, retry: false };
+                }
                 return;
             }
             if (res.status === 409) {
-                outcome = { kind: 'err', title: 'Another transfer is running', why: await errorText(res) };
+                // "Busy: uploading to <name>"
+                outcome = { type: 'failed', notStarted: true, reason: await errorText(res) };
                 return;
             }
             if (!res.ok) throw new UploadError(stage, await errorText(res), res.status);
@@ -869,28 +1084,35 @@ document.addEventListener('DOMContentLoaded', () => {
             const fin = await apiPost('/upload_finish', { 'X-Session': session }, '');
             session = null; // the transmitter ends the session either way
             if (!fin.ok) throw new UploadError(stage, await errorText(fin), fin.status);
+            const secs = (performance.now() - tStart) / 1000;
 
             stage = 'Reconnecting drive';
             setProgress(100, t('tx.reconnecting'), 2);
-            await waitForDriveReconnect(10000);
+            const state = await waitForDriveReconnect(10000);
             setProgress(100, t('tx.done'), 3);
-            outcome = { kind: 'ok', title: file.name + ' is on ' + target.name };
+            outcome = { type: 'done', name: target.name, rxId: target.id, file: file.name, size: file.size, secs, slow: !state };
+            lastSent = { file, rxId: target.id };
             currentFile = null;
         } catch (e) {
             const err = e instanceof UploadError ? e : new UploadError(stage, e.message || String(e));
             if (session) {
                 try { await apiPost('/upload_cancel', { 'X-Session': session }, ''); } catch (x) { /* best effort */ }
             }
-            outcome = err.message === 'cancelled'
-                ? { kind: 'err', title: 'Transfer cancelled at ' + lastPct + '%' }
-                : { kind: 'err', title: 'Transfer stopped at ' + lastPct + '%', why: err.stage + ': ' + err.message };
+            const network = !(e instanceof UploadError) || /network error/.test(err.message);
+            outcome = {
+                type: 'failed',
+                pct: lastPct,
+                cancelled: err.message === 'cancelled',
+                reason: err.message === 'cancelled' ? '' : network ? t('msg.fail.network') : err.message,
+                details: err.message === 'cancelled' ? '' : t('msg.fail.detailLine', {
+                    stage: t(STAGE_KEYS[err.stage] || 'stage.uploading'),
+                    status: err.status ? 'HTTP ' + err.status : '-'
+                }) + '\n' + err.message
+            };
         } finally {
             uploading = false;
             cancelBtn.disabled = false;
-            if (outcome) {
-                progressBox.hidden = true;
-                showMsg(outcome);
-            }
+            explicitMsg = outcome;
             renderAll();
             loadReceiverFiles();
             startStatusPolling();
