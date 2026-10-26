@@ -69,6 +69,24 @@ static void fail_transfer_and_release(void) {
     usb_msc_connect();
 }
 
+// /prepare gave up after USB was disconnected: undo exactly that (no ERROR
+// state, no other storage) and hand the drive straight back to the host.
+static void prepare_abort_reconnect(void) {
+    if (active_file) {
+        fclose(active_file);
+        active_file = NULL;
+        remove(active_filename);
+    }
+    mbedtls_md5_free(&active_md5_ctx);
+    state_machine_transition(STATE_IDLE);
+    storage_manager_flush_and_release_for_usb();
+    usb_msc_connect();
+}
+
+// Receiver-side budget for /prepare, below the transmitter's 10 s timeout so a
+// prepare the transmitter already gave up on never leaves USB disconnected.
+#define PREPARE_BUDGET_US (8LL * 1000 * 1000)
+
 // Discard any unread request body so the connection stays usable.
 static void drain_request_body(httpd_req_t *req) {
     int remaining = req->content_len;
@@ -302,6 +320,7 @@ static void cleanup_orphan_temp_files(void) {
 }
 
 static esp_err_t prepare_post_handler(httpd_req_t *req) {
+    const int64_t t_req = esp_timer_get_time();
     if (reject_unauthorized(req)) return ESP_OK; // header check only
     // Busy guard first: no body read, state change, lock, unmount or USB
     // disconnect while the machine is reading the drive (e.g. printing from it)
@@ -404,6 +423,18 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     // fallback. FatFS and USB MSC are strictly exclusive: USB was just
     // disconnected, so we are free to mount FatFS now. Never mount the SD
     // card while the USB host could still be reading it.
+    // SD IO lock still held by a USB sector access after 5 s: reconnect now
+    // instead of falling back to internal flash with USB off.
+    if (storage_manager_is_sd_present() && !sd_card_is_mounted() &&
+        sd_card_remount() == ESP_ERR_TIMEOUT) {
+        ESP_LOGW(TAG, "SD busy with USB access; aborting prepare, USB reconnected");
+        prepare_abort_reconnect();
+        httpd_resp_set_status(req, "423 Locked");
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
+        httpd_resp_send(req, "{\"error\":\"machine_busy\"}", HTTPD_RESP_USE_STRLEN);
+        cJSON_Delete(json);
+        return ESP_OK;
+    }
     if (!storage_manager_fatfs_available() || (storage_manager_is_sd_present() && !sd_card_is_mounted())) {
         storage_manager_remount();
     }
@@ -473,6 +504,16 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     mbedtls_md5_starts(&active_md5_ctx);
     chunk_count = 0;
     expected_chunk_index = 0;
+
+    if (esp_timer_get_time() - t_req > PREPARE_BUDGET_US) {
+        ESP_LOGW(TAG, "Prepare took %lld ms (transmitter gave up); aborting, USB reconnected",
+                 (esp_timer_get_time() - t_req) / 1000);
+        prepare_abort_reconnect();
+        httpd_resp_set_status(req, "504 Gateway Timeout");
+        httpd_resp_sendstr(req, "Prepare took too long");
+        cJSON_Delete(json);
+        return ESP_OK;
+    }
 
     ESP_LOGI(TAG, "Ready to receive staging file: %s (final: %s, expected MD5: %s)", active_filename, final_filename, expected_md5);
     ESP_LOGI(TAG, "Stage prepare: usb_release %lld ms, mount %lld ms, open %lld ms",

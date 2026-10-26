@@ -421,7 +421,7 @@ esp_err_t sd_card_ensure_fatfs(void) {
 }
 
 esp_err_t sd_card_retry_card_error(void) {
-    if (!io_lock_take(portMAX_DELAY)) {
+    if (!mount_lock_take("sd_card_retry_card_error")) {
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t ret = ESP_OK;
