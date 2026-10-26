@@ -1,5 +1,23 @@
 // CNC Wireless Transfer - Client Application Logic
 document.addEventListener('DOMContentLoaded', () => {
+    applyStrings();
+
+    // ─── Theme: System / Light / Dark, remembered per browser ───────────
+    const THEME_KEY = 'cnc.theme';
+    function setTheme(choice, save) {
+        if (!['system', 'light', 'dark'].includes(choice)) choice = 'system';
+        document.documentElement.dataset.theme = choice;
+        document.querySelectorAll('[data-theme-choice]').forEach(b =>
+            b.setAttribute('aria-pressed', String(b.dataset.themeChoice === choice)));
+        if (save) {
+            try { localStorage.setItem(THEME_KEY, choice); } catch (e) { /* storage blocked */ }
+        }
+    }
+    setTheme(document.documentElement.dataset.theme, false);
+    document.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-theme-choice]');
+        if (b) setTheme(b.dataset.themeChoice, true);
+    });
 
     // ═══════════════════════════════════════════════════════════════════
     // LOGIN PAGE
@@ -30,12 +48,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     sessionStorage.setItem('token', data.token);
                     window.location.href = 'upload.html';
                 } else {
-                    msg.textContent = 'Invalid credentials. Try again.';
-                    msg.style.display = 'block';
+                    msg.textContent = t('login.bad');
+                    msg.hidden = false;
                 }
             } catch (err) {
-                msg.textContent = 'Server unreachable. Check connection.';
-                msg.style.display = 'block';
+                msg.textContent = t('login.unreachable');
+                msg.hidden = false;
             }
         });
         return; // Stop further execution on login page
@@ -459,6 +477,26 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ─── Network chip (header) ──────────────────────────────────────────
+    const netChip = document.getElementById('netChip');
+    let netSsid = '', netClients = null, netMax = 15;
+    function renderNetChip() {
+        if (!netChip || !netSsid || netClients === null) return;
+        const text = t('hdr.network', { ssid: '\u0001', n: netClients, max: netMax });
+        const [before, after] = text.split('\u0001');
+        const el = document.getElementById('netChipText');
+        el.textContent = '';
+        el.append(before);
+        const b = document.createElement('b');
+        b.textContent = netSsid;
+        el.append(b, after || '');
+        netChip.hidden = false;
+    }
+    fetch('/config', { headers: { 'Authorization': 'Bearer ' + token } })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => { if (d && d.ap_ssid) { netSsid = d.ap_ssid; renderNetChip(); } })
+        .catch(() => { /* chip stays hidden */ });
+
     // ─── Status Polling ─────────────────────────────────────────────────
     const statusBadge = document.getElementById('receiverStatus');
     let statusInterval;
@@ -513,6 +551,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 if (data.wifi_mode) {
                     lastWifiMode = data.wifi_mode;
+                }
+                if (typeof data.ap_clients === 'number') {
+                    netClients = data.ap_clients;
+                    netMax = data.ap_max_clients || 15;
+                    renderNetChip();
                 }
                 const recEl = document.getElementById('recoveryInfo');
                 if (recEl) {

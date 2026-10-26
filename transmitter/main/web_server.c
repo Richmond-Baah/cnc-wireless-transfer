@@ -136,6 +136,9 @@ static esp_err_t js_get_handler(httpd_req_t *req) {
 static esp_err_t md5_get_handler(httpd_req_t *req) {
   return serve_spiffs_file(req, "/spiffs/spark-md5.min.js");
 }
+static esp_err_t strings_get_handler(httpd_req_t *req) {
+  return serve_spiffs_file(req, "/spiffs/strings.js");
+}
 
 // ─── Login
 // ──────────────────────────────────────────────────────────────────────
@@ -1033,7 +1036,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 32; // 29 registered
+  config.max_uri_handlers = 32; // 30 registered
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
@@ -1056,6 +1059,7 @@ void web_server_start(void) {
     httpd_uri_t uri_md5 = {.uri = "/spark-md5.min.js",
                            .method = HTTP_GET,
                            .handler = md5_get_handler};
+    httpd_uri_t uri_strings = {.uri = "/strings.js", .method = HTTP_GET, .handler = strings_get_handler};
 
     // APIs
     httpd_uri_t uri_login = {
@@ -1087,6 +1091,7 @@ void web_server_start(void) {
     httpd_register_uri_handler(server, &uri_css);
     httpd_register_uri_handler(server, &uri_js);
     httpd_register_uri_handler(server, &uri_md5);
+    httpd_register_uri_handler(server, &uri_strings);
     httpd_register_uri_handler(server, &uri_login);
     httpd_register_uri_handler(server, &uri_upload_begin);
     httpd_register_uri_handler(server, &uri_upload_chunk);
