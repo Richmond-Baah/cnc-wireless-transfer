@@ -326,7 +326,28 @@ esp_err_t sd_card_remount(void) {
     return ret;
 }
 
-// Formats the SD card via FatFS f_mkfs. Requires the card to be unmounted.
+// FAT32 with 4 KB clusters needs > 65525 clusters, plus FATs/alignment
+#define FORMAT_CLUSTER 4096
+#define FAT32_MIN_BYTES (65526ULL * FORMAT_CLUSTER + 8ULL * 1024 * 1024)
+
+// Logs what f_mkfs actually wrote (mounts the fresh volume briefly)
+static void log_formatted_volume(const char *drv) {
+    FATFS *fs = calloc(1, sizeof(FATFS));
+    if (!fs) return;
+    if (f_mount(fs, drv, 1) == FR_OK) {
+        static const char *const types[] = {"?", "FAT12", "FAT16", "FAT32", "exFAT"};
+        ESP_LOGI(TAG, "Formatted: %s, MBR, %u-byte clusters, %lu clusters", types[fs->fs_type <= 4 ? fs->fs_type : 0],
+                 (unsigned)(fs->csize * FF_MIN_SS), (unsigned long)(fs->n_fatent - 2));
+        f_mount(NULL, drv, 0);
+    } else {
+        ESP_LOGW(TAG, "Formatted volume could not be mounted to verify");
+    }
+    free(fs);
+}
+
+// Formats the SD card via FatFS f_mkfs: MBR + FAT32, 4 KB clusters (what
+// controllers such as Ruida lasers read). Requires the card to be unmounted.
+// ESP_ERR_INVALID_SIZE: card too small for FAT32 at 4 KB (left untouched).
 static esp_err_t sd_card_format_fatfs_locked(void) {
     if (s_fatfs_mounted) {
         ESP_LOGW(TAG, "Cannot format while FatFS is mounted");
@@ -336,6 +357,13 @@ static esp_err_t sd_card_format_fatfs_locked(void) {
     if (current_sd_card == NULL) {
         ESP_LOGW(TAG, "Cannot format: SD card not initialized");
         return ESP_ERR_NOT_FOUND;
+    }
+
+    uint64_t card_bytes = (uint64_t)current_sd_card->csd.capacity * current_sd_card->csd.sector_size;
+    if (card_bytes < FAT32_MIN_BYTES) {
+        ESP_LOGE(TAG, "Card too small for FAT32 with 4 KB clusters (%llu MB, need %llu MB)",
+                 card_bytes >> 20, FAT32_MIN_BYTES >> 20);
+        return ESP_ERR_INVALID_SIZE;
     }
 
     BYTE pdrv = FF_DRV_NOT_USED;
@@ -349,13 +377,19 @@ static esp_err_t sd_card_format_fatfs_locked(void) {
     ff_diskio_register_sdmmc(pdrv, current_sd_card);
     ff_sdmmc_set_disk_status_check(pdrv, false);
 
+    // FM_FAT32 without FM_SFD: MBR partition table + one FAT32 partition, 2 FATs
+    const MKFS_PARM opt = {.fmt = FM_FAT32, .n_fat = 2, .align = 0, .n_root = 0, .au_size = FORMAT_CLUSTER};
     BYTE work[FF_MAX_SS]; // scratch buffer for f_mkfs
-    FRESULT fres = f_mkfs(drv, NULL, work, sizeof(work));
-    esp_err_t ret = (fres == FR_OK) ? ESP_OK : ESP_FAIL;
-    if (fres != FR_OK) {
+    FRESULT fres = f_mkfs(drv, &opt, work, sizeof(work));
+    esp_err_t ret = ESP_OK;
+    if (fres == FR_MKFS_ABORTED) {
+        ESP_LOGE(TAG, "f_mkfs: card too small for FAT32 with 4 KB clusters");
+        ret = ESP_ERR_INVALID_SIZE;
+    } else if (fres != FR_OK) {
         ESP_LOGE(TAG, "f_mkfs failed: %d", (int)fres);
+        ret = ESP_FAIL;
     } else {
-        ESP_LOGI(TAG, "SD card formatted (drive %u)", (unsigned)pdrv);
+        log_formatted_volume(drv);
     }
 
     ff_diskio_unregister(pdrv);

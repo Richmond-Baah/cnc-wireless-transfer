@@ -998,6 +998,12 @@ static esp_err_t format_storage_handler(httpd_req_t *req) {
     // USB is still disconnected: snapshot the fresh volume (empty list, new sizes)
     file_receiver_refresh_cache();
 
+    if (ret == ESP_ERR_INVALID_SIZE) {
+        usb_msc_notify_change();
+        httpd_resp_set_status(req, "507 Insufficient Storage");
+        httpd_resp_sendstr(req, "Card too small for FAT32 with 4 KB clusters (about 270 MB minimum). Nothing was erased.");
+        return ESP_OK;
+    }
     if (ret != ESP_OK) {
         usb_msc_notify_change();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Format failed");
