@@ -20,6 +20,7 @@
 #include "file_transfer.h"
 #include "espnow_pair.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "web_server.h"
@@ -150,11 +151,12 @@ static esp_err_t login_post_handler(httpd_req_t *req) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content too long");
     return ESP_FAIL;
   }
+  int timeouts = 0;
   while (cur_len < total_len) {
     int received =
         httpd_req_recv(req, scratch_buf + cur_len, total_len - cur_len);
     if (received <= 0) {
-      if (received == HTTPD_SOCK_ERR_TIMEOUT)
+      if (received == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3) // stalled client must not hold httpd
         continue;
       httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                           "Failed to receive post data");
@@ -241,14 +243,20 @@ static bool force_requested(httpd_req_t *req) {
          strcmp(force_hdr, "1") == 0;
 }
 
+#define BODY_RECV_TIMEOUTS 3 // x recv_wait_timeout, then give up on the client
+
 static bool read_full_body(httpd_req_t *req, char *buf, size_t cap) {
   if (req->content_len > cap) {
     return false;
   }
   size_t got = 0;
+  int timeouts = 0;
   while (got < req->content_len) {
     int r = httpd_req_recv(req, buf + got, req->content_len - got);
     if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+      if (++timeouts >= BODY_RECV_TIMEOUTS) {
+        return false;
+      }
       continue;
     }
     if (r <= 0) {
@@ -263,18 +271,21 @@ static bool get_session_header(httpd_req_t *req, char *out, size_t len) {
   return httpd_req_get_hdr_value_str(req, "X-Session", out, len) == ESP_OK && out[0];
 }
 
+static char s_begin_body[512]; // upload worker only
+
 static esp_err_t upload_begin_handler(httpd_req_t *req) {
   if (!is_authorized(req)) {
     send_status_text(req, 401, "Unauthorized");
     return ESP_OK;
   }
-  if (req->content_len >= SCRATCH_BUFSIZE || !read_full_body(req, scratch_buf, SCRATCH_BUFSIZE - 1)) {
+  if (req->content_len >= sizeof(s_begin_body) ||
+      !read_full_body(req, s_begin_body, sizeof(s_begin_body) - 1)) {
     send_status_text(req, 400, "Invalid request body");
     return ESP_OK;
   }
-  scratch_buf[req->content_len] = '\0';
+  s_begin_body[req->content_len] = '\0';
 
-  cJSON *json = cJSON_Parse(scratch_buf);
+  cJSON *json = cJSON_Parse(s_begin_body);
   cJSON *j_name = json ? cJSON_GetObjectItem(json, "name") : NULL;
   cJSON *j_size = json ? cJSON_GetObjectItem(json, "size") : NULL;
   cJSON *j_md5 = json ? cJSON_GetObjectItem(json, "md5") : NULL;
@@ -664,15 +675,9 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
 static bool body_confirms(httpd_req_t *req, const char *word) {
   char body[64] = {0};
   int cur_len = 0;
-  if (req->content_len > 0 && req->content_len < (int)sizeof(body)) {
-    while (cur_len < req->content_len) {
-      int received = httpd_req_recv(req, body + cur_len, req->content_len - cur_len);
-      if (received == HTTPD_SOCK_ERR_TIMEOUT)
-        continue;
-      if (received <= 0)
-        break;
-      cur_len += received;
-    }
+  if (req->content_len > 0 && req->content_len < (int)sizeof(body) &&
+      read_full_body(req, body, sizeof(body) - 1)) {
+    cur_len = req->content_len;
   }
   bool confirmed = false;
   if (cur_len == req->content_len && cur_len > 0) {
@@ -701,7 +706,9 @@ static void send_rx_reply(httpd_req_t *req, int code, const char *body) {
   }
 }
 
+// Receiver proxies run on the rx worker only (see dispatch())
 static char s_rx_resp[4096];
+static char s_rx_body[SCRATCH_BUFSIZE];
 
 // Proxies a wipe to the selected receiver. Body must be {"confirm":"WIPE"};
 // X-Force: 1 overrides the receiver's machine-busy guard.
@@ -730,17 +737,17 @@ static esp_err_t delete_post_handler(httpd_req_t *req) {
     send_status_text(req, 401, "Unauthorized");
     return ESP_OK;
   }
-  if (req->content_len >= SCRATCH_BUFSIZE || !read_full_body(req, scratch_buf, SCRATCH_BUFSIZE - 1)) {
+  if (req->content_len >= SCRATCH_BUFSIZE || !read_full_body(req, s_rx_body, SCRATCH_BUFSIZE - 1)) {
     send_status_text(req, 400, "Invalid request body");
     return ESP_OK;
   }
-  scratch_buf[req->content_len] = '\0';
+  s_rx_body[req->content_len] = '\0';
   char rx_id[RX_ID_LEN];
   if (!get_rx_id(req, rx_id, sizeof(rx_id))) {
     send_status_text(req, 400, "Select a receiver (X-Rx-Id)");
     return ESP_OK;
   }
-  int code = file_transfer_delete_receiver(rx_id, scratch_buf, force_requested(req), s_rx_resp,
+  int code = file_transfer_delete_receiver(rx_id, s_rx_body, force_requested(req), s_rx_resp,
                                            sizeof(s_rx_resp));
   send_rx_reply(req, code, s_rx_resp);
   return ESP_OK;
@@ -1048,50 +1055,59 @@ static void restart_delayed_task(void *pvParameters) {
 // ────────────────────────────────────────────────────────────
 // ─── Routes ─────────────────────────────────────────────────────────────────
 // Every URI goes through dispatch(), which times the handler (Kconfig
-// CNC_HTTP_REQ_LOG) and reports slow ones.
+// CNC_HTTP_REQ_LOG) and reports slow ones. Anything that talks to a receiver
+// runs on a worker task through an httpd async request, so the httpd task
+// itself only does quick work: static files, /status, cached lists.
 #define SLOW_HANDLER_MS 500
+
+typedef enum {
+  RT_SYNC,   // runs on the httpd task: must never wait on a receiver
+  RT_UPLOAD, // upload worker: begin/chunk/finish/cancel (one session at a time)
+  RT_RX,     // rx worker: list/delete/wipe/format, pairing, recovery
+} route_kind_t;
 
 typedef struct {
   const char *uri;
   httpd_method_t method;
   esp_err_t (*fn)(httpd_req_t *req);
+  route_kind_t kind;
 } route_t;
 
 static const route_t s_routes[] = {
     // Static assets
-    {"/", HTTP_GET, index_get_handler},
-    {"/index.html", HTTP_GET, index_get_handler},
-    {"/upload.html", HTTP_GET, upload_get_handler},
-    {"/style.css", HTTP_GET, css_get_handler},
-    {"/app.js", HTTP_GET, js_get_handler},
-    {"/spark-md5.min.js", HTTP_GET, md5_get_handler},
-    {"/strings.js", HTTP_GET, strings_get_handler},
+    {"/", HTTP_GET, index_get_handler, RT_SYNC},
+    {"/index.html", HTTP_GET, index_get_handler, RT_SYNC},
+    {"/upload.html", HTTP_GET, upload_get_handler, RT_SYNC},
+    {"/style.css", HTTP_GET, css_get_handler, RT_SYNC},
+    {"/app.js", HTTP_GET, js_get_handler, RT_SYNC},
+    {"/spark-md5.min.js", HTTP_GET, md5_get_handler, RT_SYNC},
+    {"/strings.js", HTTP_GET, strings_get_handler, RT_SYNC},
     // UI API
-    {"/login", HTTP_POST, login_post_handler},
-    {"/status", HTTP_GET, status_get_handler},
-    {"/ping", HTTP_GET, status_get_handler},
-    {"/config", HTTP_GET, config_get_handler},
-    {"/config", HTTP_POST, config_post_handler},
-    {"/upload_begin", HTTP_POST, upload_begin_handler},
-    {"/upload_chunk", HTTP_POST, upload_chunk_handler},
-    {"/upload_finish", HTTP_POST, upload_finish_handler},
-    {"/upload_cancel", HTTP_POST, upload_cancel_handler},
-    {"/receiver_list", HTTP_GET, receiver_list_get_handler},
-    {"/receiver_delete", HTTP_POST, delete_post_handler},
-    {"/receiver_clear", HTTP_POST, clear_post_handler},
-    {"/receiver_format", HTTP_POST, format_post_handler},
-    {"/receivers", HTTP_GET, receivers_get_handler},
-    {"/receivers/approve", HTTP_POST, receivers_manage_handler},
-    {"/receivers/rename", HTTP_POST, receivers_manage_handler},
-    {"/receivers/unpair", HTTP_POST, receivers_manage_handler},
-    {"/receivers/add", HTTP_POST, receivers_add_handler},
-    {"/receivers/pair_file", HTTP_POST, receivers_pair_file_handler},
-    {"/pair_window/stop", HTTP_POST, pair_window_stop_handler},
-    {"/recovery", HTTP_POST, recovery_post_handler},
-    {"/debug", HTTP_GET, debug_get_handler},
+    {"/login", HTTP_POST, login_post_handler, RT_SYNC},
+    {"/status", HTTP_GET, status_get_handler, RT_SYNC},
+    {"/ping", HTTP_GET, status_get_handler, RT_SYNC},
+    {"/config", HTTP_GET, config_get_handler, RT_SYNC},
+    {"/config", HTTP_POST, config_post_handler, RT_SYNC},
+    {"/upload_begin", HTTP_POST, upload_begin_handler, RT_UPLOAD},
+    {"/upload_chunk", HTTP_POST, upload_chunk_handler, RT_UPLOAD},
+    {"/upload_finish", HTTP_POST, upload_finish_handler, RT_UPLOAD},
+    {"/upload_cancel", HTTP_POST, upload_cancel_handler, RT_UPLOAD},
+    {"/receiver_list", HTTP_GET, receiver_list_get_handler, RT_RX},
+    {"/receiver_delete", HTTP_POST, delete_post_handler, RT_RX},
+    {"/receiver_clear", HTTP_POST, clear_post_handler, RT_RX},
+    {"/receiver_format", HTTP_POST, format_post_handler, RT_RX},
+    {"/receivers", HTTP_GET, receivers_get_handler, RT_SYNC},
+    {"/receivers/approve", HTTP_POST, receivers_manage_handler, RT_RX},
+    {"/receivers/rename", HTTP_POST, receivers_manage_handler, RT_RX},
+    {"/receivers/unpair", HTTP_POST, receivers_manage_handler, RT_RX},
+    {"/receivers/add", HTTP_POST, receivers_add_handler, RT_SYNC},
+    {"/receivers/pair_file", HTTP_POST, receivers_pair_file_handler, RT_SYNC},
+    {"/pair_window/stop", HTTP_POST, pair_window_stop_handler, RT_SYNC},
+    {"/recovery", HTTP_POST, recovery_post_handler, RT_RX},
+    {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
     // Receivers
-    {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler},
-    {"/rx/config", HTTP_GET, rx_config_handler},
+    {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler, RT_SYNC},
+    {"/rx/config", HTTP_GET, rx_config_handler, RT_SYNC},
 };
 #define NUM_ROUTES (sizeof(s_routes) / sizeof(s_routes[0]))
 
@@ -1116,16 +1132,64 @@ static void log_request(httpd_req_t *req, int64_t t0_us, const char *how) {
 }
 #endif
 
+// Async requests waiting for / running on a worker
+#define WORKER_QUEUE_LEN 4
+#define WORKER_STACK 6144
+
+typedef struct {
+  httpd_req_t *req; // async copy, completed by the worker
+  const route_t *rt;
+  int64_t t0_us;
+} job_t;
+
+static QueueHandle_t s_queue[3]; // indexed by route_kind_t (RT_SYNC unused)
+
+static void worker_task(void *arg) {
+  QueueHandle_t q = (QueueHandle_t)arg;
+  job_t j;
+  for (;;) {
+    if (xQueueReceive(q, &j, portMAX_DELAY) != pdTRUE) continue;
+    j.rt->fn(j.req);
+#if CONFIG_CNC_HTTP_REQ_LOG
+    log_request(j.req, j.t0_us, " (worker)");
+#endif
+    httpd_req_async_handler_complete(j.req);
+  }
+}
+
 static esp_err_t dispatch(httpd_req_t *req) {
   const route_t *rt = (const route_t *)req->user_ctx;
-#if CONFIG_CNC_HTTP_REQ_LOG
   int64_t t0 = esp_timer_get_time();
+  if (rt->kind != RT_SYNC) {
+    // Hand over to the worker; the httpd task moves on to other sockets
+    QueueHandle_t q = s_queue[rt->kind];
+    httpd_req_t *copy = NULL;
+    if (uxQueueSpacesAvailable(q) == 0 || httpd_req_async_handler_begin(req, &copy) != ESP_OK) {
+      ESP_LOGW(TAG, "%s: worker busy, 503", req->uri);
+      send_status_text(req, 503, "Transmitter busy, try again");
+      return ESP_OK;
+    }
+    job_t j = {.req = copy, .rt = rt, .t0_us = t0};
+    if (xQueueSend(q, &j, 0) != pdTRUE) { // cannot happen: only this task enqueues
+      send_status_text(copy, 503, "Transmitter busy, try again");
+      httpd_req_async_handler_complete(copy);
+    }
+    return ESP_OK;
+  }
+#if CONFIG_CNC_HTTP_REQ_LOG
   esp_err_t ret = rt->fn(req);
   log_request(req, t0, "");
   return ret;
 #else
   return rt->fn(req);
 #endif
+}
+
+static void start_workers(void) {
+  s_queue[RT_UPLOAD] = xQueueCreate(WORKER_QUEUE_LEN, sizeof(job_t));
+  s_queue[RT_RX] = xQueueCreate(WORKER_QUEUE_LEN, sizeof(job_t));
+  xTaskCreate(worker_task, "http_upload", WORKER_STACK, s_queue[RT_UPLOAD], 5, NULL);
+  xTaskCreate(worker_task, "http_rx", WORKER_STACK, s_queue[RT_RX], 5, NULL);
 }
 
 void web_server_start(void) {
@@ -1138,6 +1202,7 @@ void web_server_start(void) {
   config.send_wait_timeout = 30;
   config.stack_size = 8192;
 
+  start_workers();
   if (httpd_start(&s_server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Error starting Web server.");
     return;
