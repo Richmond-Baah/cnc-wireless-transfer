@@ -1152,10 +1152,14 @@ void web_server_start(void) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = NUM_ROUTES;
   config.uri_match_fn = httpd_uri_match_wildcard; // "/ui/*"
-  config.max_open_sockets = 7;
-  config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
-  config.recv_wait_timeout = 30; // large uploads
-  config.send_wait_timeout = 30;
+  // Browsers open ~6 keep-alive sockets each; heartbeats close theirs at once.
+  // 13 + 3 internal + 2 receiver clients fit CONFIG_LWIP_MAX_SOCKETS (24).
+  config.max_open_sockets = 13;
+  config.lru_purge_enable = true; // reclaim idle keep-alive sockets (skips async requests in progress)
+  // Per send/recv call; body reads allow BODY_RECV_TIMEOUTS of these, so a
+  // stalled client frees httpd within ~15 s instead of holding it
+  config.recv_wait_timeout = 5;
+  config.send_wait_timeout = 5;
   config.stack_size = 8192;
 
   snprintf(s_ui_path, sizeof(s_ui_path), "/ui/%08lx",
