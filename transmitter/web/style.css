@@ -258,6 +258,12 @@ input::placeholder { color: var(--muted); opacity: 0.8; }
 .file-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .file-row > svg { color: var(--muted); }
 .file-meta { flex: 1 1 200px; min-width: 0; }
+.short-name { margin-top: 8px; display: grid; gap: 6px; }
+.short-name p { margin: 0; }
+.short-use { display: flex; align-items: center; gap: 8px; min-height: var(--tap); cursor: pointer; }
+.short-use input { width: 18px; height: 18px; accent-color: var(--accent); }
+.short-name input[type=text] { width: 100%; max-width: 16rem; min-height: var(--tap); }
+.short-name input[type=text]:disabled { opacity: .5; }
 .file-name { font-weight: 600; }
 
 .progress { margin-bottom: 16px; }

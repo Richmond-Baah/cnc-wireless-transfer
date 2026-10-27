@@ -67,7 +67,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const authHeaders = (h) => Object.assign({ 'Authorization': 'Bearer ' + token }, h || {});
 
     // Single source of truth for accepted machine-program extensions
-    const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso'];
+    const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso', '.rd', '.dst'];
+
+    // DOS 8.3 names (Ruida lasers and other controllers that read short names only)
+    const SFN_CHARS = "A-Z0-9!#$%&'()@^_`{}~-";
+    const SFN_RE = new RegExp('^[' + SFN_CHARS + ']{1,8}(\\.[' + SFN_CHARS + ']{1,3})?$');
+    const isShortName = (n) => (n === n.toUpperCase() || n === n.toLowerCase()) && SFN_RE.test(n.toUpperCase());
+    // Same rule as the receiver's filename_is_valid()
+    const nameIsValid = (n) => !!n && !n.includes('..') && !/[\x00-\x1f\x7f/\\:]/.test(n) && !/^\.+$/.test(n);
 
     // Binary units. fmtBytes(4404019) = "4.2 MB"; fmtPair(1258291, 4404019) = "1.2 of 4.2 MB"
     const UNITS = [['unit.b', 1, 0], ['unit.kb', 1024, 1], ['unit.mb', 1048576, 1], ['unit.gb', 1073741824, 2]];
@@ -105,6 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastStaIp = '';
     let uploading = false;
     let currentFile = null;
+    let driveNames = new Set();  // upper-cased names last listed on the selected drive
     let statusInterval = null;
 
     const selectedReceiver = () => receivers.find(r => r.id === selectedRx) || null;
@@ -460,6 +468,50 @@ document.addEventListener('DOMContentLoaded', () => {
     const spaceNeeded = (size, total) => size + Math.max(64 * 1024, Math.floor((total || 0) / 100));
     const fileFits = () => !currentFile || lastFree === null || lastFree >= spaceNeeded(currentFile.size, lastTotal);
 
+    // "My sign job.rd" -> "MYSIGN01.RD" (number skips names already on the drive)
+    function suggestShortName(name) {
+        const dot = name.lastIndexOf('.');
+        const clean = (x) => x.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+        const base = clean(dot > 0 ? name.substring(0, dot) : name).substring(0, 6) || 'JOB';
+        const ext = dot > 0 ? clean(name.substring(dot + 1)).substring(0, 3) : '';
+        for (let i = 1; i < 100; i++) {
+            const n = base + String(i).padStart(2, '0') + (ext ? '.' + ext : '');
+            if (!driveNames.has(n)) return n;
+        }
+        return base + '99' + (ext ? '.' + ext : '');
+    }
+
+    // Name the file is stored under on the machine
+    function sendName() {
+        if (!currentFile) return '';
+        if ($('shortName').hidden || !$('shortNameUse').checked) return currentFile.name;
+        return $('shortNameInput').value.trim();
+    }
+
+    function setFile(file, name) {
+        currentFile = file;
+        const offer = !!file && !isShortName(file.name);
+        $('shortName').hidden = !offer;
+        if (offer) {
+            const keepLong = name === file.name;
+            $('shortNameUse').checked = !keepLong;
+            $('shortNameInput').value = name && !keepLong ? name : suggestShortName(file.name);
+        }
+    }
+
+    function renderShortName() {
+        if ($('shortName').hidden) return;
+        const use = $('shortNameUse').checked;
+        const input = $('shortNameInput');
+        input.disabled = !use || uploading;
+        $('shortNameUse').disabled = uploading;
+        const n = input.value.trim();
+        const note = $('shortNameNote');
+        note.hidden = !use || (nameIsValid(n) && isShortName(n));
+        note.textContent = t(nameIsValid(n) ? 'file.short.long' : 'file.short.bad');
+        note.className = 'small ' + (nameIsValid(n) ? 'muted' : 'err-text');
+    }
+
     function renderTransfer() {
         const v = selectedView();
         const pill = $('txPill');
@@ -494,13 +546,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const ext = dot >= 0 ? currentFile.name.substring(dot).toLowerCase() : '';
             $('fileOdd').hidden = VALID_EXTS.includes(ext);
             $('fileOdd').textContent = t('file.oddType', { ext: ext || currentFile.name });
+            renderShortName();
         }
         fileZone.classList.toggle('disabled', uploading);
         $('chooseFileBtn').disabled = uploading;
         $('chooseAnotherBtn').disabled = uploading;
 
         uploadBtn.textContent = t('tx.send', { name: v ? v.name : '…' });
-        uploadBtn.disabled = uploading || !currentFile || !v || !v.online || !fileFits() ||
+        uploadBtn.disabled = uploading || !currentFile || !nameIsValid(sendName()) || !v || !v.online || !fileFits() ||
             v.state === 'CARD_ERROR' || !!v.card_error || waitTimer !== null;
         cancelBtn.hidden = !uploading && !currentFile;
         renderMsgArea();
@@ -552,7 +605,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (v.card_error || v.state === 'CARD_ERROR') return { type: 'card' };
         if (currentFile && !fileFits()) {
             const need = spaceNeeded(currentFile.size, lastTotal);
-            return { type: 'big', file: currentFile.name, need, free: lastFree };
+            return { type: 'big', file: sendName(), need, free: lastFree };
         }
         return null;
     }
@@ -686,7 +739,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (lastSent && !uploading) {
                 const id = a.dataset.id;
                 selectRx(id);
-                currentFile = lastSent.file;
+                setFile(lastSent.file, lastSent.name);
                 renderTransfer();
                 startUpload(false);
             }
@@ -699,7 +752,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stopWaiting();
         const file = currentFile;
         if (!file) return;
-        setMsg({ type: 'waiting', name: target.name, file: file.name });
+        setMsg({ type: 'waiting', name: target.name, file: sendName() });
         waitTimer = setInterval(async () => {
             try {
                 const res = await fetch('/status', { headers: authHeaders({ 'X-Rx-Id': target.id }) });
@@ -759,7 +812,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function handleFileSelect(file) {
-        currentFile = file;
+        setFile(file);
         clearMsg();
         renderTransfer();
     }
@@ -773,10 +826,12 @@ document.addEventListener('DOMContentLoaded', () => {
             $('progressText').textContent = t('tx.cancelling');
             return;
         }
-        currentFile = null;
+        setFile(null);
         clearMsg();
         renderTransfer();
     });
+    $('shortNameUse').addEventListener('change', () => renderTransfer());
+    $('shortNameInput').addEventListener('input', () => renderTransfer());
 
     // ─── Status polling ─────────────────────────────────────────────────
     const pollStatus = async () => {
@@ -850,6 +905,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 show('<p class="muted small">' + esc(t('files.offline', { name: r ? r.name : '' })) + '</p>');
                 return;
             }
+            driveNames = new Set((data.files || []).map(f => String(f.name).toUpperCase()));
             if (!data.files || !data.files.length) {
                 show('<p class="muted small">' + esc(t('files.empty')) + '</p>');
                 return;
@@ -1106,6 +1162,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!currentFile || !target) return;
         force = (force === true); // click handlers may pass an Event
         const file = currentFile;
+        const name = sendName();
+        if (!nameIsValid(name)) return;
         cancelRequested = false;
         cancelBtn.disabled = false;
         clearMsg();
@@ -1130,7 +1188,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 // Transmitter gives up on the receiver after 10 s (504); this is the backstop
                 res = await apiPost('/upload_begin', beginHeaders,
-                    JSON.stringify({ name: file.name, size: file.size, md5 }), 12000);
+                    JSON.stringify({ name, size: file.size, md5 }), 12000);
             } catch (e) {
                 if (e.name !== 'AbortError') throw e;
                 throw new UploadError(stage, t('msg.fail.timeout', { name: target.name }));
@@ -1147,7 +1205,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 try { d = JSON.parse(raw); } catch (x) { /* plain text */ }
                 if (typeof d.free_bytes === 'number') {
                     lastFree = d.free_bytes;
-                    outcome = { type: 'big', name: target.name, file: file.name, free: d.free_bytes,
+                    outcome = { type: 'big', name: target.name, file: name, free: d.free_bytes,
                                 need: d.needed_bytes || spaceNeeded(file.size, lastTotal) };
                 } else {
                     outcome = { type: 'failed', notStarted: true, reason: raw, retry: false };
@@ -1184,9 +1242,9 @@ document.addEventListener('DOMContentLoaded', () => {
             setProgress(100, t('tx.reconnecting'), 2);
             const state = await waitForDriveReconnect(10000);
             setProgress(100, t('tx.done'), 3);
-            outcome = { type: 'done', name: target.name, rxId: target.id, file: file.name, size: file.size, secs, slow: !state };
-            lastSent = { file, rxId: target.id };
-            currentFile = null;
+            outcome = { type: 'done', name: target.name, rxId: target.id, file: name, size: file.size, secs, slow: !state };
+            lastSent = { file, name, rxId: target.id };
+            setFile(null);
         } catch (e) {
             const err = e instanceof UploadError ? e : new UploadError(stage, e.message || String(e));
             if (session) {

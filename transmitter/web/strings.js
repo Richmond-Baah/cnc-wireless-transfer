@@ -70,6 +70,11 @@ window.STRINGS = {
     'file.types': 'Machine programs: {list}',
     'file.fits': 'fits ({free} free)',
     'file.tooBig': 'too big ({free} free)',
+    'file.short.why': 'Some machines (e.g. Ruida lasers) need short names: up to 8 letters or digits, a dot and up to 3, no spaces.',
+    'file.short.use': 'Send with this short name',
+    'file.short.label': 'Short file name',
+    'file.short.long': 'Not a short name. It will be sent as typed.',
+    'file.short.bad': 'Enter a name without / \\ : or ..',
     'file.oddType': '"{ext}" is not a usual machine program type. It will be sent as it is.',
 
     // Transfer

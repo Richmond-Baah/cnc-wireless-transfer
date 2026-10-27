@@ -103,6 +103,12 @@
                                 <div id="fileName" class="mono file-name"></div>
                                 <div class="small"><span id="fileSize" class="muted"></span> · <span id="fileFit"></span></div>
                                 <div id="fileOdd" class="small busy-text" hidden></div>
+                                <div id="shortName" class="short-name" hidden>
+                                    <p class="small busy-text" data-t="file.short.why"></p>
+                                    <label class="short-use"><input type="checkbox" id="shortNameUse" checked> <span data-t="file.short.use"></span></label>
+                                    <input type="text" id="shortNameInput" class="mono" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false" data-t-aria="file.short.label">
+                                    <div id="shortNameNote" class="small muted" hidden></div>
+                                </div>
                             </div>
                             <button type="button" class="btn btn-ghost" id="chooseAnotherBtn" data-t="file.chooseAnother"></button>
                         </div>
