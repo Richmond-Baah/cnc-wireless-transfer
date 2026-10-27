@@ -22,12 +22,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // ═══════════════════════════════════════════════════════════════════
     // LOGIN PAGE
     // ═══════════════════════════════════════════════════════════════════
-    const loginForm = document.getElementById('loginForm');
-    if (loginForm) {
-        if (sessionStorage.getItem('token')) {
-            window.location.href = 'upload.html';
-            return;
-        }
+    // One page, two views: login (no token) or the app
+    if (!sessionStorage.getItem('token')) {
+        document.getElementById('loginPage').hidden = false;
+        document.title = t('app.title.login');
+        const loginForm = document.getElementById('loginForm');
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             const username = document.getElementById('username').value;
@@ -42,7 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (res.ok) {
                     const data = await res.json();
                     sessionStorage.setItem('token', data.token);
-                    window.location.href = 'upload.html';
+                    window.location.reload();
                 } else {
                     msg.textContent = t('login.bad');
                     msg.hidden = false;
@@ -59,10 +58,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // MAIN PAGE
     // ═══════════════════════════════════════════════════════════════════
     const token = sessionStorage.getItem('token');
-    if (!token) {
-        window.location.href = 'index.html';
-        return;
-    }
+    document.getElementById('appPage').hidden = false;
+    document.title = t('app.title.main');
 
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s).replace(/[&<>"']/g, c =>
@@ -147,7 +144,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── Header ─────────────────────────────────────────────────────────
     function logoutExpired() {
         sessionStorage.removeItem('token');
-        window.location.href = 'index.html';
+        window.location.href = '/';
     }
     $('logoutBtn').addEventListener('click', logoutExpired);
 
@@ -1046,7 +1043,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (res.status === 401) {
             sessionStorage.removeItem('token');
-            setTimeout(() => { window.location.href = 'index.html'; }, 2000);
+            setTimeout(() => { window.location.href = '/'; }, 2000);
         }
         return res;
     }
@@ -1339,7 +1336,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const router = data.wifi_mode === 'STA';
             formStatus(statusEl, router ? t('set.savedRouter', { ip: lastStaIp || '…' }) : t('set.saved'), 'ok');
             sessionStorage.removeItem('token');
-            setTimeout(() => { window.location.href = 'index.html'; }, router ? 20000 : 5000);
+            setTimeout(() => { window.location.href = '/'; }, router ? 20000 : 5000);
         } catch (e) {
             formStatus(statusEl, t('set.netError'), 'err');
             submit.disabled = false;

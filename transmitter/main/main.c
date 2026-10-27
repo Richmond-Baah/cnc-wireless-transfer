@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_spiffs.h"
 #include "nvs_flash.h"
 #include "wifi_manager.h"
 #include "web_server.h"
@@ -29,24 +28,7 @@ void app_main(void)
     // 3. Initialize Wi-Fi (Moved up to ensure connectivity even if SPIFFS fails)
     wifi_init();
 
-    // 4. Initialize SPIFFS (for web assets)
-    esp_vfs_spiffs_conf_t spiffs_conf = {
-        .base_path = "/spiffs",
-        .partition_label = NULL,
-        .max_files = 10,
-        .format_if_mount_failed = false
-    };
-
-    ret = esp_vfs_spiffs_register(&spiffs_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s). Web UI may not work.", esp_err_to_name(ret));
-    } else {
-        size_t total = 0, used = 0;
-        ret = esp_spiffs_info(NULL, &total, &used);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
-        }
-    }
+    // 4. (Web UI is embedded in the app image; the spiffs partition is unused)
 
     // 5. Receiver registry (paired list from NVS) and upload session reaper
     rx_registry_init();

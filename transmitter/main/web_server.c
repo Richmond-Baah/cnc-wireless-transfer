@@ -15,7 +15,7 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_log.h"
-#include "esp_spiffs.h"
+#include "esp_rom_crc.h"
 #include "esp_system.h"
 #include "file_transfer.h"
 #include "espnow_pair.h"
@@ -64,82 +64,29 @@ static bool is_authorized(httpd_req_t *req) {
   return auth_validate_token(auth_header + 7);
 }
 
-// ─── SPIFFS File Serve
-// ──────────────────────────────────────────────────────────
-static esp_err_t serve_spiffs_file(httpd_req_t *req, const char *filepath) {
-  FILE *f = fopen(filepath, "rb");
-  if (f == NULL) {
-    ESP_LOGE(TAG, "Failed to open file : %s", filepath);
-    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
-    return ESP_FAIL;
+// ─── Web UI ─────────────────────────────────────────────────────────────────
+// One gzipped HTML (web/ bundled by tools/bundle_ui.py) embedded in the app.
+// "/" redirects to /ui/<crc of the bundle>; that URL is cached for a year and
+// a new build gets a new URL.
+extern const uint8_t ui_gz_start[] asm("_binary_ui_html_gz_start");
+extern const uint8_t ui_gz_end[] asm("_binary_ui_html_gz_end");
+static char s_ui_path[16]; // "/ui/xxxxxxxx"
+
+static esp_err_t ui_redirect_handler(httpd_req_t *req) {
+  httpd_resp_set_status(req, "302 Found");
+  httpd_resp_set_hdr(req, "Location", s_ui_path);
+  return httpd_resp_send(req, NULL, 0);
+}
+
+static esp_err_t ui_get_handler(httpd_req_t *req) {
+  if (strcmp(req->uri, s_ui_path) != 0) { // another build's URL
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return ui_redirect_handler(req);
   }
-
-  // Get file size
-  fseek(f, 0, SEEK_END);
-  long file_size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  if (file_size <= 0) {
-    fclose(f);
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Empty file");
-    return ESP_FAIL;
-  }
-
-  // Set MIME type
-  const char *ext = strrchr(filepath, '.');
-  if (ext && strcmp(ext, ".html") == 0)
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-  else if (ext && strcmp(ext, ".css") == 0)
-    httpd_resp_set_type(req, "text/css; charset=utf-8");
-  else if (ext && (strcmp(ext, ".js") == 0))
-    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
-
-  // Read entire file into memory and send in one shot.
-  // All SPIFFS web assets are small (< 20KB), so this is safe.
-  char *buf = (char *)malloc(file_size);
-  if (buf == NULL) {
-    ESP_LOGE(TAG, "malloc failed for %s (%ld bytes)", filepath, file_size);
-    fclose(f);
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
-    return ESP_FAIL;
-  }
-
-  size_t read_len = fread(buf, 1, file_size, f);
-  fclose(f);
-
-  if ((long)read_len != file_size) {
-    ESP_LOGE(TAG, "Short read on %s: got %u, expected %ld", filepath,
-             (unsigned)read_len, file_size);
-    free(buf);
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Read error");
-    return ESP_FAIL;
-  }
-
-  // Single-shot send — sets Content-Length automatically, no chunked encoding
-  esp_err_t ret = httpd_resp_send(req, buf, read_len);
-  free(buf);
-  return ret;
-}
-
-// ─── Static Asset Handlers
-// ──────────────────────────────────────────────────────
-static esp_err_t index_get_handler(httpd_req_t *req) {
-  return serve_spiffs_file(req, "/spiffs/index.html");
-}
-static esp_err_t upload_get_handler(httpd_req_t *req) {
-  return serve_spiffs_file(req, "/spiffs/upload.html");
-}
-static esp_err_t css_get_handler(httpd_req_t *req) {
-  return serve_spiffs_file(req, "/spiffs/style.css");
-}
-static esp_err_t js_get_handler(httpd_req_t *req) {
-  return serve_spiffs_file(req, "/spiffs/app.js");
-}
-static esp_err_t md5_get_handler(httpd_req_t *req) {
-  return serve_spiffs_file(req, "/spiffs/spark-md5.min.js");
-}
-static esp_err_t strings_get_handler(httpd_req_t *req) {
-  return serve_spiffs_file(req, "/spiffs/strings.js");
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+  httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=31536000, immutable");
+  return httpd_resp_send(req, (const char *)ui_gz_start, ui_gz_end - ui_gz_start);
 }
 
 // ─── Login
@@ -981,7 +928,6 @@ static esp_err_t receivers_pair_file_handler(httpd_req_t *req) {
   }
   httpd_resp_set_type(req, "application/octet-stream");
   httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"pair.cfg\"");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_sendstr(req, out);
   memset(out, 0, strlen(out));
   cJSON_free(out);
@@ -1077,14 +1023,11 @@ typedef struct {
 } route_t;
 
 static const route_t s_routes[] = {
-    // Static assets
-    {"/", HTTP_GET, index_get_handler, RT_SYNC},
-    {"/index.html", HTTP_GET, index_get_handler, RT_SYNC},
-    {"/upload.html", HTTP_GET, upload_get_handler, RT_SYNC},
-    {"/style.css", HTTP_GET, css_get_handler, RT_SYNC},
-    {"/app.js", HTTP_GET, js_get_handler, RT_SYNC},
-    {"/spark-md5.min.js", HTTP_GET, md5_get_handler, RT_SYNC},
-    {"/strings.js", HTTP_GET, strings_get_handler, RT_SYNC},
+    // Web UI (old page URLs redirect too)
+    {"/", HTTP_GET, ui_redirect_handler, RT_SYNC},
+    {"/index.html", HTTP_GET, ui_redirect_handler, RT_SYNC},
+    {"/upload.html", HTTP_GET, ui_redirect_handler, RT_SYNC},
+    {"/ui/*", HTTP_GET, ui_get_handler, RT_SYNC},
     // UI API
     {"/login", HTTP_POST, login_post_handler, RT_SYNC},
     {"/status", HTTP_GET, status_get_handler, RT_SYNC},
@@ -1147,11 +1090,19 @@ typedef struct {
 
 static QueueHandle_t s_queue[3]; // indexed by route_kind_t (RT_SYNC unused)
 
+// Everything but the versioned UI page is live data: never cached
+static void set_cache_policy(httpd_req_t *req, const route_t *rt) {
+  if (rt->fn != ui_get_handler) {
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  }
+}
+
 static void worker_task(void *arg) {
   QueueHandle_t q = (QueueHandle_t)arg;
   job_t j;
   for (;;) {
     if (xQueueReceive(q, &j, portMAX_DELAY) != pdTRUE) continue;
+    set_cache_policy(j.req, j.rt);
     j.rt->fn(j.req);
 #if CONFIG_CNC_HTTP_REQ_LOG
     log_request(j.req, j.t0_us, " (worker)");
@@ -1179,6 +1130,7 @@ static esp_err_t dispatch(httpd_req_t *req) {
     }
     return ESP_OK;
   }
+  set_cache_policy(req, rt);
 #if CONFIG_CNC_HTTP_REQ_LOG
   esp_err_t ret = rt->fn(req);
   log_request(req, t0, "");
@@ -1199,12 +1151,15 @@ void web_server_start(void) {
   auth_init();
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = NUM_ROUTES;
+  config.uri_match_fn = httpd_uri_match_wildcard; // "/ui/*"
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
   config.send_wait_timeout = 30;
   config.stack_size = 8192;
 
+  snprintf(s_ui_path, sizeof(s_ui_path), "/ui/%08lx",
+           (unsigned long)esp_rom_crc32_le(0, ui_gz_start, ui_gz_end - ui_gz_start));
   start_workers();
   if (httpd_start(&s_server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Error starting Web server.");
@@ -1217,5 +1172,6 @@ void web_server_start(void) {
       ESP_LOGE(TAG, "Could not register %s", s_routes[i].uri);
     }
   }
-  ESP_LOGI(TAG, "Web server started on port %d (%u routes)", config.server_port, (unsigned)NUM_ROUTES);
+  ESP_LOGI(TAG, "Web server started on port %d (%u routes), UI %s (%u bytes gz)", config.server_port,
+           (unsigned)NUM_ROUTES, s_ui_path, (unsigned)(ui_gz_end - ui_gz_start));
 }

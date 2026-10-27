@@ -69,9 +69,9 @@ The transmitter acts as a proxy between the browser and the receiver:
 
 | Endpoint       | Method | Auth | Description                       |
 |----------------|--------|------|-----------------------------------|
-| `/`            | GET    | No   | Login page                        |
+| `/`            | GET    | No   | Redirects to `/ui/<crc>`          |
+| `/ui/<crc>`    | GET    | No   | Web UI, one gzipped page (login + app), cached 1 year |
 | `/login`       | POST   | No   | Authenticate, returns session token |
-| `/upload.html` | GET    | No   | Upload interface (checks token in JS) |
 | `/upload`      | POST   | Yes  | File upload + transfer to receiver |
 | `/status`      | GET    | Yes  | Get receiver state                |
 | `/config`      | GET    | Yes  | Get current Wi-Fi configuration   |
