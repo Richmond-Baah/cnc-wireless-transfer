@@ -41,4 +41,12 @@ config CNC_WIFI_MAX_TX_POWER
         High power can brown out small ESP32-S3 boards (weak LDO/antenna)
         and leave the AP invisible; raise only if the supply is solid.
 
+config CNC_HTTP_REQ_LOG
+    bool "Log every web request (path, duration, open sockets)"
+    default y
+    help
+        One INFO line per HTTP request with its duration and the number of
+        open client sockets, plus a warning for any handler over 500 ms.
+        Turn off once the web UI is known to be healthy.
+
 endmenu

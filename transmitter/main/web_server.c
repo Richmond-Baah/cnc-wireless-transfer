@@ -13,6 +13,7 @@
 #include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_system.h"
@@ -1045,123 +1046,108 @@ static void restart_delayed_task(void *pvParameters) {
 
 // ─── Web Server Init
 // ────────────────────────────────────────────────────────────
+// ─── Routes ─────────────────────────────────────────────────────────────────
+// Every URI goes through dispatch(), which times the handler (Kconfig
+// CNC_HTTP_REQ_LOG) and reports slow ones.
+#define SLOW_HANDLER_MS 500
+
+typedef struct {
+  const char *uri;
+  httpd_method_t method;
+  esp_err_t (*fn)(httpd_req_t *req);
+} route_t;
+
+static const route_t s_routes[] = {
+    // Static assets
+    {"/", HTTP_GET, index_get_handler},
+    {"/index.html", HTTP_GET, index_get_handler},
+    {"/upload.html", HTTP_GET, upload_get_handler},
+    {"/style.css", HTTP_GET, css_get_handler},
+    {"/app.js", HTTP_GET, js_get_handler},
+    {"/spark-md5.min.js", HTTP_GET, md5_get_handler},
+    {"/strings.js", HTTP_GET, strings_get_handler},
+    // UI API
+    {"/login", HTTP_POST, login_post_handler},
+    {"/status", HTTP_GET, status_get_handler},
+    {"/ping", HTTP_GET, status_get_handler},
+    {"/config", HTTP_GET, config_get_handler},
+    {"/config", HTTP_POST, config_post_handler},
+    {"/upload_begin", HTTP_POST, upload_begin_handler},
+    {"/upload_chunk", HTTP_POST, upload_chunk_handler},
+    {"/upload_finish", HTTP_POST, upload_finish_handler},
+    {"/upload_cancel", HTTP_POST, upload_cancel_handler},
+    {"/receiver_list", HTTP_GET, receiver_list_get_handler},
+    {"/receiver_delete", HTTP_POST, delete_post_handler},
+    {"/receiver_clear", HTTP_POST, clear_post_handler},
+    {"/receiver_format", HTTP_POST, format_post_handler},
+    {"/receivers", HTTP_GET, receivers_get_handler},
+    {"/receivers/approve", HTTP_POST, receivers_manage_handler},
+    {"/receivers/rename", HTTP_POST, receivers_manage_handler},
+    {"/receivers/unpair", HTTP_POST, receivers_manage_handler},
+    {"/receivers/add", HTTP_POST, receivers_add_handler},
+    {"/receivers/pair_file", HTTP_POST, receivers_pair_file_handler},
+    {"/pair_window/stop", HTTP_POST, pair_window_stop_handler},
+    {"/recovery", HTTP_POST, recovery_post_handler},
+    {"/debug", HTTP_GET, debug_get_handler},
+    // Receivers
+    {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler},
+    {"/rx/config", HTTP_GET, rx_config_handler},
+};
+#define NUM_ROUTES (sizeof(s_routes) / sizeof(s_routes[0]))
+
+static httpd_handle_t s_server;
+
+#if CONFIG_CNC_HTTP_REQ_LOG
+static int open_sockets(void) {
+  int fds[CONFIG_LWIP_MAX_SOCKETS];
+  size_t n = sizeof(fds) / sizeof(fds[0]);
+  return httpd_get_client_list(s_server, &n, fds) == ESP_OK ? (int)n : -1;
+}
+
+static void log_request(httpd_req_t *req, int64_t t0_us, const char *how) {
+  int64_t ms = (esp_timer_get_time() - t0_us) / 1000;
+  const char *m = http_method_str((enum http_method)req->method);
+  if (ms > SLOW_HANDLER_MS) {
+    ESP_LOGW(TAG, "SLOW %s %s %lld ms%s, %d socket(s) open", m, req->uri, (long long)ms, how,
+             open_sockets());
+  } else {
+    ESP_LOGI(TAG, "%s %s %lld ms%s, %d socket(s) open", m, req->uri, (long long)ms, how, open_sockets());
+  }
+}
+#endif
+
+static esp_err_t dispatch(httpd_req_t *req) {
+  const route_t *rt = (const route_t *)req->user_ctx;
+#if CONFIG_CNC_HTTP_REQ_LOG
+  int64_t t0 = esp_timer_get_time();
+  esp_err_t ret = rt->fn(req);
+  log_request(req, t0, "");
+  return ret;
+#else
+  return rt->fn(req);
+#endif
+}
+
 void web_server_start(void) {
   auth_init();
-  httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 32; // 31 registered
+  config.max_uri_handlers = NUM_ROUTES;
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
   config.send_wait_timeout = 30;
   config.stack_size = 8192;
 
-  if (httpd_start(&server, &config) == ESP_OK) {
-    // Static assets
-    httpd_uri_t uri_index = {
-        .uri = "/", .method = HTTP_GET, .handler = index_get_handler};
-    httpd_uri_t uri_index_html = {
-        .uri = "/index.html", .method = HTTP_GET, .handler = index_get_handler};
-    httpd_uri_t uri_upload_html = {.uri = "/upload.html",
-                                   .method = HTTP_GET,
-                                   .handler = upload_get_handler};
-    httpd_uri_t uri_css = {
-        .uri = "/style.css", .method = HTTP_GET, .handler = css_get_handler};
-    httpd_uri_t uri_js = {
-        .uri = "/app.js", .method = HTTP_GET, .handler = js_get_handler};
-    httpd_uri_t uri_md5 = {.uri = "/spark-md5.min.js",
-                           .method = HTTP_GET,
-                           .handler = md5_get_handler};
-    httpd_uri_t uri_strings = {.uri = "/strings.js", .method = HTTP_GET, .handler = strings_get_handler};
-
-    // APIs
-    httpd_uri_t uri_login = {
-        .uri = "/login", .method = HTTP_POST, .handler = login_post_handler};
-    httpd_uri_t uri_upload_begin = {
-        .uri = "/upload_begin", .method = HTTP_POST, .handler = upload_begin_handler};
-    httpd_uri_t uri_upload_chunk = {
-        .uri = "/upload_chunk", .method = HTTP_POST, .handler = upload_chunk_handler};
-    httpd_uri_t uri_upload_finish = {
-        .uri = "/upload_finish", .method = HTTP_POST, .handler = upload_finish_handler};
-    httpd_uri_t uri_status = {
-        .uri = "/status", .method = HTTP_GET, .handler = status_get_handler};
-    httpd_uri_t uri_config_get = {
-        .uri = "/config", .method = HTTP_GET, .handler = config_get_handler};
-    httpd_uri_t uri_config_post = {
-        .uri = "/config", .method = HTTP_POST, .handler = config_post_handler};
-    httpd_uri_t uri_clear = {
-        .uri = "/receiver_clear", .method = HTTP_POST, .handler = clear_post_handler};
-    httpd_uri_t uri_upload_cancel = {
-        .uri = "/upload_cancel", .method = HTTP_POST, .handler = upload_cancel_handler};
-    httpd_uri_t uri_receiver_list = {
-        .uri = "/receiver_list", .method = HTTP_GET, .handler = receiver_list_get_handler};
-    httpd_uri_t uri_ping = {
-        .uri = "/ping", .method = HTTP_GET, .handler = status_get_handler}; // Reuse status handler (returns ok)
-
-    httpd_register_uri_handler(server, &uri_index);
-    httpd_register_uri_handler(server, &uri_index_html);
-    httpd_register_uri_handler(server, &uri_upload_html);
-    httpd_register_uri_handler(server, &uri_css);
-    httpd_register_uri_handler(server, &uri_js);
-    httpd_register_uri_handler(server, &uri_md5);
-    httpd_register_uri_handler(server, &uri_strings);
-    httpd_register_uri_handler(server, &uri_login);
-    httpd_register_uri_handler(server, &uri_upload_begin);
-    httpd_register_uri_handler(server, &uri_upload_chunk);
-    httpd_register_uri_handler(server, &uri_upload_finish);
-    httpd_register_uri_handler(server, &uri_status);
-    httpd_register_uri_handler(server, &uri_config_get);
-    httpd_register_uri_handler(server, &uri_config_post);
-    httpd_register_uri_handler(server, &uri_clear);
-    httpd_uri_t uri_delete = {
-        .uri = "/receiver_delete", .method = HTTP_POST, .handler = delete_post_handler};
-    httpd_register_uri_handler(server, &uri_delete);
-    httpd_register_uri_handler(server, &uri_upload_cancel);
-    httpd_register_uri_handler(server, &uri_receiver_list);
-    httpd_register_uri_handler(server, &uri_ping);
-
-    httpd_uri_t uri_format = {
-        .uri = "/receiver_format", .method = HTTP_POST, .handler = format_post_handler};
-    httpd_register_uri_handler(server, &uri_format);
-
-    httpd_uri_t uri_debug = {
-        .uri = "/debug", .method = HTTP_GET, .handler = debug_get_handler};
-    httpd_register_uri_handler(server, &uri_debug);
-
-    // Receivers
-    httpd_uri_t uri_rx_hb = {
-        .uri = "/rx/heartbeat", .method = HTTP_POST, .handler = rx_heartbeat_handler};
-    httpd_uri_t uri_rx_cfg = {
-        .uri = "/rx/config", .method = HTTP_GET, .handler = rx_config_handler};
-    httpd_uri_t uri_receivers = {
-        .uri = "/receivers", .method = HTTP_GET, .handler = receivers_get_handler};
-    httpd_uri_t uri_rx_approve = {
-        .uri = "/receivers/approve", .method = HTTP_POST, .handler = receivers_manage_handler};
-    httpd_uri_t uri_rx_rename = {
-        .uri = "/receivers/rename", .method = HTTP_POST, .handler = receivers_manage_handler};
-    httpd_uri_t uri_rx_unpair = {
-        .uri = "/receivers/unpair", .method = HTTP_POST, .handler = receivers_manage_handler};
-    httpd_register_uri_handler(server, &uri_rx_hb);
-    httpd_register_uri_handler(server, &uri_rx_cfg);
-    httpd_register_uri_handler(server, &uri_receivers);
-    httpd_register_uri_handler(server, &uri_rx_approve);
-    httpd_register_uri_handler(server, &uri_rx_rename);
-    httpd_register_uri_handler(server, &uri_rx_unpair);
-    httpd_uri_t uri_rx_add = {
-        .uri = "/receivers/add", .method = HTTP_POST, .handler = receivers_add_handler};
-    httpd_register_uri_handler(server, &uri_rx_add);
-    httpd_uri_t uri_pair_stop = {
-        .uri = "/pair_window/stop", .method = HTTP_POST, .handler = pair_window_stop_handler};
-    httpd_register_uri_handler(server, &uri_pair_stop);
-    httpd_uri_t uri_rx_pair_file = {
-        .uri = "/receivers/pair_file", .method = HTTP_POST, .handler = receivers_pair_file_handler};
-    httpd_register_uri_handler(server, &uri_rx_pair_file);
-    httpd_uri_t uri_recovery = {
-        .uri = "/recovery", .method = HTTP_POST, .handler = recovery_post_handler};
-    httpd_register_uri_handler(server, &uri_recovery);
-
-    ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
-  } else {
+  if (httpd_start(&s_server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Error starting Web server.");
+    return;
   }
+  for (size_t i = 0; i < NUM_ROUTES; i++) {
+    httpd_uri_t u = {.uri = s_routes[i].uri, .method = s_routes[i].method, .handler = dispatch,
+                     .user_ctx = (void *)&s_routes[i]};
+    if (httpd_register_uri_handler(s_server, &u) != ESP_OK) {
+      ESP_LOGE(TAG, "Could not register %s", s_routes[i].uri);
+    }
+  }
+  ESP_LOGI(TAG, "Web server started on port %d (%u routes)", config.server_port, (unsigned)NUM_ROUTES);
 }
