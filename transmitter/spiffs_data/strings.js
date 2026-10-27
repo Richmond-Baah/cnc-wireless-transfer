@@ -183,6 +183,7 @@ window.STRINGS = {
     'add.searching': 'Looking for new receivers… closes in {time}',
     'add.stop': 'Stop',
     'add.stopped': 'Not looking right now.',
+    'add.stopFailed': 'Couldn\'t stop looking: {why}',
     'add.again': 'Look again',
     'add.failed': 'Couldn\'t start looking: {why}',
     'add.help': 'Power on the new receiver near this transmitter. It shows up here within a few seconds.',

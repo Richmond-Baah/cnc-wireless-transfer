@@ -929,6 +929,18 @@ static esp_err_t receivers_add_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// POST /pair_window/stop: closes the "Add machine" window immediately.
+static esp_err_t pair_window_stop_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  espnow_pair_close_window();
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+  return ESP_OK;
+}
+
 // POST /receivers/pair_file {"name":"...","now":<browser epoch s>} -> pair.cfg
 // (contains the AP password and a new key, pre-registered for 24 h).
 static esp_err_t receivers_pair_file_handler(httpd_req_t *req) {
@@ -1037,7 +1049,7 @@ void web_server_start(void) {
   auth_init();
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 32; // 30 registered
+  config.max_uri_handlers = 32; // 31 registered
   config.max_open_sockets = 7;
   config.lru_purge_enable = true; // reclaim stale keep-alive sockets so asset GETs are never refused
   config.recv_wait_timeout = 30; // large uploads
@@ -1138,6 +1150,9 @@ void web_server_start(void) {
     httpd_uri_t uri_rx_add = {
         .uri = "/receivers/add", .method = HTTP_POST, .handler = receivers_add_handler};
     httpd_register_uri_handler(server, &uri_rx_add);
+    httpd_uri_t uri_pair_stop = {
+        .uri = "/pair_window/stop", .method = HTTP_POST, .handler = pair_window_stop_handler};
+    httpd_register_uri_handler(server, &uri_pair_stop);
     httpd_uri_t uri_rx_pair_file = {
         .uri = "/receivers/pair_file", .method = HTTP_POST, .handler = receivers_pair_file_handler};
     httpd_register_uri_handler(server, &uri_rx_pair_file);

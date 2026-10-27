@@ -255,7 +255,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const ignored = new Set();      // hidden for this page view (there is no reject endpoint)
     let addWindowEnd = 0;           // when the transmitter stops listening (ms)
     let addTimer = null;
-    let addStoppedByUser = false;   // Stop only stops showing the search; nothing pairs without Approve
     let addLastFocus = null;
     let foundKey = '';
     const visiblePending = () => pending.filter(p => !ignored.has(p.id));
@@ -306,7 +305,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     async function startAddWindow() {
-        addStoppedByUser = false;
         $('addStop').disabled = true;
         try {
             const res = await fetch('/receivers/add', { method: 'POST', headers: authHeaders() });
@@ -322,14 +320,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     function setAddWindow(seconds) {
         if (seconds > 0) addWindowEnd = Date.now() + seconds * 1000;
-        else if (addWindowEnd && Date.now() < addWindowEnd - 5000) addWindowEnd = 0; // closed early (restart)
+        else if (addWindowEnd && Date.now() < addWindowEnd - 5000) addWindowEnd = 0; // closed early (Stop, restart)
         if (!addTimer && addWindowEnd > Date.now()) addTimer = setInterval(renderAddSearch, 1000);
         renderAddSearch();
     }
     function renderAddSearch() {
         const left = Math.max(0, Math.round((addWindowEnd - Date.now()) / 1000));
         if (!left && addTimer) { clearInterval(addTimer); addTimer = null; }
-        const on = left > 0 && !addStoppedByUser;
+        const on = left > 0;
         $('addSearch').classList.toggle('on', on);
         $('addSearchText').textContent = on
             ? t('add.searching', { time: Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') })
@@ -344,13 +342,21 @@ document.addEventListener('DOMContentLoaded', () => {
         full.textContent = t('add.full', { n: receivers.length });
     }
     $('addStop').addEventListener('click', () => {
-        if ($('addStop').dataset.act === 'stop') {
-            addStoppedByUser = true;
-            renderAddSearch();
-        } else {
-            startAddWindow();
-        }
+        if ($('addStop').dataset.act === 'stop') stopAddWindow();
+        else startAddWindow();
     });
+    // Closes the transmitter's listening window now
+    async function stopAddWindow() {
+        $('addStop').disabled = true;
+        try {
+            const res = await fetch('/pair_window/stop', { method: 'POST', headers: authHeaders() });
+            if (res.ok) addWindowEnd = 0;
+            else addStatus(t('add.stopFailed', { why: await errorText(res) }), 'err');
+        } catch (e) {
+            addStatus(t('add.stopFailed', { why: t('msg.fail.network') }), 'err');
+        }
+        renderAddSearch();
+    }
 
     function renderFound(force) {
         const box = $('addFound');

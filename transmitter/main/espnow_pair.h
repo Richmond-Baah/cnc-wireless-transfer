@@ -13,6 +13,8 @@
 
 esp_err_t espnow_pair_open_window(int seconds);
 int espnow_pair_seconds_left(void); // 0 when closed
+// Closes the window now (ESP-NOW off, pending PAIR_CFG deliveries dropped).
+void espnow_pair_close_window(void);
 
 // Seals PAIR_CFG for rx_id, sends it now and again on each PAIR_REQ from that
 // receiver until the window closes (it may be on another channel right now).

@@ -141,6 +141,13 @@ esp_err_t espnow_pair_open_window(int seconds) {
   return ESP_OK;
 }
 
+void espnow_pair_close_window(void) {
+  if (s_lock == NULL) return; // never opened
+  lock();
+  close_locked();
+  unlock();
+}
+
 int espnow_pair_seconds_left(void) {
   int64_t end = s_window_end_us;
   int64_t left = end ? (end - esp_timer_get_time()) / 1000000 : 0;
