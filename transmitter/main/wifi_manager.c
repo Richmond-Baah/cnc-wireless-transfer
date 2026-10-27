@@ -252,7 +252,10 @@ void wifi_init(void) {
   err = nvs_open("wifi_cfg", NVS_READWRITE, &nvs_handle);
   if (err == ESP_OK) {
     int32_t version = 0;
-    if (nvs_get_i32(nvs_handle, "cfg_version", &version) != ESP_OK || version != 1) {
+    // No cfg_version: first boot ever. Otherwise an earlier firmware already ran
+    // this unit's AP (on the factory SSID if it never saved one).
+    bool first_boot = nvs_get_i32(nvs_handle, "cfg_version", &version) != ESP_OK;
+    if (first_boot || version != 1) {
         ESP_LOGW(TAG, "NVS version mismatch (or missing). Wiping wifi_cfg for a clean slate!");
         nvs_erase_all(nvs_handle);
         nvs_commit(nvs_handle);
@@ -268,15 +271,25 @@ void wifi_init(void) {
     if (nvs_get_str(nvs_handle, "wifi_mode", wifi_mode, &len) != ESP_OK) {
       strcpy(wifi_mode, "AP");
     }
+    // AP SSID/password are pinned in NVS the first time they are needed, so a
+    // later firmware with other defaults never renames a unit already set up.
     size_t ssid_len = sizeof(ap_ssid);
     if (nvs_get_str(nvs_handle, "ap_ssid", ap_ssid, &ssid_len) != ESP_OK || strlen(ap_ssid) == 0) {
-      wifi_default_ap_ssid(ap_ssid, sizeof(ap_ssid));
-      ESP_LOGW(TAG, "NVS ap_ssid empty, using default");
+      if (first_boot) {
+        wifi_default_ap_ssid(ap_ssid, sizeof(ap_ssid));
+      } else {
+        strlcpy(ap_ssid, DEFAULT_AP_SSID, sizeof(ap_ssid)); // what earlier firmware broadcast
+      }
+      nvs_set_str(nvs_handle, "ap_ssid", ap_ssid);
+      ESP_LOGW(TAG, "NVS ap_ssid empty: saved %s", ap_ssid);
     }
     size_t pass_len = sizeof(ap_pass);
     if (nvs_get_str(nvs_handle, "ap_pass", ap_pass, &pass_len) != ESP_OK) {
       strcpy(ap_pass, DEFAULT_AP_PASS);
+      nvs_set_str(nvs_handle, "ap_pass", ap_pass);
+      ESP_LOGW(TAG, "NVS ap_pass empty: saved default");
     }
+    nvs_commit(nvs_handle);
     if (strlen(ap_pass) < 8 && strlen(ap_pass) > 0) {
         strcpy(ap_pass, DEFAULT_AP_PASS);
     }
@@ -290,7 +303,7 @@ void wifi_init(void) {
   // Sanitize old "CNC WIRELESS" to "CNC_WIRELESS"
   if (strcmp(ap_ssid, "CNC WIRELESS") == 0) {
       ESP_LOGW(TAG, "Sanitizing old SSID format in AP config");
-      wifi_default_ap_ssid(ap_ssid, sizeof(ap_ssid));
+      strlcpy(ap_ssid, DEFAULT_AP_SSID, sizeof(ap_ssid));
   }
   
   ESP_LOGI(TAG, "Final AP Config: SSID=[%s], Pass=[%s]", ap_ssid, ap_pass);
