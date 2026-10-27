@@ -42,3 +42,4 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 ## Working rules
 - Minimal changes. Cite file:line. Build both boards, commit. Short replies.
 - Nothing is hardware-tested unless the user says so.
+- Updates must never change AP SSID on units already set up.
