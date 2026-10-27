@@ -4,7 +4,8 @@
 #include <stddef.h>
 #include "esp_err.h"
 
-#define MDNS_HOSTNAME "cnc-transfer" // http://cnc-transfer.local
+#define MDNS_HOSTNAME "filexfer"   // http://filexfer.local
+#define MDNS_ALIAS "cnc-transfer"  // old name, still answered
 
 void wifi_init(void);
 
@@ -17,6 +18,9 @@ void wifi_get_sta_status(char *state, size_t state_len, char *reason,
 // to the saved ones (clients on the AP are disconnected both times).
 esp_err_t wifi_recovery_start(int seconds);
 int wifi_recovery_seconds_left(void); // 0 when not active
+
+// Out-of-box AP SSID: "FILEXFER-" + last 4 hex digits of the AP MAC.
+void wifi_default_ap_ssid(char *ssid, size_t len);
 
 // Saved AP SSID/password (not the recovery ones), for pairing new receivers.
 void wifi_get_ap_creds(char *ssid, size_t ssid_len, char *pass, size_t pass_len);

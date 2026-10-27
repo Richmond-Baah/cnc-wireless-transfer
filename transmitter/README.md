@@ -1,4 +1,4 @@
-# CNC Wireless Transfer System - Transmitter
+# FileXfer - Transmitter
 
 ESP32-S3 firmware that hosts a secure web interface for uploading G-code files and wirelessly transfers them to the Receiver unit.
 
@@ -22,7 +22,7 @@ ESP32-S3 firmware that hosts a secure web interface for uploading G-code files a
 
 | Setting       | Default Value   |
 |---------------|-----------------|
-| Wi-Fi SSID    | `CNC_WIRELESS`  |
+| Wi-Fi SSID    | `FILEXFER-XXXX` (last 4 hex digits of the MAC) |
 | Wi-Fi Password| `cnc12345`      |
 | Web Username  | `admin`         |
 | Web Password  | `admin123`      |
@@ -40,7 +40,7 @@ All credentials can be changed from the **Settings** panel in the web UI after l
 
 **Step 2: Connect to the Transmitter Wi-Fi**
 * Once powered, the ESP32-S3 broadcasts a Wi-Fi Access Point (SoftAP).
-* On your PC or phone, connect to the Wi-Fi network: **`CNC_WIRELESS`**
+* On your PC or phone, connect to the Wi-Fi network: **`FILEXFER-XXXX`**
 * Enter the default password: **`cnc12345`**
 
 **Step 3: Access the Web Interface**

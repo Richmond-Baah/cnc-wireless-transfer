@@ -1,9 +1,9 @@
 // All UI text, key -> English. Translate by replacing the values; {name}-style
 // placeholders are filled by t(key, {name: ...}).
 window.STRINGS = {
-    'app.name': 'CNC Wireless Transfer',
-    'app.title.login': 'Log in',
-    'app.title.main': 'Machines',
+    'app.name': 'FileXfer',
+    'app.title.login': 'Log in · FileXfer',
+    'app.title.main': 'Machines · FileXfer',
 
     // Header
     'hdr.network': 'Network {ssid} · {n} of {max} devices',
@@ -213,7 +213,7 @@ window.STRINGS = {
     'add.fileFailed': 'Couldn\'t create the pairing file: {why}',
 
     // Settings page
-    'set.title': 'Settings',
+    'set.title': 'Settings · FileXfer',
     'set.back': 'Machines',
     'set.nav.network': 'Network',
     'set.nav.machines': 'Machines',
@@ -222,7 +222,7 @@ window.STRINGS = {
     'set.nav.system': 'System',
     'set.save': 'Save and restart',
     'set.saved': 'Saved. The transmitter is restarting; log in again in a moment.',
-    'set.savedRouter': 'Saved. The transmitter is restarting. On your router network open http://cnc-transfer.local or http://{ip}.',
+    'set.savedRouter': 'Saved. The transmitter is restarting. On your router network open http://filexfer.local or http://{ip}.',
     'set.saveFailed': 'Not saved: {why}',
     'set.netError': 'Network error. Nothing was saved.',
     'set.loadFailed': 'Couldn\'t load the current settings ({why}).',
@@ -235,7 +235,7 @@ window.STRINGS = {
     'net.router.yesHint': 'Reach the transmitter from your office network too.',
     'net.routerName': 'Router network name',
     'net.routerPass': 'Router password',
-    'net.sta.connected': 'Connected. Open http://cnc-transfer.local or http://{ip} on the router network.',
+    'net.sta.connected': 'Connected. Open http://filexfer.local or http://{ip} on the router network.',
     'net.sta.connecting': 'Connecting to the router…',
     'net.sta.failed': 'Can\'t join the router: {why}. The transmitter\'s own network stays on.',
     'net.own': 'Transmitter network',

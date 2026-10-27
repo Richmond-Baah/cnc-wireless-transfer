@@ -1,4 +1,4 @@
-/* CNC Wireless Transfer UI. Tokens: light on :root, dark under
+/* FileXfer UI. Tokens: light on :root, dark under
    [data-theme=dark] and (theme=system + prefers dark). */
 :root {
     color-scheme: light;

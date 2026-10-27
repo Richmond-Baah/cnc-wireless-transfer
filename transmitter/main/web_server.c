@@ -463,7 +463,7 @@ static const struct {
 static void config_load(sys_config_t *cfg) {
   memset(cfg, 0, sizeof(*cfg));
   strlcpy(cfg->wifi_mode, "AP", sizeof(cfg->wifi_mode));
-  strlcpy(cfg->ap_ssid, CONFIG_CNC_DEFAULT_WIFI_SSID, sizeof(cfg->ap_ssid));
+  wifi_default_ap_ssid(cfg->ap_ssid, sizeof(cfg->ap_ssid));
   strlcpy(cfg->ap_pass, CONFIG_CNC_DEFAULT_WIFI_PASSWORD, sizeof(cfg->ap_pass));
   strlcpy(cfg->auth_user, CONFIG_CNC_DEFAULT_WEB_USER, sizeof(cfg->auth_user));
   strlcpy(cfg->auth_pass, CONFIG_CNC_DEFAULT_WEB_PASS, sizeof(cfg->auth_pass));

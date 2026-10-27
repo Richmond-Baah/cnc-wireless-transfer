@@ -1,4 +1,4 @@
-# CNC Wireless Transfer System - Receiver
+# FileXfer - Receiver
 
 ESP32-S3 firmware that receives G-code files wirelessly, stores them on an SD card via SPI, and exposes the card as a USB Mass Storage device to the CNC machine.
 

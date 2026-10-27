@@ -1069,7 +1069,7 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
              "<meta name='viewport' content='width=device-width,initial-scale=1'>"
              "<style>body{font-family:Arial;margin:24px;background:#1a1a2e;color:#fff}"
              "h1{color:#e94560;font-size:1.4em}td{padding:6px 12px 6px 0}</style></head><body>"
-             "<h1>CNC Wireless Receiver</h1><table>"
+             "<h1>FileXfer Receiver</h1><table>"
              "<tr><td>ID</td><td>%s</td></tr><tr><td>Name</td><td>%s</td></tr>"
              "<tr><td>Paired</td><td>%s</td></tr><tr><td>State</td><td>%s</td></tr>"
              "<tr><td>Storage</td><td>%s, %.1f MB free of %.1f MB</td></tr>"

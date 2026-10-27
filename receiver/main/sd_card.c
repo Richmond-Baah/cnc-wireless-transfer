@@ -330,14 +330,23 @@ esp_err_t sd_card_remount(void) {
 #define FORMAT_CLUSTER 4096
 #define FAT32_MIN_BYTES (65526ULL * FORMAT_CLUSTER + 8ULL * 1024 * 1024)
 
-// Logs what f_mkfs actually wrote (mounts the fresh volume briefly)
-static void log_formatted_volume(const char *drv) {
+#define VOLUME_LABEL "FILEXFER"
+
+// Labels the fresh volume and logs what f_mkfs wrote (mounts it briefly)
+static void label_formatted_volume(const char *drv) {
     FATFS *fs = calloc(1, sizeof(FATFS));
     if (!fs) return;
     if (f_mount(fs, drv, 1) == FR_OK) {
+        char label[16];
+        snprintf(label, sizeof(label), "%s" VOLUME_LABEL, drv);
+        FRESULT lres = f_setlabel(label);
+        if (lres != FR_OK) {
+            ESP_LOGW(TAG, "f_setlabel failed: %d", (int)lres);
+        }
         static const char *const types[] = {"?", "FAT12", "FAT16", "FAT32", "exFAT"};
-        ESP_LOGI(TAG, "Formatted: %s, MBR, %u-byte clusters, %lu clusters", types[fs->fs_type <= 4 ? fs->fs_type : 0],
-                 (unsigned)(fs->csize * FF_MIN_SS), (unsigned long)(fs->n_fatent - 2));
+        ESP_LOGI(TAG, "Formatted: %s, MBR, %u-byte clusters, %lu clusters, label %s",
+                 types[fs->fs_type <= 4 ? fs->fs_type : 0], (unsigned)(fs->csize * FF_MIN_SS),
+                 (unsigned long)(fs->n_fatent - 2), lres == FR_OK ? VOLUME_LABEL : "(none)");
         f_mount(NULL, drv, 0);
     } else {
         ESP_LOGW(TAG, "Formatted volume could not be mounted to verify");
@@ -389,7 +398,7 @@ static esp_err_t sd_card_format_fatfs_locked(void) {
         ESP_LOGE(TAG, "f_mkfs failed: %d", (int)fres);
         ret = ESP_FAIL;
     } else {
-        log_formatted_volume(drv);
+        label_formatted_volume(drv);
     }
 
     ff_diskio_unregister(pdrv);

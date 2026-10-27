@@ -21,10 +21,20 @@
 #endif
 
 #define DEFAULT_WIFI_MODE "AP"
+// Factory SSID: recovery mode and unpaired receivers' fallback (shared by all
+// units). The out-of-box AP name is per unit: wifi_default_ap_ssid().
 #define DEFAULT_AP_SSID CONFIG_CNC_DEFAULT_WIFI_SSID
 #define DEFAULT_AP_PASS CONFIG_CNC_DEFAULT_WIFI_PASSWORD
 
+void wifi_default_ap_ssid(char *ssid, size_t len) {
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+  snprintf(ssid, len, "FILEXFER-%02X%02X", mac[4], mac[5]);
+}
+
 static const char *TAG = "WIFI_MGR";
+
+static void mdns_alias_set(const esp_ip4_addr_t *sta_ip);
 
 // STA (router) link state for /status. Written by the event task, read by httpd.
 #define STA_MAX_RETRIES 5   // fast retries, then slow down so scans don't disturb the AP
@@ -139,6 +149,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, " STA connected to router. STA IP: %s", ip);
     ESP_LOGI(TAG, " Open http://%s or http://" MDNS_HOSTNAME ".local", ip);
     ESP_LOGI(TAG, "==================================================");
+    mdns_alias_set(&event->ip_info.ip);
   }
 }
 
@@ -183,6 +194,21 @@ void wifi_get_ap_creds(char *ssid, size_t ssid_len, char *pass, size_t pass_len)
   strlcpy(pass, tmp_pass, pass_len);
 }
 
+// MDNS_ALIAS answers with the AP address, plus the router address once known
+static void mdns_alias_set(const esp_ip4_addr_t *sta_ip) {
+  mdns_ip_addr_t sta = {.addr = {.type = ESP_IPADDR_TYPE_V4}, .next = NULL};
+  mdns_ip_addr_t ap = {.addr = ESP_IP4ADDR_INIT(192, 168, 4, 1), .next = NULL};
+  if (sta_ip) {
+    sta.addr.u_addr.ip4 = *sta_ip;
+    ap.next = &sta;
+  }
+  esp_err_t err = sta_ip ? mdns_delegate_hostname_set_address(MDNS_ALIAS, &ap)
+                         : mdns_delegate_hostname_add(MDNS_ALIAS, &ap);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "mDNS alias " MDNS_ALIAS ": %s", esp_err_to_name(err));
+  }
+}
+
 static void mdns_start(void) {
   esp_err_t err = mdns_init();
   if (err != ESP_OK) {
@@ -190,9 +216,10 @@ static void mdns_start(void) {
     return;
   }
   mdns_hostname_set(MDNS_HOSTNAME);
-  mdns_instance_name_set("CNC Wireless Transfer");
+  mdns_instance_name_set("FileXfer");
   mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-  ESP_LOGI(TAG, "mDNS: http://" MDNS_HOSTNAME ".local");
+  mdns_alias_set(NULL);
+  ESP_LOGI(TAG, "mDNS: http://" MDNS_HOSTNAME ".local (also " MDNS_ALIAS ".local)");
 }
 
 void wifi_init(void) {
@@ -215,7 +242,8 @@ void wifi_init(void) {
   ESP_LOGI(TAG, "event loop OK");
 
   char wifi_mode[8] = "AP";
-  char ap_ssid[32] = DEFAULT_AP_SSID;
+  char ap_ssid[32];
+  wifi_default_ap_ssid(ap_ssid, sizeof(ap_ssid));
   char ap_pass[64] = DEFAULT_AP_PASS;
   char sta_ssid[32] = "";
   char sta_pass[64] = "";
@@ -242,7 +270,7 @@ void wifi_init(void) {
     }
     size_t ssid_len = sizeof(ap_ssid);
     if (nvs_get_str(nvs_handle, "ap_ssid", ap_ssid, &ssid_len) != ESP_OK || strlen(ap_ssid) == 0) {
-      strcpy(ap_ssid, DEFAULT_AP_SSID);
+      wifi_default_ap_ssid(ap_ssid, sizeof(ap_ssid));
       ESP_LOGW(TAG, "NVS ap_ssid empty, using default");
     }
     size_t pass_len = sizeof(ap_pass);
@@ -262,7 +290,7 @@ void wifi_init(void) {
   // Sanitize old "CNC WIRELESS" to "CNC_WIRELESS"
   if (strcmp(ap_ssid, "CNC WIRELESS") == 0) {
       ESP_LOGW(TAG, "Sanitizing old SSID format in AP config");
-      strcpy(ap_ssid, DEFAULT_AP_SSID);
+      wifi_default_ap_ssid(ap_ssid, sizeof(ap_ssid));
   }
   
   ESP_LOGI(TAG, "Final AP Config: SSID=[%s], Pass=[%s]", ap_ssid, ap_pass);

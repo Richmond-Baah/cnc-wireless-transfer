@@ -28,7 +28,7 @@ void mdns_responder_init(void) {
     char hostname[32];
     snprintf(hostname, sizeof(hostname), "%s-%s", CONFIG_CNC_MDNS_HOSTNAME, pairing_get_id());
     mdns_hostname_set(hostname);
-    mdns_instance_name_set("CNC Wireless Receiver");
+    mdns_instance_name_set("FileXfer Receiver");
 
     mdns_txt_item_t txt_records[] = {
         { "role",   "receiver" },

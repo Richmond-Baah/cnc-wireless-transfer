@@ -1,5 +1,5 @@
-# CNC Wireless Transfer (commercial product)
-ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "CNC_WIRELESS" 192.168.4.1, web UI + auth, forwards uploads. Receiver: Wi-Fi client (DHCP), USB mass-storage drive for CNC/laser/printer, SD over SPI (fallback: internal flash).
+# FileXfer (FILEXFER; formerly CNC Wireless Transfer, commercial product)
+ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFER-<last 4 MAC hex>" 192.168.4.1 (factory/recovery SSID "CNC_WIRELESS"), http://filexfer.local (alias cnc-transfer.local), web UI + auth, forwards uploads. Receiver: Wi-Fi client (DHCP), USB mass-storage drive for CNC/laser/printer, SD over SPI (fallback: internal flash).
 - Receiver ID "rx-"+last 3 MAC bytes; heartbeat POST <gateway>/rx/heartbeat every 10 s (receiver/main/pairing.c).
 - Transmitter rx_registry: paired list (id, name, key) in NVS, pending list in RAM, online = heartbeat < 30 s.
 - UI selects a machine; every receiver proxy takes X-Rx-Id (or ?rx=) and sends that receiver's X-Auth-Key.

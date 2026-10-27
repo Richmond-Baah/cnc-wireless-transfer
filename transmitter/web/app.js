@@ -1,4 +1,4 @@
-// CNC Wireless Transfer - Client Application Logic
+// FileXfer - Client Application Logic
 document.addEventListener('DOMContentLoaded', () => {
     applyStrings();
 

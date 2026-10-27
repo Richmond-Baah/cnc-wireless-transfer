@@ -90,7 +90,7 @@ static uint8_t const config_desc[] = {
 static char const *string_desc[] = {
     (char[]){0x09, 0x04},
     "SanDisk",            // Manufacturer
-    "Ultra USB 3.0",      // Product
+    "FileXfer",           // Product
     "SAN1234567890ABC",   // Serial
     "MSC Interface",
 };
@@ -98,7 +98,7 @@ static char const *string_desc[] = {
 void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16], uint8_t product_rev[4]) {
     (void)lun;
     memcpy(vendor_id, "SanDisk ", 8);
-    memcpy(product_id, "Ultra USB 3.0   ", 16);
+    memcpy(product_id, "FileXfer        ", 16);
     memcpy(product_rev, "1.00", 4);
     ESP_LOGD(TAG, "SCSI Inquiry: LUN=%u", lun);
 }
