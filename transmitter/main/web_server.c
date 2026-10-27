@@ -821,7 +821,10 @@ static esp_err_t rx_heartbeat_handler(httpd_req_t *req) {
   snprintf(resp, sizeof(resp), "{\"paired\":%s,\"config_version\":%lu}", paired ? "true" : "false",
            paired ? (unsigned long)rx_registry_config_version() : 0UL);
   httpd_resp_set_type(req, "application/json; charset=utf-8");
+  // Free the socket at once: up to 16 receivers must not hold browser slots
+  httpd_resp_set_hdr(req, "Connection", "close");
   httpd_resp_sendstr(req, resp);
+  httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
   return ESP_OK;
 }
 
