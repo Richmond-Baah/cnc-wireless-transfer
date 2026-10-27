@@ -28,19 +28,18 @@
             </div>
         </div>
     </header>
-    <main class="page">
-        <!-- Receivers that announced themselves but are not paired yet (stage D: Add machine dialog) -->
-        <div id="newDeviceBanner" class="card new-device-banner" style="display: none;"></div>
-
+    <main class="page" id="dashView">
         <div class="dash">
             <section class="dash-left" aria-labelledby="mcHeading">
                 <h2 id="mcHeading" class="section-title" data-t="mc.heading"></h2>
+                <div id="foundNotice" class="found" hidden>
+                    <span id="foundText"></span>
+                    <button type="button" id="foundReview" class="btn btn-primary" data-t="mc.review"></button>
+                </div>
                 <div id="machineList" class="machine-list"></div>
                 <button type="button" id="addMachineBtn" class="btn btn-dashed">
                     <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span data-t="mc.add"></span>
                 </button>
-                <p id="addMachineInfo" class="muted small" hidden></p>
-                <button type="button" id="pairFileBtn" class="btn btn-ghost">Download pairing file</button>
             </section>
 
             <div class="dash-right">
@@ -113,71 +112,153 @@
             </div>
         </div>
 
-        <!-- Settings Modal -->
-        <div id="settingsModal" class="modal">
-            <div class="modal-content card">
-                <h3>System Settings</h3>
-                <form id="settingsForm">
-                    <h4>Wi-Fi Settings</h4>
-                    <div class="form-group">
-                        <label>Mode</label>
-                        <select id="wifiMode" name="wifi_mode">
-                            <option value="AP">Access Point (SoftAP)</option>
-                            <option value="STA">Station (Client)</option>
-                        </select>
-                    </div>
+    </main>
 
-                    <h5>Access Point (AP) Settings</h5>
-                    <div class="form-group">
-                        <label>AP SSID</label>
-                        <input type="text" id="apSsid" name="ap_ssid">
-                    </div>
-                    <div class="form-group">
-                        <label>AP Password</label>
-                        <input type="password" id="apPass" name="ap_pass" placeholder="Leave blank to keep unchanged">
-                    </div>
+    <!-- Settings page -->
+    <main class="page" id="settingsView" hidden>
+        <a href="#" class="back-link"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg><span data-t="set.back"></span></a>
+        <h1 class="page-title" data-t="set.title"></h1>
+        <div class="settings">
+            <nav class="set-nav" aria-labelledby="setNavLabel">
+                <span id="setNavLabel" class="visually-hidden" data-t="set.title"></span>
+                <a href="#settings/network" data-sec="network" data-t="set.nav.network"></a>
+                <a href="#settings/machines" data-sec="machines" data-t="set.nav.machines"></a>
+                <a href="#settings/login" data-sec="login" data-t="set.nav.login"></a>
+                <a href="#settings/appearance" data-sec="appearance" data-t="set.nav.appearance"></a>
+                <a href="#settings/system" data-sec="system" data-t="set.nav.system"></a>
+            </nav>
+            <div class="set-panels">
+                <section class="card set-panel" data-panel="network" aria-labelledby="hNet">
+                    <h2 id="hNet" data-t="set.nav.network"></h2>
+                    <form id="netForm" novalidate>
+                        <fieldset class="field">
+                            <legend class="label" data-t="net.router"></legend>
+                            <label class="radio-card"><input type="radio" name="wifi_mode" value="AP">
+                                <span><b data-t="net.router.no"></b><span class="muted small" data-t="net.router.noHint"></span></span></label>
+                            <label class="radio-card"><input type="radio" name="wifi_mode" value="STA">
+                                <span><b data-t="net.router.yes"></b><span class="muted small" data-t="net.router.yesHint"></span></span></label>
+                        </fieldset>
+                        <div id="routerFields">
+                            <div class="field">
+                                <label for="staSsid" data-t="net.routerName"></label>
+                                <input type="text" id="staSsid" name="sta_ssid" maxlength="31" autocomplete="off">
+                            </div>
+                            <div class="field">
+                                <label for="staPass" data-t="net.routerPass"></label>
+                                <input type="password" id="staPass" name="sta_pass" maxlength="63" autocomplete="new-password" data-t-ph="set.keep">
+                            </div>
+                            <p id="staStatus" class="status-line small" hidden></p>
+                        </div>
+                        <h3 class="sub-title" data-t="net.own"></h3>
+                        <div class="field">
+                            <label for="apSsid" data-t="net.ownName"></label>
+                            <input type="text" id="apSsid" name="ap_ssid" maxlength="31" autocomplete="off">
+                        </div>
+                        <div class="field">
+                            <label for="apPass" data-t="net.ownPass"></label>
+                            <input type="password" id="apPass" name="ap_pass" maxlength="63" autocomplete="new-password" aria-describedby="apPassHint">
+                            <p class="hint" id="apPassHint" data-t="net.ownPassHint"></p>
+                        </div>
+                        <div id="offlineWarn" class="warn" hidden></div>
+                        <button type="submit" class="btn btn-primary" data-t="set.save"></button>
+                        <p class="form-status small" hidden></p>
+                    </form>
+                </section>
 
-                    <h5>Station (STA) Settings</h5>
-                    <div class="form-group">
-                        <label>STA SSID</label>
-                        <input type="text" id="staSsid" name="sta_ssid">
-                    </div>
-                    <div class="form-group">
-                        <label>STA Password</label>
-                        <input type="password" id="staPass" name="sta_pass" placeholder="Leave blank to keep unchanged">
-                    </div>
+                <section class="card set-panel" data-panel="machines" aria-labelledby="hMac" hidden>
+                    <h2 id="hMac" data-t="set.nav.machines"></h2>
+                    <p id="macStatus" class="form-status small" hidden></p>
+                    <div id="macTable"></div>
+                </section>
 
-                    <hr>
-                    <h4>Receivers</h4>
-                    <div id="receiverSettingsList" class="receiver-settings-list">
-                        <p class="text-muted">No receivers paired.</p>
-                    </div>
+                <section class="card set-panel" data-panel="login" aria-labelledby="hLogin" hidden>
+                    <h2 id="hLogin" data-t="set.nav.login"></h2>
+                    <form id="loginSetForm" novalidate>
+                        <h3 class="sub-title" data-t="login.section"></h3>
+                        <div class="field">
+                            <label for="authUser" data-t="login.user"></label>
+                            <input type="text" id="authUser" name="auth_user" maxlength="31" autocomplete="username" autocapitalize="none">
+                        </div>
+                        <div class="field">
+                            <label for="authPass" data-t="login.newPass"></label>
+                            <input type="password" id="authPass" name="auth_pass" maxlength="63" autocomplete="new-password" data-t-ph="set.keep">
+                        </div>
+                        <button type="submit" class="btn btn-primary" data-t="set.save"></button>
+                        <p class="form-status small" hidden></p>
+                    </form>
+                </section>
 
-                    <button type="button" id="recoveryBtn" class="btn btn-secondary btn-sm">Recovery mode (5 min)</button>
-                    <p class="text-muted" style="font-size: 0.85rem;">Use if a receiver missed a Wi-Fi name/password change.</p>
+                <section class="card set-panel" data-panel="appearance" aria-labelledby="hApp" hidden>
+                    <h2 id="hApp" data-t="set.nav.appearance"></h2>
+                    <h3 class="sub-title" data-t="app.section"></h3>
+                    <div class="theme-cards">
+                        <button type="button" class="theme-card" data-theme-choice="system">
+                            <span class="tc-preview tc-split" aria-hidden="true"><span class="tc-l"><i></i><i></i></span><span class="tc-d"><i></i><i></i></span></span>
+                            <b data-t="app.system"></b><span class="muted small" data-t="app.systemHint"></span>
+                        </button>
+                        <button type="button" class="theme-card" data-theme-choice="light">
+                            <span class="tc-preview tc-l" aria-hidden="true"><i></i><i></i></span><b data-t="app.light"></b>
+                        </button>
+                        <button type="button" class="theme-card" data-theme-choice="dark">
+                            <span class="tc-preview tc-d" aria-hidden="true"><i></i><i></i></span><b data-t="app.dark"></b>
+                        </button>
+                    </div>
+                </section>
 
-                    <hr>
-                    <h4>System Settings</h4>
-
-                    <h5>Web Authentication</h5>
-                    <div class="form-group">
-                        <label>Admin Username</label>
-                        <input type="text" id="authUser" name="auth_user">
+                <section class="card set-panel" data-panel="system" aria-labelledby="hSys" hidden>
+                    <h2 id="hSys" data-t="set.nav.system"></h2>
+                    <dl class="facts">
+                        <dt data-t="sys.firmware"></dt><dd id="sysFw">-</dd>
+                        <dt data-t="sys.deviceId"></dt><dd id="sysId" class="mono">-</dd>
+                        <dt data-t="sys.devices"></dt><dd id="sysDevices">-</dd>
+                    </dl>
+                    <div class="recovery">
+                        <h3 data-t="sys.recovery"></h3>
+                        <p class="small" data-t="sys.recoveryWhy"></p>
+                        <p id="recoveryOn" class="busy-text small" hidden></p>
+                        <label class="label small" for="recoveryWord" data-t="sys.recoveryType"></label>
+                        <div class="confirm-actions">
+                            <input type="text" id="recoveryWord" class="confirm-word" autocomplete="off" autocapitalize="characters">
+                            <button type="button" id="recoveryBtn" class="btn btn-danger" data-t="sys.recoveryBtn" disabled></button>
+                        </div>
+                        <p id="recoveryStatus" class="form-status small" hidden></p>
                     </div>
-                    <div class="form-group">
-                        <label>Admin Password</label>
-                        <input type="password" id="authPass" name="auth_pass"
-                            placeholder="Leave blank to keep unchanged">
-                    </div>
-                    <div class="modal-actions">
-                        <button type="button" id="closeSettingsBtn" class="btn btn-secondary">Cancel</button>
-                        <button type="submit" class="btn btn-primary">Save & Restart</button>
-                    </div>
-                    <div id="settingsFeedback" class="feedback-msg" style="display: none;"></div>
-                </form>
+                </section>
             </div>
         </div>
     </main>
+
+    <!-- Add machine dialog -->
+    <div id="addDialog" class="backdrop" hidden>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="addTitle">
+            <div class="dialog-head">
+                <h2 id="addTitle" data-t="add.title"></h2>
+                <button type="button" class="icon-btn dialog-x" id="addClose" data-t-aria="add.close"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+            </div>
+            <div id="addSearch" class="searching">
+                <span class="radar" aria-hidden="true"></span>
+                <span id="addSearchText" class="small" aria-live="polite"></span>
+                <button type="button" id="addStop" class="btn" data-t="add.stop"></button>
+            </div>
+            <p id="addFull" class="warn small" hidden></p>
+            <p id="addStatus" class="form-status small" aria-live="polite" hidden></p>
+            <div id="addFound"></div>
+            <p class="muted small" data-t="add.help"></p>
+            <div class="pair-file">
+                <p class="small"><span data-t="add.fileLead"></span>
+                    <button type="button" id="pairFileToggle" class="link-btn" aria-expanded="false" aria-controls="pairFileBox" data-t="add.fileLink"></button></p>
+                <div id="pairFileBox" hidden>
+                    <p class="small" data-t="add.fileHelp"></p>
+                    <p class="warn small" data-t="add.fileWarn"></p>
+                    <div class="field">
+                        <label for="pairFileName" data-t="add.name"></label>
+                        <input type="text" id="pairFileName" maxlength="31" autocomplete="off">
+                    </div>
+                    <button type="button" id="pairFileBtn" class="btn" data-t="add.fileBtn"></button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script src="strings.js"></script>
     <script src="spark-md5.min.js"></script>

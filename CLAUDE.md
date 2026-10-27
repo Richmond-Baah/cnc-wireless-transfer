@@ -6,6 +6,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "CNC_WIR
 - Add machine (ESP-NOW, components/pair_proto): UI opens 120 s window; unpaired off-Wi-Fi receiver bursts PAIR_REQ ch 1-13 every ~3 s; approve -> PAIR_CFG (X25519+AES-GCM: AP creds, key, tx id, name); key is pre-registered on tx and provisional on rx until a heartbeat confirms (3 rejects -> rx drops it).
 - Pairing file: UI "Download pairing file" -> pair.cfg {v,ssid,pass,key,tx_id,name,expiry}; key pre-registered 24 h (NVS, clock from browser); receiver reads+deletes /pair.cfg at boot before USB, pairs provisionally; expiry enforced by transmitter only (receiver has no clock).
 - AP creds: change bumps config_version; receivers pull GET /rx/config; transmitter restarts after they fetch (max 30 s).
+- Web UI (transmitter/spiffs_data): all text in strings.js (t(key)), theme tokens in style.css (light/dark/system, saved in localStorage), no CDN/web fonts, messages inline (no alert/confirm/prompt); keep total < 150 KB or serve pre-gzipped.
 
 ## Build / flash
 - ESP-IDF 5.5.1. `idf.py build` in receiver/ and transmitter/ (or build_all.ps1).

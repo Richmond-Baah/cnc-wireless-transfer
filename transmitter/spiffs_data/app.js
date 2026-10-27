@@ -231,9 +231,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     pollStatus();
                 }
             }
+            pending = d.pending || [];
             renderAll();
-            renderPending(d.pending || []);
-            renderAddWindow(d.add_window_s || 0);
+            renderFoundNotice();
+            if (!addDialog.hidden) renderFound(false);
+            setAddWindow(d.add_window_s || 0);
         } catch (e) { /* transmitter unreachable: the next poll retries */ }
     }
 
@@ -247,91 +249,177 @@ document.addEventListener('DOMContentLoaded', () => {
         try { return { message: (await res.json()).message || '' }; } catch (e) { return { message: '' }; }
     }
 
-    // ─── New devices + Add machine (replaced by the dialog in stage D) ──
-    const newDeviceBanner = $('newDeviceBanner');
-    let pendingKey = '';
-    function renderPending(pending) {
-        const key = pending.map(p => p.id).join(',');
-        if (key === pendingKey) return; // keep names being typed
-        pendingKey = key;
-        if (!pending.length) {
-            newDeviceBanner.style.display = 'none';
-            newDeviceBanner.innerHTML = '';
+    // ─── New receivers + Add machine dialog ─────────────────────────────
+    const addDialog = $('addDialog');
+    let pending = [];               // /receivers "pending": found, not yet approved
+    const ignored = new Set();      // hidden for this page view (there is no reject endpoint)
+    let addWindowEnd = 0;           // when the transmitter stops listening (ms)
+    let addTimer = null;
+    let addStoppedByUser = false;   // Stop only stops showing the search; nothing pairs without Approve
+    let addLastFocus = null;
+    let foundKey = '';
+    const visiblePending = () => pending.filter(p => !ignored.has(p.id));
+
+    function renderFoundNotice() {
+        const n = visiblePending().length;
+        $('foundNotice').hidden = n === 0 || !addDialog.hidden;
+        $('foundText').textContent = n === 1 ? t('mc.found') : t('mc.foundN', { n });
+    }
+    function addStatus(text, kind) {
+        const el = $('addStatus');
+        el.textContent = text || '';
+        el.className = 'form-status small ' + (kind === 'err' ? 'err-text' : 'ok-text');
+        el.hidden = !text;
+    }
+
+    function openAddDialog(startSearch) {
+        addLastFocus = document.activeElement;
+        addDialog.hidden = false;
+        document.body.classList.add('no-scroll');
+        addStatus('');
+        renderFound(true);
+        renderAddSearch();
+        renderFoundNotice();
+        if (startSearch) startAddWindow();
+        $('addClose').focus();
+    }
+    function closeAddDialog() {
+        addDialog.hidden = true;
+        document.body.classList.remove('no-scroll');
+        renderFoundNotice();
+        if (addLastFocus && addLastFocus.focus) addLastFocus.focus();
+    }
+    $('addMachineBtn').addEventListener('click', () => openAddDialog(true));
+    $('foundReview').addEventListener('click', () => openAddDialog(false));
+    $('addClose').addEventListener('click', closeAddDialog);
+    addDialog.addEventListener('click', (e) => { if (e.target === addDialog) closeAddDialog(); });
+    addDialog.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { closeAddDialog(); return; }
+        if (e.key !== 'Tab') return;
+        // Keep focus inside the dialog
+        const els = Array.from(addDialog.querySelectorAll('button, input, [href]'))
+            .filter(el => !el.disabled && el.offsetParent !== null);
+        if (!els.length) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+
+    async function startAddWindow() {
+        addStoppedByUser = false;
+        $('addStop').disabled = true;
+        try {
+            const res = await fetch('/receivers/add', { method: 'POST', headers: authHeaders() });
+            if (!res.ok) {
+                addStatus(t('add.failed', { why: await errorText(res) }), 'err');
+            } else {
+                setAddWindow((await res.json()).seconds || 120);
+            }
+        } catch (e) {
+            addStatus(t('add.failed', { why: t('msg.fail.network') }), 'err');
+        }
+        renderAddSearch();
+    }
+    function setAddWindow(seconds) {
+        if (seconds > 0) addWindowEnd = Date.now() + seconds * 1000;
+        else if (addWindowEnd && Date.now() < addWindowEnd - 5000) addWindowEnd = 0; // closed early (restart)
+        if (!addTimer && addWindowEnd > Date.now()) addTimer = setInterval(renderAddSearch, 1000);
+        renderAddSearch();
+    }
+    function renderAddSearch() {
+        const left = Math.max(0, Math.round((addWindowEnd - Date.now()) / 1000));
+        if (!left && addTimer) { clearInterval(addTimer); addTimer = null; }
+        const on = left > 0 && !addStoppedByUser;
+        $('addSearch').classList.toggle('on', on);
+        $('addSearchText').textContent = on
+            ? t('add.searching', { time: Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') })
+            : t('add.stopped');
+        const stop = $('addStop');
+        stop.disabled = false;
+        stop.textContent = t(on ? 'add.stop' : 'add.again');
+        stop.dataset.act = on ? 'stop' : 'again';
+        // Every receiver takes one of the hotspot's Wi-Fi slots
+        const full = $('addFull');
+        full.hidden = !(lastWifiMode === 'AP' && receivers.length >= 12);
+        full.textContent = t('add.full', { n: receivers.length });
+    }
+    $('addStop').addEventListener('click', () => {
+        if ($('addStop').dataset.act === 'stop') {
+            addStoppedByUser = true;
+            renderAddSearch();
+        } else {
+            startAddWindow();
+        }
+    });
+
+    function renderFound(force) {
+        const box = $('addFound');
+        const list = visiblePending();
+        const key = list.map(p => p.id + (p.radio ? 'r' : '') + (p.repair ? 'x' : '')).join(',');
+        if (!force && key === foundKey) return; // keep names being typed
+        foundKey = key;
+        const typed = {};
+        box.querySelectorAll('input[data-id]').forEach(i => { typed[i.dataset.id] = i.value; });
+        box.innerHTML = list.map(p => {
+            const id = esc(p.id);
+            const name = typed[p.id] !== undefined ? typed[p.id] : p.name;
+            return `<div class="found-card">
+                <div class="small muted">${esc(t('add.idLabel'))}</div>
+                <div class="found-id mono">${id}</div>
+                <p class="small"><b>${esc(t('add.idCheck'))}</b></p>
+                <p class="small muted">${esc(p.radio ? t('add.viaRadio') : t('add.viaWifi', { ip: p.ip }))}${p.repair ? ' · ' + esc(t('add.repair')) : ''}</p>
+                <div class="field">
+                    <label for="fn-${id}">${esc(t('add.name'))}</label>
+                    <input type="text" id="fn-${id}" maxlength="31" data-id="${id}" value="${esc(name)}">
+                </div>
+                <div class="confirm-actions">
+                    <button type="button" class="btn btn-primary" data-act="approve" data-id="${id}">${esc(t('add.approve'))}</button>
+                    <button type="button" class="btn" data-act="ignore" data-id="${id}">${esc(t('add.ignore'))}</button>
+                </div>
+            </div>`;
+        }).join('');
+    }
+    $('addFound').addEventListener('click', async (e) => {
+        const b = e.target.closest('button[data-act]');
+        if (!b) return;
+        const id = b.dataset.id;
+        if (b.dataset.act === 'ignore') {
+            ignored.add(id);
+            renderFound(true);
+            renderFoundNotice();
             return;
         }
-        newDeviceBanner.innerHTML = '<h2 style="margin-bottom: 4px;">New device found</h2>' +
-            '<p class="muted small">Check the ID matches the label on the device before approving.</p>' + pending.map(p => `
-            <div class="new-device-row">
-                <span class="muted"><strong class="mono">${esc(p.id)}</strong> (${p.radio ? 'by radio' : esc(p.ip)})${p.repair ? ' – was reset, approve again' : ''}</span>
-                <input type="text" maxlength="31" value="${esc(p.name)}" data-id="${esc(p.id)}" aria-label="Name for ${esc(p.id)}">
-                <button type="button" class="btn btn-primary approve-rx" data-id="${esc(p.id)}">Approve</button>
-            </div>`).join('');
-        newDeviceBanner.style.display = 'block';
-    }
-    newDeviceBanner.addEventListener('click', async (e) => {
-        const btn = e.target.closest('.approve-rx');
-        if (!btn) return;
-        const id = btn.dataset.id;
-        const input = newDeviceBanner.querySelector(`input[data-id="${CSS.escape(id)}"]`);
+        const input = $('addFound').querySelector(`input[data-id="${CSS.escape(id)}"]`);
         const name = input ? input.value.trim() : '';
-        if (!name) return;
-        btn.disabled = true;
-        const { error } = await postReceiverAction('approve', { id, name });
-        btn.disabled = false;
-        if (error) { setMsg({ type: 'error', title: t('msg.error.pairing'), why: error }); return; }
-        pendingKey = '';
+        if (!name) { addStatus(t('add.needName'), 'err'); if (input) input.focus(); return; }
+        b.disabled = true;
+        const { error, message } = await postReceiverAction('approve', { id, name });
+        b.disabled = false;
+        if (error) { addStatus(t('msg.error.pairing') + ': ' + error, 'err'); return; }
+        // ESP-NOW approvals report that the settings were sent; HTTP ones are paired now
+        addStatus(t(message ? 'add.approvedRadio' : 'add.approved', { name }), 'ok');
+        pending = pending.filter(p => p.id !== id);
+        renderFound(true);
         if (!selectedReceiver()) rememberRx(id);
         await loadReceivers();
         loadReceiverFiles();
         pollStatus();
     });
 
-    const addMachineBtn = $('addMachineBtn');
-    const addMachineInfo = $('addMachineInfo');
-    let addWindowEnd = 0;
-    let addWindowTimer = null;
-    function renderAddWindow(seconds) {
-        if (seconds > 0) addWindowEnd = Date.now() + seconds * 1000;
-        else if (addWindowEnd && Date.now() < addWindowEnd - 5000) addWindowEnd = 0; // closed early (restart)
-        const tick = () => {
-            const left = Math.max(0, Math.round((addWindowEnd - Date.now()) / 1000));
-            if (!left) {
-                addMachineInfo.hidden = true;
-                addMachineBtn.disabled = false;
-                clearInterval(addWindowTimer);
-                addWindowTimer = null;
-                return;
-            }
-            addMachineInfo.textContent = 'Looking for new machines (' + left + ' s). Power on the receiver; it appears above as a new device.';
-            addMachineInfo.hidden = false;
-            addMachineBtn.disabled = true;
-        };
-        tick();
-        if (addWindowEnd && !addWindowTimer) addWindowTimer = setInterval(tick, 1000);
-    }
-    addMachineBtn.addEventListener('click', async () => {
-        addMachineBtn.disabled = true;
-        try {
-            const res = await fetch('/receivers/add', { method: 'POST', headers: authHeaders() });
-            if (!res.ok) {
-                setMsg({ type: 'error', title: t('msg.error.add'), why: await errorText(res) });
-                addMachineBtn.disabled = false;
-                return;
-            }
-            renderAddWindow((await res.json()).seconds || 120);
-        } catch (e) {
-            addMachineBtn.disabled = false;
-        }
+    // Pairing file (fallback when the receiver can't hear the radio)
+    $('pairFileToggle').addEventListener('click', () => {
+        const box = $('pairFileBox');
+        box.hidden = !box.hidden;
+        $('pairFileToggle').setAttribute('aria-expanded', String(!box.hidden));
+        if (!box.hidden) $('pairFileName').focus();
     });
-
     $('pairFileBtn').addEventListener('click', async () => {
-        const name = (prompt('Machine name for the new receiver:') || '').trim();
-        if (!name) return;
-        if (!confirm('The pairing file contains this hotspot\'s Wi-Fi password and is valid for 24 hours.\n\n' +
-            'Copy it to the root of the receiver\'s drive as pair.cfg, restart the receiver, ' +
-            'and delete any other copies.\n\nDownload it?')) return;
+        const name = $('pairFileName').value.trim();
+        if (!name) { addStatus(t('add.needName'), 'err'); $('pairFileName').focus(); return; }
+        $('pairFileBtn').disabled = true;
         const r = await downloadPairFile(name);
-        if (r.error) setMsg({ type: 'error', title: t('msg.error.pairFile'), why: r.error });
+        $('pairFileBtn').disabled = false;
+        addStatus(r.error ? t('add.fileFailed', { why: r.error }) : t('add.fileDone', { name }), r.error ? 'err' : 'ok');
     });
     async function downloadPairFile(name) {
         try {
@@ -351,7 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => URL.revokeObjectURL(url), 1000);
             return {};
         } catch (e) {
-            return { error: e.message };
+            return { error: t('msg.fail.network') };
         }
     }
 
@@ -419,6 +507,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderMachines();
         renderTransfer();
         renderFilesHeading();
+        renderSettings();
     }
 
     // ─── Messages ───────────────────────────────────────────────────────
@@ -706,6 +795,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderNetChip();
             }
             if (!uploading) renderTransfer();
+            renderSettings();
+            if (!addDialog.hidden) renderAddSearch();
         } catch (e) { /* transmitter unreachable: the next poll retries */ }
     };
     function startStatusPolling() {
@@ -1098,7 +1189,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (session) {
                 try { await apiPost('/upload_cancel', { 'X-Session': session }, ''); } catch (x) { /* best effort */ }
             }
-            const network = !(e instanceof UploadError) || /network error/.test(err.message);
+            const network = e instanceof TypeError || /network error/.test(err.message);
             outcome = {
                 type: 'failed',
                 pct: lastPct,
@@ -1120,137 +1211,247 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // ─── Settings modal (replaced by the Settings page in stage D) ──────
-    const settingsModal = $('settingsModal');
-    const settingsForm = $('settingsForm');
-    const settingsFeedback = $('settingsFeedback');
-    let loadedApSsid = '';
+    // ─── Settings page ──────────────────────────────────────────────────
+    const SECTIONS = ['network', 'machines', 'login', 'appearance', 'system'];
+    const netForm = $('netForm');
+    const loginSetForm = $('loginSetForm');
+    let cfg = null;          // GET /config (no passwords)
+    let macEdit = null;      // id being renamed
+    let macConfirm = null;   // id asking to be removed
 
-    const receiverSettingsList = $('receiverSettingsList');
-    function renderReceiverSettings() {
-        if (!receivers.length) {
-            receiverSettingsList.innerHTML = '<p class="text-muted">No receivers paired.</p>';
-            return;
-        }
-        receiverSettingsList.innerHTML = receivers.map(r => `
-            <div class="rs-row">
-                <input type="text" maxlength="31" value="${esc(r.name)}" data-id="${esc(r.id)}" aria-label="Name of ${esc(r.id)}">
-                <button type="button" class="btn btn-secondary btn-sm rs-rename" data-id="${esc(r.id)}">Rename</button>
-                <button type="button" class="btn btn-danger btn-sm rs-unpair" data-id="${esc(r.id)}">Unpair</button>
-                <div class="rs-id">${esc(r.id)} · ${r.online ? 'online, ' + esc(r.ip) : 'offline'}</div>
-            </div>`).join('');
+    function formStatus(el, text, kind) {
+        el.textContent = text || '';
+        el.className = 'form-status small ' + (kind === 'err' ? 'err-text' : 'ok-text');
+        el.hidden = !text;
     }
-    receiverSettingsList.addEventListener('click', async (e) => {
-        const btn = e.target.closest('button');
-        if (!btn) return;
-        const id = btn.dataset.id;
-        const r = receivers.find(x => x.id === id);
-        let result;
-        if (btn.classList.contains('rs-rename')) {
-            const input = receiverSettingsList.querySelector(`input[data-id="${CSS.escape(id)}"]`);
-            const name = input ? input.value.trim() : '';
-            if (!name) return;
-            result = await postReceiverAction('rename', { id, name });
-        } else if (btn.classList.contains('rs-unpair')) {
-            if (!confirm('Unpair "' + (r ? r.name : id) + '"? It must be approved again before it can be used.')) return;
-            result = await postReceiverAction('unpair', { id });
-        } else {
-            return;
-        }
-        settingsFeedback.textContent = result.error ? 'Failed: ' + result.error : (result.message || 'Saved.');
-        settingsFeedback.className = 'feedback-msg ' + (result.error ? 'error' : 'success');
-        settingsFeedback.style.display = 'block';
-        await loadReceivers();
-        renderReceiverSettings();
-    });
 
-    $('recoveryBtn').addEventListener('click', async () => {
-        const typed = prompt('Recovery mode: for 5 minutes the hotspot uses the FACTORY name and password ' +
-            'so receivers that missed a Wi-Fi change can reconnect and update.\n' +
-            'This page disconnects; rejoin the factory hotspot to watch.\nType RECOVERY to continue:');
-        if (typed !== 'RECOVERY') return;
+    function route() {
+        const h = location.hash.replace(/^#/, '');
+        const inSettings = h === 'settings' || h.startsWith('settings/');
+        const wasSettings = !$('settingsView').hidden;
+        $('dashView').hidden = inSettings;
+        $('settingsView').hidden = !inSettings;
+        document.title = t(inSettings ? 'set.title' : 'app.title.main');
+        if (!inSettings) return;
+        const sec = SECTIONS.includes(h.split('/')[1]) ? h.split('/')[1] : 'network';
+        document.querySelectorAll('.set-nav a').forEach(a => {
+            if (a.dataset.sec === sec) a.setAttribute('aria-current', 'page');
+            else a.removeAttribute('aria-current');
+        });
+        document.querySelectorAll('.set-panel').forEach(p => { p.hidden = p.dataset.panel !== sec; });
+        if (!wasSettings) {
+            window.scrollTo(0, 0);
+            loadSettings();
+        }
+        renderSettings();
+    }
+    window.addEventListener('hashchange', route);
+    $('configBtn').addEventListener('click', () => { location.hash = 'settings/network'; });
+
+    async function loadSettings() {
+        [netForm, loginSetForm].forEach(f => formStatus(f.querySelector('.form-status'), ''));
         try {
-            const res = await fetch('/recovery', {
-                method: 'POST',
-                headers: authHeaders({ 'Content-Type': 'application/json' }),
-                body: JSON.stringify({ confirm: 'RECOVERY' })
-            });
-            settingsFeedback.textContent = res.ok
-                ? 'Recovery mode on for 5 min: hotspot is now the factory network. Settings revert automatically.'
-                : 'Recovery mode failed: ' + await errorText(res);
-            settingsFeedback.className = 'feedback-msg ' + (res.ok ? 'success' : 'error');
+            const r = await fetch('/config', { headers: authHeaders() });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            cfg = await r.json();
         } catch (e) {
-            settingsFeedback.textContent = 'Recovery mode started; this connection dropped as expected.';
-            settingsFeedback.className = 'feedback-msg success';
-        }
-        settingsFeedback.style.display = 'block';
-    });
-
-    $('configBtn').addEventListener('click', () => {
-        settingsModal.classList.add('show');
-        renderReceiverSettings();
-        settingsFeedback.style.display = 'none';
-        fetch('/config', { headers: authHeaders() })
-            .then(r => {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.json();
-            })
-            .then(data => {
-                $('wifiMode').value = data.wifi_mode || 'AP';
-                $('apSsid').value = data.ap_ssid || '';
-                loadedApSsid = data.ap_ssid || '';
-                $('apPass').value = '';
-                $('staSsid').value = data.sta_ssid || '';
-                $('staPass').value = '';
-                $('authUser').value = data.auth_user || '';
-                $('authPass').value = '';
-            }).catch(e => {
-                settingsFeedback.textContent = 'Could not load current settings (' + e.message + ').';
-                settingsFeedback.className = 'feedback-msg error';
-                settingsFeedback.style.display = 'block';
-            });
-    });
-    $('closeSettingsBtn').addEventListener('click', () => {
-        settingsModal.classList.remove('show');
-        settingsFeedback.style.display = 'none';
-    });
-    settingsForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const data = Object.fromEntries(new FormData(settingsForm).entries());
-        const apChanged = (data.ap_pass && data.ap_pass.length > 0) || (data.ap_ssid && data.ap_ssid !== loadedApSsid);
-        const offline = receivers.filter(r => !r.online).map(r => r.name);
-        if (apChanged && offline.length &&
-            !confirm('These receivers are offline and will not get the new Wi-Fi settings:\n\n' +
-                offline.join('\n') + '\n\nThey reconnect later via Recovery mode. Save anyway?')) {
+            formStatus(netForm.querySelector('.form-status'), t('set.loadFailed', { why: e.message }), 'err');
             return;
         }
+        const mode = netForm.querySelector(`input[name="wifi_mode"][value="${cfg.wifi_mode === 'STA' ? 'STA' : 'AP'}"]`);
+        mode.checked = true;
+        $('staSsid').value = cfg.sta_ssid || '';
+        $('staPass').value = '';
+        $('apSsid').value = cfg.ap_ssid || '';
+        $('apPass').value = '';
+        $('authUser').value = cfg.auth_user || '';
+        $('authPass').value = '';
+        renderSettings();
+    }
+
+    function renderSettings() {
+        if ($('settingsView').hidden) return;
+        // Network: router fields only when joining one; live router status
+        const sta = netForm.querySelector('input[name="wifi_mode"]:checked');
+        const joining = sta && sta.value === 'STA';
+        $('routerFields').hidden = !joining;
+        const line = $('staStatus');
+        const st = status && status.sta;
+        let text = '', kind = '';
+        if (joining && cfg && cfg.wifi_mode === 'STA' && st) {
+            if (st.state === 'connected') { text = t('net.sta.connected', { ip: st.ip }); kind = 'ok'; }
+            else if (st.state === 'failed') { text = t('net.sta.failed', { why: st.reason || '?' }); kind = 'err'; }
+            else if (st.state === 'connecting') { text = t('net.sta.connecting'); }
+        }
+        line.textContent = text;
+        line.className = 'status-line small ' + (kind === 'ok' ? 'ok-text' : kind === 'err' ? 'err-text' : 'muted');
+        line.hidden = !text;
+        renderOfflineWarn();
+        renderMachineTable();
+        // System
+        if (status) {
+            $('sysFw').textContent = status.tx_fw || '-';
+            $('sysId').textContent = status.tx_id || '-';
+            if (typeof status.ap_clients === 'number') {
+                $('sysDevices').textContent = t('sys.devicesVal', { n: status.ap_clients, max: status.ap_max_clients || 15 });
+            }
+            const left = status.recovery_s || 0;
+            $('recoveryOn').hidden = !left;
+            $('recoveryOn').textContent = t('sys.recoveryOn', { n: Math.ceil(left / 60) });
+        }
+    }
+    netForm.addEventListener('change', renderSettings);
+    netForm.addEventListener('input', (e) => { if (e.target.id === 'apSsid' || e.target.id === 'apPass') renderOfflineWarn(); });
+
+    // Offline machines miss a hotspot name/password change
+    function renderOfflineWarn() {
+        const warn = $('offlineWarn');
+        const changed = cfg && ($('apPass').value.length > 0 || $('apSsid').value.trim() !== (cfg.ap_ssid || ''));
+        const offline = receivers.filter(r => !r.online);
+        warn.hidden = !changed || !offline.length;
+        if (warn.hidden) return;
+        warn.innerHTML = `<p>${esc(t('net.offlineWarn'))}</p><ul>${offline.map(r => `<li>${esc(r.name)}</li>`).join('')}</ul>` +
+            `<p>${esc(t('net.offlineWarn2'))}</p>`;
+    }
+
+    // POST /config: blank fields keep the current value; the transmitter restarts
+    async function saveConfig(form, data) {
+        const statusEl = form.querySelector('.form-status');
+        const submit = form.querySelector('button[type="submit"]');
+        submit.disabled = true;
         try {
             const res = await fetch('/config', {
                 method: 'POST',
                 headers: authHeaders({ 'Content-Type': 'application/json' }),
                 body: JSON.stringify(data)
             });
-            if (res.ok) {
-                let text = 'Settings saved. Device restarting...';
-                if (data.wifi_mode === 'STA') {
-                    text += ' On your router, open http://cnc-transfer.local or http://' +
-                        (lastStaIp || '<STA IP shown in status after restart>') + '.';
-                }
-                settingsFeedback.textContent = text;
-                settingsFeedback.className = 'feedback-msg success';
-                settingsFeedback.style.display = 'block';
-                sessionStorage.removeItem('token');
-                setTimeout(() => { window.location.href = 'index.html'; }, data.wifi_mode === 'STA' ? 20000 : 5000);
-            } else {
-                settingsFeedback.textContent = 'Failed to save settings: ' + await errorText(res);
-                settingsFeedback.className = 'feedback-msg error';
-                settingsFeedback.style.display = 'block';
+            if (!res.ok) {
+                formStatus(statusEl, t('set.saveFailed', { why: await errorText(res) }), 'err');
+                submit.disabled = false;
+                return;
             }
-        } catch (err) {
-            settingsFeedback.textContent = 'Network error saving settings.';
-            settingsFeedback.className = 'feedback-msg error';
-            settingsFeedback.style.display = 'block';
+            const router = data.wifi_mode === 'STA';
+            formStatus(statusEl, router ? t('set.savedRouter', { ip: lastStaIp || '…' }) : t('set.saved'), 'ok');
+            sessionStorage.removeItem('token');
+            setTimeout(() => { window.location.href = 'index.html'; }, router ? 20000 : 5000);
+        } catch (e) {
+            formStatus(statusEl, t('set.netError'), 'err');
+            submit.disabled = false;
         }
+    }
+    netForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const mode = netForm.querySelector('input[name="wifi_mode"]:checked');
+        const apPass = $('apPass').value;
+        if (apPass && apPass.length < 8) {
+            formStatus(netForm.querySelector('.form-status'), t('net.passShort'), 'err');
+            $('apPass').focus();
+            return;
+        }
+        saveConfig(netForm, {
+            wifi_mode: mode ? mode.value : 'AP',
+            sta_ssid: $('staSsid').value.trim(),
+            sta_pass: $('staPass').value,
+            ap_ssid: $('apSsid').value.trim(),
+            ap_pass: apPass
+        });
+    });
+    loginSetForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        saveConfig(loginSetForm, { auth_user: $('authUser').value.trim(), auth_pass: $('authPass').value });
+    });
+
+    // Machines: rename / remove inline
+    function renderMachineTable() {
+        if (macEdit || macConfirm) return; // don't wipe what is being typed or confirmed
+        const box = $('macTable');
+        if (!receivers.length) {
+            box.innerHTML = '<p class="muted small">' + esc(t('mac.none')) + '</p>';
+            return;
+        }
+        box.innerHTML = `<table class="mtable"><thead><tr><th>${esc(t('mac.colName'))}</th><th>${esc(t('mac.colId'))}</th>
+            <th>${esc(t('mac.colStatus'))}</th><th><span class="visually-hidden">${esc(t('mac.rename'))}</span></th></tr></thead><tbody>` +
+            receivers.map(r => {
+                const [pcls, ptxt] = pillFor(r);
+                const id = esc(r.id);
+                return `<tr data-id="${id}"><td class="m-name">${esc(r.name)}</td><td class="mono m-id">${id}</td>
+                    <td><span class="${pcls}">${esc(ptxt)}</span></td>
+                    <td class="m-act"><button type="button" class="btn" data-act="rename" data-id="${id}">${esc(t('mac.rename'))}</button>
+                    <button type="button" class="btn btn-ghost danger-text" data-act="remove" data-id="${id}">${esc(t('mac.remove'))}</button></td></tr>`;
+            }).join('') + '</tbody></table>';
+    }
+    $('macTable').addEventListener('click', async (e) => {
+        const b = e.target.closest('button[data-act]');
+        if (!b) return;
+        const id = b.dataset.id;
+        const r = receivers.find(x => x.id === id);
+        const row = $('macTable').querySelector(`tr[data-id="${CSS.escape(id)}"]`);
+        const st = $('macStatus');
+        switch (b.dataset.act) {
+        case 'rename':
+            macEdit = id;
+            row.querySelector('.m-name').innerHTML = `<input type="text" maxlength="31" value="${esc(r ? r.name : '')}" aria-label="${esc(t('mac.colName'))}">`;
+            row.querySelector('.m-act').innerHTML = `<button type="button" class="btn btn-primary" data-act="save" data-id="${esc(id)}">${esc(t('mac.save'))}</button>
+                <button type="button" class="btn" data-act="cancel" data-id="${esc(id)}">${esc(t('common.cancel'))}</button>`;
+            row.querySelector('input').focus();
+            break;
+        case 'save': {
+            const name = row.querySelector('input').value.trim();
+            if (!name) return;
+            b.disabled = true;
+            const res = await postReceiverAction('rename', { id, name });
+            formStatus(st, res.error ? t('mac.failed', { why: res.error }) : t('mac.renamed', { name }), res.error ? 'err' : 'ok');
+            macEdit = null;
+            await loadReceivers();
+            renderMachineTable();
+            break;
+        }
+        case 'remove':
+            macConfirm = id;
+            row.insertAdjacentHTML('afterend', `<tr class="m-confirm"><td colspan="4"><div class="confirm">
+                <p class="confirm-title">${esc(t('mac.confirmRemove', { name: r ? r.name : id }))}</p>` +
+                confirmButtons(t('mac.remove'), t('files.keep')).replace(/data-act="yes"/, `data-act="removeyes" data-id="${esc(id)}"`)
+                    .replace(/data-act="no"/, `data-act="cancel" data-id="${esc(id)}"`) + '</div></td></tr>');
+            break;
+        case 'removeyes': {
+            b.disabled = true;
+            const res = await postReceiverAction('unpair', { id });
+            // Offline receivers: "Hold its BOOT button 10 s to finish"
+            formStatus(st, res.error ? t('mac.failed', { why: res.error })
+                : t('mac.removed', { name: r ? r.name : id }) + (res.message ? ' ' + res.message + '.' : ''), res.error ? 'err' : 'ok');
+            macConfirm = null;
+            await loadReceivers();
+            renderMachineTable();
+            break;
+        }
+        case 'cancel':
+            macEdit = null;
+            macConfirm = null;
+            renderMachineTable();
+            break;
+        }
+    });
+
+    // Recovery mode (typed RECOVERY, checked server-side)
+    $('recoveryWord').addEventListener('input', () => {
+        $('recoveryBtn').disabled = $('recoveryWord').value.trim() !== 'RECOVERY';
+    });
+    $('recoveryBtn').addEventListener('click', async () => {
+        if ($('recoveryWord').value.trim() !== 'RECOVERY') return;
+        const st = $('recoveryStatus');
+        $('recoveryBtn').disabled = true;
+        try {
+            const res = await fetch('/recovery', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ confirm: 'RECOVERY' })
+            });
+            formStatus(st, res.ok ? t('sys.recoveryStarted') : t('sys.recoveryFailed', { why: await errorText(res) }), res.ok ? 'ok' : 'err');
+        } catch (e) {
+            // Switching the network drops this connection: expected
+            formStatus(st, t('sys.recoveryStarted'), 'ok');
+        }
+        $('recoveryWord').value = '';
     });
 
     // ─── Chunked MD5 (via spark-md5) ────────────────────────────────────
@@ -1267,13 +1468,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     resolve();
                 } catch (err) { reject(err); }
             };
-            reader.onerror = () => reject(new Error('File read error during MD5 calculation'));
+            reader.onerror = () => reject(new Error(t('msg.fail.read')));
             reader.readAsArrayBuffer(blob);
         });
     }
 
     async function calculateMD5(file) {
-        if (typeof SparkMD5 === 'undefined') throw new Error('SparkMD5 library not loaded. Please refresh the page.');
+        if (typeof SparkMD5 === 'undefined') throw new Error(t('msg.fail.reload'));
         const spark = new SparkMD5.ArrayBuffer();
         for (let offset = 0; offset < file.size; offset += MD5_CHUNK_SIZE) {
             await hashSlice(spark, file.slice(offset, offset + MD5_CHUNK_SIZE));
@@ -1282,6 +1483,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ─── Start ──────────────────────────────────────────────────────────
+    route();
     renderAll();
     loadReceivers();
     setInterval(loadReceivers, 4000);

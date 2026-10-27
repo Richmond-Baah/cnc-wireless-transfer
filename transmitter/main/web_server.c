@@ -438,6 +438,7 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(obj, "state", "NO_RECEIVER");
   }
   cJSON_AddStringToObject(obj, "tx_fw", esp_app_get_description()->version);
+  cJSON_AddStringToObject(obj, "tx_id", rx_registry_tx_id());
 
   // Router (STA) link
   char sta_state[16], sta_reason[48], sta_ip[16];
