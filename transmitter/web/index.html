@@ -256,6 +256,19 @@
                         <dt data-t="sys.devices"></dt><dd id="sysDevices">-</dd>
                     </dl>
                     <div class="recovery">
+                        <h3 data-t="sys.fw"></h3>
+                        <p class="small" data-t="sys.fwWhy"></p>
+                        <label class="label small" for="fwFile" data-t="sys.fwFile"></label>
+                        <input type="file" id="fwFile" accept=".bin">
+                        <p id="fwInfo" class="small" hidden></p>
+                        <div id="fwBar" class="bar" hidden><div id="fwFill" class="bar-fill"></div></div>
+                        <div class="confirm-actions">
+                            <button type="button" id="fwBtn" class="btn btn-primary" data-t="sys.fwBtn" disabled></button>
+                            <button type="button" id="fwCancel" class="btn" data-t="common.cancel" hidden></button>
+                        </div>
+                        <p id="fwStatus" class="form-status small" hidden></p>
+                    </div>
+                    <div class="recovery">
                         <h3 data-t="sys.recovery"></h3>
                         <p class="small" data-t="sys.recoveryWhy"></p>
                         <p id="recoveryOn" class="busy-text small" hidden></p>

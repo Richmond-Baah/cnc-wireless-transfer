@@ -9,6 +9,7 @@
 #include "led.h"
 #include "auth.h"
 #include "boot_button.h"
+#include "fw_update.h"
 
 static const char *TAG = "MAIN";
 
@@ -42,7 +43,7 @@ void app_main(void)
     led_init();
 
     // 3. Initialize Wi-Fi (Moved up to ensure connectivity even if SPIFFS fails)
-    wifi_init();
+    esp_err_t wifi_err = wifi_init();
 
     // 4. (Web UI is embedded in the app image; the spiffs partition is unused)
 
@@ -51,7 +52,10 @@ void app_main(void)
     file_transfer_start();
 
     // 6. Start Web Server (receivers announce themselves via /rx/heartbeat)
-    web_server_start();
+    esp_err_t web_err = web_server_start();
+    // A freshly updated image is kept only if the AP and web server came up;
+    // otherwise (or after a crash before this) the bootloader rolls back.
+    fw_update_confirm_boot(wifi_err == ESP_OK && web_err == ESP_OK);
     boot_button_start(BOOT_HOLD_MS, boot_pressed, boot_fired);
 
     ESP_LOGI(TAG, "Transmitter Init Complete. Free Heap: %u", (unsigned)esp_get_free_heap_size());

@@ -11,6 +11,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 ## Build / flash
 - Both boards 4 MB flash. partitions.csv: nvs 0x9000 (tx 0x5000, rx 0x6000, offsets never move), otadata (tx 0xE000, rx 0x3D0000), ota_0 0x10000 + ota_1 0x1F0000 (0x1E0000 each), coredump 64 KB (tx 0x3D0000, rx 0x3E0000). Layout changes need a USB flash.
 - PROJECT_VER = `git describe --tags` without "v" (fallback 0.0.0-dev), refreshed on commit/checkout.
+- Transmitter OTA (Settings > System > Update firmware): browser reads the app desc (project/version), POST /fw/begin {size} -> /fw/chunk (X-Offset, <=32 KB, sequential, dup acked) -> /fw/finish (esp_ota_end, set boot, restart) | /fw/cancel; upload worker. Server checks ESP32-S3, project cnc_transmitter, version newer (fw_version_cmp: x.y.z then commits after tag). Not during a file transfer (and uploads refused during OTA). Rollback on: main.c marks valid only if wifi_init + web_server_start return ESP_OK, else rolls back; crash before that -> bootloader reverts.
 - Core dump to flash (ELF). GET /coredump (tx, authed), GET /receiver_coredump?rx= (tx proxies rx /coredump, key, paired only); UI Settings > System > Crash report. Decode: `idf.py coredump-info -c <file>`.
 - ESP-IDF 5.5.1. `idf.py build` in receiver/ and transmitter/ (or build_all.ps1).
 - Receiver flash: hold BOOT, tap RST, then `idf.py -p COMx flash`; press RST after. Logs on UART0 (GPIO43/44), not USB.

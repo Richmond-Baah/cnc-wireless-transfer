@@ -11,6 +11,7 @@
 
 #include "auth.h"
 #include "coredump_http.h"
+#include "fw_update.h"
 #include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -266,6 +267,11 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
     return ESP_OK;
   }
 
+  if (fw_update_active()) {
+    cJSON_Delete(json);
+    send_status_text(req, 409, "Firmware update in progress");
+    return ESP_OK;
+  }
   bool force = force_requested(req);
   char rx_id[RX_ID_LEN];
   if (!get_rx_id(req, rx_id, sizeof(rx_id))) {
@@ -1084,6 +1090,109 @@ static esp_err_t receiver_coredump_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// ─── Firmware update (this transmitter) ─────────────────────────────────────
+// POST /fw/begin {"size":n}     -> {chunk_size}
+// POST /fw/chunk X-Offset, raw body (<= 32 KB) -> {written}
+// POST /fw/finish               -> {version}, then restart into the new slot
+// POST /fw/cancel
+// Upload worker only (shares s_chunk_buf with file uploads, never at once).
+static void send_json_or_text(httpd_req_t *req, int code, const char *json, const char *msg) {
+  if (code != 200) {
+    send_status_text(req, code, msg);
+    return;
+  }
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, json);
+}
+
+static esp_err_t fw_begin_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char body[64] = {0};
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body) ||
+      !read_full_body(req, body, sizeof(body) - 1)) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  cJSON *json = cJSON_Parse(body);
+  cJSON *j_size = json ? cJSON_GetObjectItem(json, "size") : NULL;
+  double size = cJSON_IsNumber(j_size) ? j_size->valuedouble : -1;
+  cJSON_Delete(json);
+  char msg[96] = "";
+  char active[RX_ID_LEN];
+  int code;
+  if (size <= 0 || size > 0x7FFFFFFF) {
+    code = 400;
+    snprintf(msg, sizeof(msg), "Missing size");
+  } else if (file_transfer_active_rx(active, sizeof(active))) {
+    code = 409;
+    snprintf(msg, sizeof(msg), "A file transfer is running");
+  } else {
+    code = fw_update_begin((size_t)size, msg, sizeof(msg));
+  }
+  char resp[48];
+  snprintf(resp, sizeof(resp), "{\"chunk_size\":%d}", UPLOAD_CHUNK_MAX);
+  send_json_or_text(req, code, resp, msg);
+  return ESP_OK;
+}
+
+static esp_err_t fw_chunk_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char off_hdr[16] = {0};
+  char *end = NULL;
+  long offset = -1;
+  if (httpd_req_get_hdr_value_str(req, "X-Offset", off_hdr, sizeof(off_hdr)) == ESP_OK) {
+    offset = strtol(off_hdr, &end, 10);
+  }
+  if (offset < 0 || end == off_hdr || *end != '\0' || req->content_len <= 0 ||
+      req->content_len > UPLOAD_CHUNK_MAX || !read_full_body(req, s_chunk_buf, UPLOAD_CHUNK_MAX)) {
+    send_status_text(req, 400, "Missing X-Offset or bad chunk");
+    return ESP_OK;
+  }
+  char msg[96] = "";
+  size_t written = 0;
+  int code = fw_update_write((size_t)offset, (const uint8_t *)s_chunk_buf, req->content_len, &written,
+                             msg, sizeof(msg));
+  char resp[40];
+  snprintf(resp, sizeof(resp), "{\"written\":%u}", (unsigned)written);
+  send_json_or_text(req, code, resp, msg);
+  return ESP_OK;
+}
+
+static esp_err_t fw_finish_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char msg[96] = "";
+  char ver[32] = "";
+  int code = fw_update_finish(ver, sizeof(ver), msg, sizeof(msg));
+  char resp[64];
+  snprintf(resp, sizeof(resp), "{\"version\":\"%s\"}", ver);
+  send_json_or_text(req, code, resp, msg);
+  if (code == 200) {
+    ESP_LOGW(TAG, "Firmware %s installed; restarting", ver);
+    schedule_restart();
+  }
+  return ESP_OK;
+}
+
+static esp_err_t fw_cancel_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  fw_update_abort();
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, "{\"status\":\"cancelled\"}");
+  return ESP_OK;
+}
+
 // ─── Debug endpoint — shows connected stations and receiver connectivity
 static esp_err_t debug_get_handler(httpd_req_t *req) {
   char resp[1024];
@@ -1183,6 +1292,10 @@ static const route_t s_routes[] = {
     {"/recovery", HTTP_POST, recovery_post_handler, RT_RX},
     {"/factory_reset", HTTP_POST, factory_reset_handler, RT_RX},
     {"/coredump", HTTP_GET, coredump_get_handler, RT_RX},
+    {"/fw/begin", HTTP_POST, fw_begin_handler, RT_UPLOAD},
+    {"/fw/chunk", HTTP_POST, fw_chunk_handler, RT_UPLOAD},
+    {"/fw/finish", HTTP_POST, fw_finish_handler, RT_UPLOAD},
+    {"/fw/cancel", HTTP_POST, fw_cancel_handler, RT_UPLOAD},
     {"/receiver_coredump", HTTP_GET, receiver_coredump_handler, RT_RX},
     {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
     // Receivers
@@ -1281,7 +1394,7 @@ static void start_workers(void) {
   xTaskCreate(worker_task, "http_rx", WORKER_STACK, s_queue[RT_RX], 5, NULL);
 }
 
-void web_server_start(void) {
+esp_err_t web_server_start(void) {
   auth_init();
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = NUM_ROUTES;
@@ -1301,7 +1414,7 @@ void web_server_start(void) {
   start_workers();
   if (httpd_start(&s_server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Error starting Web server.");
-    return;
+    return ESP_FAIL;
   }
   for (size_t i = 0; i < NUM_ROUTES; i++) {
     httpd_uri_t u = {.uri = s_routes[i].uri, .method = s_routes[i].method, .handler = dispatch,
@@ -1312,4 +1425,5 @@ void web_server_start(void) {
   }
   ESP_LOGI(TAG, "Web server started on port %d (%u routes), UI %s (%u bytes gz)", config.server_port,
            (unsigned)NUM_ROUTES, s_ui_path, (unsigned)(ui_gz_end - ui_gz_start));
+  return ESP_OK;
 }

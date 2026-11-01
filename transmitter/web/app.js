@@ -1359,6 +1359,91 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('hashchange', route);
     $('configBtn').addEventListener('click', () => { location.hash = 'settings/network'; });
 
+    // ─── Firmware update ────────────────────────────────────────────────
+    // Image header (24) + segment header (8) + esp_app_desc_t: version at +16,
+    // project name at +48 (32 bytes each, NUL-padded)
+    const FW_DESC = 32, FW_HEAD = FW_DESC + 256;
+    let fwFile = null, fwImage = null, fwCancelled = false;
+    function readFwDesc(buf) {
+        const u = new Uint8Array(buf);
+        if (u.length < FW_HEAD || u[0] !== 0xE9 || new DataView(buf).getUint32(FW_DESC, true) !== 0xABCD5432) return null;
+        const str = (o) => { let s = ''; for (let i = o; i < o + 32 && u[i]; i++) s += String.fromCharCode(u[i]); return s; };
+        return { version: str(FW_DESC + 16), project: str(FW_DESC + 48) };
+    }
+    function fwProgress(pct) {
+        $('fwBar').hidden = pct === null;
+        $('fwFill').style.width = (pct || 0) + '%';
+    }
+    $('fwFile').addEventListener('change', async () => {
+        fwFile = $('fwFile').files[0] || null;
+        fwImage = null;
+        formStatus($('fwStatus'), '');
+        fwProgress(null);
+        const info = $('fwInfo');
+        info.hidden = !fwFile;
+        if (fwFile) {
+            fwImage = readFwDesc(await fwFile.slice(0, FW_HEAD).arrayBuffer());
+            info.textContent = !fwImage ? t('sys.fwBad')
+                : fwImage.project === 'cnc_transmitter' ? t('sys.fwTx', { v: fwImage.version, cur: status ? status.tx_fw : '-' })
+                : fwImage.project === 'cnc_receiver' ? t('sys.fwRx', { v: fwImage.version })
+                : t('sys.fwBad');
+        }
+        $('fwBtn').disabled = !(fwImage && fwImage.project === 'cnc_transmitter');
+    });
+    async function fwPost(path, headers, body) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const res = await fetch(path, { method: 'POST', headers: authHeaders(headers), body });
+                if (res.status < 500 || attempt === 2) return res;
+            } catch (e) { /* retry */ }
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        throw new Error('network');
+    }
+    $('fwCancel').addEventListener('click', () => { fwCancelled = true; });
+    $('fwBtn').addEventListener('click', async () => {
+        if (!fwFile || !fwImage) return;
+        const st = $('fwStatus');
+        $('fwBtn').disabled = true;
+        $('fwFile').disabled = true;
+        $('fwCancel').hidden = false;
+        fwCancelled = false;
+        fwProgress(0);
+        try {
+            let res = await fwPost('/fw/begin', { 'Content-Type': 'application/json' }, JSON.stringify({ size: fwFile.size }));
+            if (!res.ok) throw new Error(await errorText(res));
+            const chunk = (await res.json()).chunk_size || 32768;
+            for (let off = 0; off < fwFile.size; off += chunk) {
+                if (fwCancelled) {
+                    await fwPost('/fw/cancel', {}, '').catch(() => {});
+                    formStatus(st, t('sys.fwCancelled'), 'ok');
+                    fwProgress(null);
+                    return;
+                }
+                res = await fwPost('/fw/chunk', { 'X-Offset': String(off), 'Content-Type': 'application/octet-stream' },
+                    fwFile.slice(off, off + chunk));
+                if (!res.ok) throw new Error(await errorText(res));
+                const pct = Math.round(Math.min(off + chunk, fwFile.size) / fwFile.size * 100);
+                fwProgress(pct);
+                formStatus(st, t('sys.fwUploading', { pct }), 'ok');
+            }
+            res = await fwPost('/fw/finish', {}, '');
+            if (!res.ok) throw new Error(await errorText(res));
+            const d = await res.json();
+            signingOut = true; // restarting: the session ends with it
+            sessionStorage.removeItem('token');
+            formStatus(st, t('sys.fwDone', { v: d.version }), 'ok');
+            setTimeout(() => { window.location.href = '/'; }, 45000);
+        } catch (e) {
+            fwProgress(null);
+            formStatus(st, t('sys.fwFailed', { why: e.message === 'network' ? t('msg.fail.network') : e.message }), 'err');
+        } finally {
+            $('fwCancel').hidden = true;
+            $('fwFile').disabled = false;
+            $('fwBtn').disabled = !(fwImage && fwImage.project === 'cnc_transmitter') || signingOut;
+        }
+    });
+
     // Crash report (core dump) download: transmitter or a machine
     function renderCrashSelect() {
         const sel = $('crashDevice');
