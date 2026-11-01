@@ -1407,6 +1407,19 @@ document.addEventListener('DOMContentLoaded', () => {
         info.hidden = !fwFile;
         if (fwFile) {
             fwImage = readFwDesc(await fwFile.slice(0, FW_HEAD).arrayBuffer());
+            // Signed images end in a 4 KB signature sector starting E7 02
+            const tail = fwFile.size % 4096 === 0 && fwFile.size > 4096
+                ? new Uint8Array(await fwFile.slice(fwFile.size - 4096, fwFile.size - 4094).arrayBuffer()) : null;
+            const signed = !!tail && tail[0] === 0xE7 && tail[1] === 0x02;
+            if (fwImage && !signed) {
+                fwImage = null;
+                info.hidden = false;
+                info.textContent = t('sys.fwUnsigned');
+                $('fwBtn').hidden = false;
+                $('fwBtn').disabled = true;
+                renderFwMachines();
+                return;
+            }
             info.textContent = isTxImage() ? t('sys.fwTx', { v: fwImage.version, cur: status ? status.tx_fw : '-' })
                 : isRxImage() ? t('sys.fwRx', { v: fwImage.version }) : t('sys.fwBad');
         }

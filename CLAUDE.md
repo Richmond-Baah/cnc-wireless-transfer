@@ -13,6 +13,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 - PROJECT_VER = `git describe --tags` without "v" (fallback 0.0.0-dev), refreshed on commit/checkout.
 - Transmitter OTA (Settings > System > Update firmware): browser reads the app desc (project/version), POST /fw/begin {size} -> /fw/chunk (X-Offset, <=32 KB, sequential, dup acked) -> /fw/finish (esp_ota_end, set boot, restart) | /fw/cancel; upload worker. Server checks ESP32-S3, project cnc_transmitter, version newer (fw_version_cmp: x.y.z then commits after tag). Not during a file transfer (and uploads refused during OTA). Rollback on: main.c marks valid only if wifi_init + web_server_start return ESP_OK, else rolls back; crash before that -> bootloader reverts.
 - Receiver OTA, streamed (nothing stored on tx): UI picks a cnc_receiver .bin, "Update <machine>" -> tx /rxfw/begin|chunk|finish|cancel?rx= relays each request to rx /fw/* (key, paired only, 16 KB chunks, rx worker). rx refuses /fw/begin while busy (host read <10 s, no force) or RECEIVING; /prepare refused during an update. One update or transfer at a time across tx + all receivers. rx restarts 1 s after /fw/finish; marks valid on the first accepted heartbeat, rolls back if none within 300 s (fw_update_rollback_timer). Shared code: components/fw_update.
+- Signed apps, no eFuses: CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT + RSA-3072 (V2) + SIGNED_ON_UPDATE; no secure boot / flash encryption. esp_ota_end checks the signature against the key in the RUNNING app's signature block (so the USB-flashed app must be signed with the same key); ESP32-S3 bootloader cannot verify at boot. CMakeLists signs build/<proj>.bin in place with $FILEXFER_SIGNING_KEY (outside repo; *.pem/*.key ignored); without it: CMake warning, unsigned build (IDF's "App built but not signed" echo prints either way). Unsigned rejected before upload (UI: last 4 KB must start E7 02) and on device (size % 4096, sig sector magic before that chunk is written); wrong key -> esp_ota_end fails, slot never activated. Key: `espsecure.py generate_signing_key --version 2 --scheme rsa3072 <path outside repo>`; losing it = USB reflash of every unit.
 - Core dump to flash (ELF). GET /coredump (tx, authed), GET /receiver_coredump?rx= (tx proxies rx /coredump, key, paired only); UI Settings > System > Crash report. Decode: `idf.py coredump-info -c <file>`.
 - ESP-IDF 5.5.1. `idf.py build` in receiver/ and transmitter/ (or build_all.ps1).
 - Receiver flash: hold BOOT, tap RST, then `idf.py -p COMx flash`; press RST after. Logs on UART0 (GPIO43/44), not USB.
@@ -43,7 +44,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 - Compile out /debug for production.
 - ".." rejected anywhere in name (too strict; only whole-name matters).
 - Busy-guard threshold untuned (polling machines trigger it).
-- Commercial: own USB VID/PID (not SanDisk), per-device credentials, signed OTA, certified module.
+- Commercial: own USB VID/PID (not SanDisk), per-device credentials, certified module. OTA images are signed but bootloader/app can still be replaced over USB (no secure boot).
 
 ## Working rules
 - Minimal changes. Cite file:line. Build both boards, commit. Short replies.

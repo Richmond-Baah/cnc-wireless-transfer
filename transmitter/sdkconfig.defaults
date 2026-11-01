@@ -43,3 +43,11 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 
 # OTA: new image must confirm itself (fw_update_confirm_boot) or the bootloader rolls back
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Signed apps without hardware secure boot (no eFuses burned): every OTA image
+# must carry an RSA-3072 signature from the same key as the running app.
+# Signing is done in CMakeLists.txt from $FILEXFER_SIGNING_KEY.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+# CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES is not set

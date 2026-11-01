@@ -1,4 +1,5 @@
 #include "fw_update.h"
+#include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
@@ -9,6 +10,7 @@
 static const char *TAG = "FW_UPDATE";
 
 #define SESSION_IDLE_US (30LL * 1000 * 1000)
+#define SIG_SECTOR 4096 // Secure Boot V2 signature sector appended by espsecure sign_data
 
 static struct {
   bool active;
@@ -107,6 +109,12 @@ int fw_update_begin(size_t size, char *msg, size_t msg_len) {
     snprintf(msg, msg_len, "Firmware size must be up to %u bytes", (unsigned)part->size);
     return 400;
   }
+#if CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT
+  if (size % SIG_SECTOR != 0) { // signed images end on a 4 KB signature sector
+    snprintf(msg, msg_len, "Firmware is not signed");
+    return 400;
+  }
+#endif
   esp_ota_handle_t h;
   esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &h);
   if (err != ESP_OK) {
@@ -148,6 +156,17 @@ int fw_update_write(size_t offset, const uint8_t *data, size_t n, size_t *writte
     }
     strlcpy(s_ota.version, d.version, sizeof(s_ota.version));
   }
+#if CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT
+  // The chunk holding the signature sector must start it with the V2 block
+  // magic, checked before that chunk is written. The signature itself is
+  // verified by esp_ota_end() before the image can be booted.
+  size_t sig = s_ota.size - SIG_SECTOR;
+  if (sig >= offset && sig + 1 < offset + n && (data[sig - offset] != 0xE7 || data[sig - offset + 1] != 0x02)) {
+    snprintf(msg, msg_len, "Firmware is not signed");
+    fw_update_abort();
+    return 400;
+  }
+#endif
   esp_err_t err = esp_ota_write(s_ota.handle, data, n);
   if (err != ESP_OK) {
     snprintf(msg, msg_len, "Flash write failed: %s", esp_err_to_name(err));

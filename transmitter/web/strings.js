@@ -304,6 +304,7 @@ window.STRINGS = {
     'sys.fwRxLost': 'Didn\'t come back with {v} (running {cur}). It may have gone back to its old firmware.',
     'sys.fwRxFailed': 'Failed: {why}',
     'sys.fwBad': 'Not a FileXfer firmware file.',
+    'sys.fwUnsigned': 'This firmware file is not signed. Only signed FileXfer firmware can be installed.',
     'sys.fwUploading': 'Installing… {pct}%',
     'sys.fwDone': 'Firmware {v} installed. The transmitter is restarting; log in again in a minute.',
     'sys.fwFailed': 'Update failed: {why}',
