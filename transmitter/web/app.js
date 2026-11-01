@@ -2,6 +2,32 @@
 document.addEventListener('DOMContentLoaded', () => {
     applyStrings();
 
+    // ─── Show/hide toggle on every password field ───────────────────────
+    const EYE = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+    const EYE_OFF = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.1 10.1 0 0 1 12 19C5 19 1 12 1 12a18.5 18.5 0 0 1 5.06-5.94M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>';
+    function setPwVisible(btn, show) {
+        btn.previousElementSibling.type = show ? 'text' : 'password';
+        btn.setAttribute('aria-pressed', String(show));
+        btn.setAttribute('aria-label', t(show ? 'pw.hide' : 'pw.show'));
+        btn.innerHTML = show ? EYE_OFF : EYE;
+    }
+    document.querySelectorAll('input[type="password"]').forEach(input => {
+        const wrap = document.createElement('span');
+        wrap.className = 'pw-wrap';
+        input.parentNode.insertBefore(wrap, input);
+        wrap.appendChild(input);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pw-toggle';
+        wrap.appendChild(btn);
+        setPwVisible(btn, false);
+        btn.addEventListener('click', () => setPwVisible(btn, btn.getAttribute('aria-pressed') !== 'true'));
+    });
+    // Back to hidden whenever a form is submitted
+    document.addEventListener('submit', (e) => {
+        e.target.querySelectorAll('.pw-toggle').forEach(b => setPwVisible(b, false));
+    }, true);
+
     // ─── Theme: System / Light / Dark, remembered per browser ───────────
     const THEME_KEY = 'cnc.theme';
     function setTheme(choice, save) {
@@ -27,6 +53,12 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('loginPage').hidden = false;
         document.title = t('app.title.login');
         const loginForm = document.getElementById('loginForm');
+        if (sessionStorage.getItem('signedOut')) {
+            sessionStorage.removeItem('signedOut');
+            const msg = document.getElementById('loginError');
+            msg.textContent = t('login.signedOut');
+            msg.hidden = false;
+        }
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             const username = document.getElementById('username').value;
@@ -65,6 +97,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const esc = (s) => String(s).replace(/[&<>"']/g, c =>
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const authHeaders = (h) => Object.assign({ 'Authorization': 'Bearer ' + token }, h || {});
+
+    // Any 401 (session expired, or admin login reset by BOOT): back to login.
+    // /status and /receivers are polled with the token, so this fires within a poll.
+    const rawFetch = window.fetch.bind(window);
+    let signingOut = false;
+    window.fetch = async (...args) => {
+        const res = await rawFetch(...args);
+        if (res.status === 401 && !signingOut) {
+            signingOut = true;
+            sessionStorage.removeItem('token');
+            sessionStorage.setItem('signedOut', '1');
+            window.location.href = '/';
+        }
+        return res;
+    };
 
     // Single source of truth for accepted machine-program extensions
     const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso', '.rd', '.dst'];
@@ -1531,6 +1578,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (res.ok) {
                 const d = await res.json();
+                signingOut = true; // keep this message up; polls now get 401
                 formStatus(st, t('sys.resetDone', { ssid: d.ssid }), 'ok');
                 sessionStorage.removeItem('token');
             } else {

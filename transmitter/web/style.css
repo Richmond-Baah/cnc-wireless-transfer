@@ -188,6 +188,14 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
     outline: none; border-color: var(--accent-hl); box-shadow: 0 0 0 3px var(--tint);
 }
 input::placeholder { color: var(--muted); opacity: 0.8; }
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { padding-right: calc(var(--tap) + 4px); }
+.pw-toggle {
+    position: absolute; top: 0; right: 0; width: var(--tap); height: 100%; min-height: var(--tap);
+    display: flex; align-items: center; justify-content: center;
+    border: 0; border-radius: var(--r-sm); background: none; color: var(--muted); cursor: pointer;
+}
+.pw-toggle:hover, .pw-toggle[aria-pressed="true"] { color: var(--ink); }
 
 /* ─── Status pills ─────────────────────────────────────────────────── */
 .pill {

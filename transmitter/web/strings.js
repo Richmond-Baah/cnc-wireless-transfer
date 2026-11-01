@@ -22,6 +22,9 @@ window.STRINGS = {
     'login.submit': 'Log in',
     'login.bad': 'Wrong username or password.',
     'login.unreachable': 'Can\'t reach the transmitter. Check you are on its Wi-Fi.',
+    'login.signedOut': 'You were signed out. Log in again.',
+    'pw.show': 'Show password',
+    'pw.hide': 'Hide password',
 
     // Units
     'unit.b': '{n} B',
