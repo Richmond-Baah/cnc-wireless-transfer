@@ -1515,6 +1515,33 @@ document.addEventListener('DOMContentLoaded', () => {
         $('recoveryWord').value = '';
     });
 
+    // Factory reset (typed RESET, checked server-side)
+    $('resetWord').addEventListener('input', () => {
+        $('resetBtn').disabled = $('resetWord').value.trim() !== 'RESET';
+    });
+    $('resetBtn').addEventListener('click', async () => {
+        if ($('resetWord').value.trim() !== 'RESET') return;
+        const st = $('resetStatus');
+        $('resetBtn').disabled = true;
+        try {
+            const res = await fetch('/factory_reset', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ confirm: 'RESET', remove_machines: $('resetMachines').checked })
+            });
+            if (res.ok) {
+                const d = await res.json();
+                formStatus(st, t('sys.resetDone', { ssid: d.ssid }), 'ok');
+                sessionStorage.removeItem('token');
+            } else {
+                formStatus(st, t('sys.resetFailed', { why: await errorText(res) }), 'err');
+            }
+        } catch (e) {
+            formStatus(st, t('sys.resetFailed', { why: t('msg.fail.network') }), 'err');
+        }
+        $('resetWord').value = '';
+    });
+
     // ─── Chunked MD5 (via spark-md5) ────────────────────────────────────
     // Read the file in 2 MB slices so we don't load the whole G-code into RAM.
     // Output is a lowercase hex digest that matches the receiver's mbedtls result.

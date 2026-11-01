@@ -266,6 +266,17 @@
                         </div>
                         <p id="recoveryStatus" class="form-status small" hidden></p>
                     </div>
+                    <div class="recovery">
+                        <h3 data-t="sys.reset"></h3>
+                        <p class="small" data-t="sys.resetWhy"></p>
+                        <label class="short-use small"><input type="checkbox" id="resetMachines"> <span data-t="sys.resetMachines"></span></label>
+                        <label class="label small" for="resetWord" data-t="sys.resetType"></label>
+                        <div class="confirm-actions">
+                            <input type="text" id="resetWord" class="confirm-word" autocomplete="off" autocapitalize="characters">
+                            <button type="button" id="resetBtn" class="btn btn-danger" data-t="sys.resetBtn" disabled></button>
+                        </div>
+                        <p id="resetStatus" class="form-status small" hidden></p>
+                    </div>
                 </section>
             </div>
         </div>

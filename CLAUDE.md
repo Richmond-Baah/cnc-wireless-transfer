@@ -27,6 +27,8 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 - Upload is browser-driven chunking: /upload_begin, /upload_chunk, /upload_finish, /upload_cancel.
 - Pairing: receiver /pair only while unpaired; once paired every receiver API needs X-Auth-Key; receiver "/" is info only.
 - Pairing reset only by holding BOOT 10 s (or transmitter /unpair with the key); never automatic.
+- BOOT (GPIO0 pinhole, components/boot_button): debounced, fires once after a 10 s hold while running; a press held at task start is ignored; shorter holds do nothing. LED: magenta fast blink while held, solid magenta 2 s on fire. Receiver: clear pairing. Transmitter: admin login back to factory default only (network + machines unchanged), logged.
+- Factory reset (UI Settings > System, POST /factory_reset {"confirm":"RESET","remove_machines"}): AP-only, AP FILEXFER-XXXX + factory password, no router, factory admin login; keeps machines (they pull the new AP creds before the restart) unless remove_machines unpairs all. The only path that changes the AP SSID of a set-up unit.
 - One upload session at a time across all receivers (409 for another receiver).
 - Status/cards come from the heartbeat cache only; request handlers never call receiver /status.
 - Recovery: receiver alternates saved/factory AP creds every 10 failed connects; transmitter /recovery = factory AP for 5 min, then reverts.

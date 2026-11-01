@@ -717,6 +717,26 @@ int rx_registry_unpair(const char *id, char *msg, size_t msg_len) {
   return 200;
 }
 
+int rx_registry_unpair_all(void) {
+  int n = 0;
+  char id[RX_ID_LEN];
+  char msg[64];
+  for (int k = 0; k < RX_MAX_PAIRED; k++) {
+    lock();
+    bool any = s_rx_count > 0;
+    if (any) strlcpy(id, s_rx[0].id, sizeof(id));
+    unlock();
+    if (!any) break;
+    rx_registry_unpair(id, msg, sizeof(msg));
+    n++;
+  }
+  lock();
+  memset(s_prereg, 0, sizeof(s_prereg));
+  save_locked();
+  unlock();
+  return n;
+}
+
 // ─── AP credential version ──────────────────────────────────────────────────
 uint32_t rx_registry_config_version(void) { return s_cfg_ver; }
 

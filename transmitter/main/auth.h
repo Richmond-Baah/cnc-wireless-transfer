@@ -22,6 +22,9 @@ bool auth_validate_token(const char *token);
 void auth_invalidate_token(const char *token);
 void auth_invalidate_all(void);
 
+// Admin login back to the compiled-in default (NVS keys erased), all sessions dropped
+void auth_reset_defaults(void);
+
 size_t auth_get_active_token_count(void);
 
 #endif // AUTH_H

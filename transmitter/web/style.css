@@ -460,3 +460,4 @@ fieldset { border: 0; min-width: 0; }
 .recovery { border: 1px solid var(--line); border-radius: var(--r); padding: 16px; }
 .recovery h3 { margin-bottom: 6px; }
 .recovery .label { margin-top: 12px; }
+.recovery + .recovery { margin-top: 16px; }

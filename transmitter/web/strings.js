@@ -277,7 +277,14 @@ window.STRINGS = {
     'sys.recoveryBtn': 'Start recovery mode',
     'sys.recoveryOn': 'Recovery mode is on for {n} more min.',
     'sys.recoveryStarted': 'Recovery mode started. This connection drops; join the factory network.',
-    'sys.recoveryFailed': 'Recovery mode didn\'t start: {why}'
+    'sys.recoveryFailed': 'Recovery mode didn\'t start: {why}',
+    'sys.reset': 'Factory reset',
+    'sys.resetWhy': 'Puts the network and the admin login back to factory settings: the transmitter\'s own network only (no router), factory network name and password, factory admin password. Paired machines are kept and move to the new network, unless you remove them below. The transmitter restarts.',
+    'sys.resetMachines': 'Also remove all machines',
+    'sys.resetType': 'Type RESET to confirm',
+    'sys.resetBtn': 'Factory reset',
+    'sys.resetDone': 'Reset done. The transmitter is restarting: join {ssid} and log in with the factory admin account.',
+    'sys.resetFailed': 'Factory reset didn\'t work: {why}'
 };
 
 window.t = function (key, vars) {

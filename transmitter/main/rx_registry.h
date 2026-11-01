@@ -65,6 +65,9 @@ int rx_registry_approve(const char *id, const char *name, char *msg, size_t msg_
 int rx_registry_rename(const char *id, const char *name, char *msg, size_t msg_len);
 // unpair: 200 with msg set when the receiver was offline (BOOT reset still needed)
 int rx_registry_unpair(const char *id, char *msg, size_t msg_len);
+// Unpairs every receiver (online ones are told to forget their key) and drops
+// pre-registered keys. Returns how many were removed.
+int rx_registry_unpair_all(void);
 
 // Pairing file: pre-registers a new key (any receiver, 24 h) under name and
 // returns pair.cfg JSON {v, ssid, pass, key, tx_id, name, expiry} (caller frees

@@ -7,8 +7,24 @@
 #include "file_transfer.h"
 #include "rx_registry.h"
 #include "led.h"
+#include "auth.h"
+#include "boot_button.h"
 
 static const char *TAG = "MAIN";
+
+// BOOT (pinhole) held 10 s: admin login back to factory default only;
+// network settings and paired machines stay as they are.
+#define BOOT_HOLD_MS 10000
+
+static void boot_pressed(bool pressed) {
+  led_set_button(pressed ? LED_BUTTON_HELD : LED_BUTTON_OFF);
+}
+
+static void boot_fired(void) {
+  ESP_LOGW(TAG, "BOOT held %d s: resetting admin login", BOOT_HOLD_MS / 1000);
+  auth_reset_defaults();
+  led_set_button(LED_BUTTON_DONE);
+}
 
 void app_main(void)
 {
@@ -36,6 +52,7 @@ void app_main(void)
 
     // 6. Start Web Server (receivers announce themselves via /rx/heartbeat)
     web_server_start();
+    boot_button_start(BOOT_HOLD_MS, boot_pressed, boot_fired);
 
     ESP_LOGI(TAG, "Transmitter Init Complete. Free Heap: %u", (unsigned)esp_get_free_heap_size());
 }

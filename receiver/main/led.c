@@ -20,11 +20,34 @@ static void set_color(uint8_t r, uint8_t g, uint8_t b) {
   }
 }
 
+static volatile led_button_t s_button = LED_BUTTON_OFF;
+
+// Delay that ends early when BOOT-button feedback starts, so it shows at once
+static void led_wait(int ms) {
+  for (; ms > 0 && s_button == LED_BUTTON_OFF; ms -= 50) {
+    vTaskDelay(pdMS_TO_TICKS(ms < 50 ? ms : 50));
+  }
+}
+
 static void led_task(void *pvParameters) {
   uint8_t breathe = 0;
   int8_t breathe_dir = 5;
 
   while (1) {
+    // BOOT long press: magenta fast blink while held, solid 2 s when it fires
+    if (s_button == LED_BUTTON_HELD) {
+      set_color(128, 0, 128);
+      vTaskDelay(pdMS_TO_TICKS(100));
+      set_color(0, 0, 0);
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    if (s_button == LED_BUTTON_DONE) {
+      set_color(128, 0, 128);
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      if (s_button == LED_BUTTON_DONE) s_button = LED_BUTTON_OFF;
+      continue;
+    }
     switch (current_state) {
     case RECEIVER_LED_IDLE:
       // White pulse (slow breathing)
@@ -33,27 +56,27 @@ static void led_task(void *pvParameters) {
       if (breathe >= 100 || breathe <= 0) {
         breathe_dir = -breathe_dir;
       }
-      vTaskDelay(pdMS_TO_TICKS(50));
+      led_wait(50);
       break;
 
     case RECEIVER_LED_RECEIVING:
       // Blinking yellow (medium speed)
       set_color(128, 128, 0); // Yellow
-      vTaskDelay(pdMS_TO_TICKS(250));
+      led_wait(250);
       set_color(0, 0, 0);
-      vTaskDelay(pdMS_TO_TICKS(250));
+      led_wait(250);
       break;
 
     case RECEIVER_LED_FILE_READY:
       // Solid green
       set_color(0, 128, 0);
-      vTaskDelay(pdMS_TO_TICKS(100));
+      led_wait(100);
       break;
 
     case RECEIVER_LED_USB_ACTIVE:
       // Solid blue
       set_color(0, 0, 128);
-      vTaskDelay(pdMS_TO_TICKS(100));
+      led_wait(100);
       break;
 
     case RECEIVER_LED_ERROR:
@@ -66,16 +89,16 @@ static void led_task(void *pvParameters) {
       // LED state via led_set_state(). This side here just clears the
       // visual indication after the timeout.
       set_color(128, 0, 0);
-      vTaskDelay(pdMS_TO_TICKS(5000));
+      led_wait(5000);
       current_state = RECEIVER_LED_IDLE;
       break;
 
     case RECEIVER_LED_CARD_ERROR:
       // Slow red blink, persistent until the state machine leaves CARD_ERROR
       set_color(128, 0, 0);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      led_wait(1000);
       set_color(0, 0, 0);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      led_wait(1000);
       break;
     }
   }
@@ -115,3 +138,5 @@ void led_set_state(receiver_led_state_t state) {
   current_state = state;
   ESP_LOGI(TAG, "State changed to %d", state);
 }
+
+void led_set_button(led_button_t mode) { s_button = mode; }

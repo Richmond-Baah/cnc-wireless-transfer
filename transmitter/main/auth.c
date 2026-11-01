@@ -170,6 +170,20 @@ void auth_invalidate_all(void) {
     ESP_LOGI(TAG, "All tokens invalidated");
 }
 
+void auth_reset_defaults(void) {
+    nvs_handle_t h;
+    if (nvs_open("sys_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, "auth_user");
+        nvs_erase_key(h, "auth_pass");
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    snprintf(sys_user, sizeof(sys_user), "%s", DEFAULT_USER);
+    snprintf(sys_pass, sizeof(sys_pass), "%s", DEFAULT_PASS);
+    auth_invalidate_all();
+    ESP_LOGW(TAG, "Admin login reset to factory default (user=[%s])", sys_user);
+}
+
 size_t auth_get_active_token_count(void) {
     return s_active_tokens;
 }

@@ -48,6 +48,14 @@ static const char *TAG = "WEB";
 static char scratch_buf[SCRATCH_BUFSIZE];
 
 static void restart_delayed_task(void *pvParameters);
+// Restarts after the reply is sent (and after receivers fetched s_restart_wait_ver)
+static void schedule_restart(void) {
+  static bool restart_scheduled = false;
+  if (!restart_scheduled) {
+    restart_scheduled = true;
+    xTaskCreate(restart_delayed_task, "restart_task", 2048, NULL, 5, NULL);
+  }
+}
 static uint32_t s_restart_wait_ver; // non-zero: wait for receivers to fetch this config version
 
 // ─── Auth Helper
@@ -607,13 +615,8 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
                       : "{\"status\":\"ok\",\"message\":\"Restarting...\"}",
                   HTTPD_RESP_USE_STRLEN);
 
-  // Schedule restart task after response is sent
-  static bool restart_scheduled = false;
-  if (!restart_scheduled) {
-    restart_scheduled = true;
-    ESP_LOGI(TAG, "Config updated. Restarting%s...", ap_changed ? " after receivers fetch it" : " in 1 second");
-    xTaskCreate(restart_delayed_task, "restart_task", 2048, NULL, 5, NULL);
-  }
+  ESP_LOGI(TAG, "Config updated. Restarting%s...", ap_changed ? " after receivers fetch it" : " in 1 second");
+  schedule_restart();
   return ESP_OK;
 }
 
@@ -953,6 +956,79 @@ static esp_err_t recovery_post_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// POST /factory_reset {"confirm":"RESET","remove_machines":false}: network and
+// admin login back to factory defaults (AP FILEXFER-XXXX, AP only, no router),
+// then restart. Paired machines are kept and pull the new AP credentials first
+// (like a Settings change), unless remove_machines unpairs them all.
+static esp_err_t factory_reset_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char body[96] = {0};
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body) ||
+      !read_full_body(req, body, sizeof(body) - 1)) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  cJSON *json = cJSON_Parse(body);
+  cJSON *confirm = json ? cJSON_GetObjectItem(json, "confirm") : NULL;
+  bool confirmed = cJSON_IsString(confirm) && strcmp(confirm->valuestring, "RESET") == 0;
+  bool remove = json && cJSON_IsTrue(cJSON_GetObjectItem(json, "remove_machines"));
+  cJSON_Delete(json);
+  if (!confirmed) {
+    send_status_text(req, 400, "Confirmation required: type RESET");
+    return ESP_OK;
+  }
+  char active[RX_ID_LEN];
+  if (file_transfer_active_rx(active, sizeof(active))) {
+    send_status_text(req, 409, "Upload in progress");
+    return ESP_OK;
+  }
+
+  ESP_LOGW(TAG, "Factory reset requested (%s machines)", remove ? "removing" : "keeping");
+  int removed = remove ? rx_registry_unpair_all() : 0;
+
+  sys_config_t cur;
+  config_load(&cur);
+  char ssid[33];
+  wifi_default_ap_ssid(ssid, sizeof(ssid));
+  bool ap_changed = strcmp(cur.ap_ssid, ssid) != 0 ||
+                    strcmp(cur.ap_pass, CONFIG_CNC_DEFAULT_WIFI_PASSWORD) != 0;
+  memset(&cur, 0, sizeof(cur));
+
+  nvs_handle_t h;
+  if (nvs_open("wifi_cfg", NVS_READWRITE, &h) != ESP_OK) {
+    send_status_text(req, 500, "NVS open failed");
+    return ESP_OK;
+  }
+  nvs_set_str(h, "wifi_mode", "AP");
+  nvs_set_str(h, "ap_ssid", ssid);
+  nvs_set_str(h, "ap_pass", CONFIG_CNC_DEFAULT_WIFI_PASSWORD);
+  nvs_erase_key(h, "sta_ssid");
+  nvs_erase_key(h, "sta_pass");
+  nvs_commit(h);
+  nvs_close(h);
+  auth_reset_defaults();
+
+  if (ap_changed && !remove) {
+    s_restart_wait_ver = rx_registry_bump_config_version();
+  }
+  cJSON *o = cJSON_CreateObject();
+  cJSON_AddStringToObject(o, "status", "ok");
+  cJSON_AddStringToObject(o, "ssid", ssid);
+  cJSON_AddNumberToObject(o, "removed", removed);
+  char *out = cJSON_PrintUnformatted(o);
+  cJSON_Delete(o);
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, out ? out : "{\"status\":\"ok\"}");
+  cJSON_free(out);
+  ESP_LOGW(TAG, "Factory reset: AP [%s], admin login default, %d machine(s) removed. Restarting%s",
+           ssid, removed, s_restart_wait_ver ? " after receivers fetch it" : "");
+  schedule_restart();
+  return ESP_OK;
+}
+
 // ─── Debug endpoint — shows connected stations and receiver connectivity
 static esp_err_t debug_get_handler(httpd_req_t *req) {
   char resp[1024];
@@ -1050,6 +1126,7 @@ static const route_t s_routes[] = {
     {"/receivers/pair_file", HTTP_POST, receivers_pair_file_handler, RT_SYNC},
     {"/pair_window/stop", HTTP_POST, pair_window_stop_handler, RT_SYNC},
     {"/recovery", HTTP_POST, recovery_post_handler, RT_RX},
+    {"/factory_reset", HTTP_POST, factory_reset_handler, RT_RX},
     {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
     // Receivers
     {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler, RT_SYNC},

@@ -1,12 +1,13 @@
 #include "pairing.h"
+#include "boot_button.h"
 #include "cJSON.h"
-#include "driver/gpio.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "file_receiver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "led.h"
 #include "nvs.h"
 #include "wifi_manager.h"
 #include <stdio.h>
@@ -16,7 +17,6 @@ static const char *TAG = "PAIRING";
 
 #define PAIR_NVS_NS "pairing"
 #define HEARTBEAT_INTERVAL_MS 10000
-#define BOOT_BUTTON_GPIO GPIO_NUM_0
 #define BOOT_HOLD_MS 10000
 
 static char s_id[16];
@@ -281,33 +281,17 @@ static void heartbeat_task(void *arg) {
 }
 
 // Hold BOOT (GPIO0) for 10 s: clear the pairing so the transmitter can approve again.
-static void boot_button_task(void *arg) {
-  (void)arg;
-  gpio_config_t io = {
-      .pin_bit_mask = 1ULL << BOOT_BUTTON_GPIO,
-      .mode = GPIO_MODE_INPUT,
-      .pull_up_en = GPIO_PULLUP_ENABLE,
-  };
-  gpio_config(&io);
-  int held_ms = 0;
-  bool fired = false;
-  for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(100));
-    if (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
-      held_ms += 100;
-      if (!fired && held_ms >= BOOT_HOLD_MS) {
-        fired = true;
-        ESP_LOGW(TAG, "BOOT held %d s: clearing pairing", BOOT_HOLD_MS / 1000);
-        pairing_clear();
-      }
-    } else {
-      held_ms = 0;
-      fired = false;
-    }
-  }
+static void boot_pressed(bool pressed) {
+  led_set_button(pressed ? LED_BUTTON_HELD : LED_BUTTON_OFF);
+}
+
+static void boot_fired(void) {
+  ESP_LOGW(TAG, "BOOT held %d s: clearing pairing", BOOT_HOLD_MS / 1000);
+  pairing_clear();
+  led_set_button(LED_BUTTON_DONE);
 }
 
 void pairing_start_tasks(void) {
   xTaskCreate(heartbeat_task, "rx_heartbeat", 4096, NULL, 3, NULL);
-  xTaskCreate(boot_button_task, "boot_btn", 2048, NULL, 2, NULL);
+  boot_button_start(BOOT_HOLD_MS, boot_pressed, boot_fired);
 }
