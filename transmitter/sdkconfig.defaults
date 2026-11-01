@@ -1,12 +1,12 @@
 # Target
 CONFIG_IDF_TARGET="esp32s3"
 
+# Flash Size
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
 # Partition Table
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-
-# SPIFFS
-CONFIG_SPIFFS_MAX_PARTITIONS=3
 
 # CNC Wireless defaults (can be changed via menuconfig or Kconfig)
 CONFIG_CNC_DEFAULT_WIFI_SSID="CNC_WIRELESS"
@@ -36,3 +36,7 @@ CONFIG_LOG_DEFAULT_LEVEL=3
 
 # Wi-Fi TX power in 0.25 dBm units (34 = 8.5 dBm)
 CONFIG_CNC_WIFI_MAX_TX_POWER=34
+
+# Core dump to the 64 KB coredump partition (ELF), downloadable from Settings > System
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y

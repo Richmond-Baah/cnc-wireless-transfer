@@ -649,6 +649,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function derivedMsg(v) {
         if (!v) return null;
         if (!v.online) return { type: 'offline' };
+        if (v.storage_type === 'None') return { type: 'nocard' };
         if (v.card_error || v.state === 'CARD_ERROR') return { type: 'card' };
         if (currentFile && !fileFits()) {
             const need = spaceNeeded(currentFile.size, lastTotal);
@@ -685,6 +686,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 extra: `<label class="label small" for="formatWord">${esc(t('msg.card.type'))}</label>`,
                 actions: `<input type="text" id="formatWord" class="confirm-word" autocomplete="off" autocapitalize="characters">` +
                     `<button type="button" class="btn btn-danger" data-msg-act="format" disabled>${esc(t('msg.card.btn'))}</button>` };
+        case 'nocard':
+            return { key: 'nocard:' + (v ? v.id : ''), kind: 'err', icon: 'card', title: t('msg.nocard.title', { name }), why: t('msg.nocard.why') };
         case 'formatting':
             return { key: 'formatting', kind: 'busy', icon: 'busy', title: t('msg.card.busy', { name }), why: t('msg.card.busyWhy') };
         case 'formatted':
@@ -1356,6 +1359,41 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('hashchange', route);
     $('configBtn').addEventListener('click', () => { location.hash = 'settings/network'; });
 
+    // Crash report (core dump) download: transmitter or a machine
+    function renderCrashSelect() {
+        const sel = $('crashDevice');
+        const keep = sel.value;
+        sel.innerHTML = `<option value="">${esc(t('sys.crashTx'))}</option>` +
+            receivers.map(r => `<option value="${esc(r.id)}">${esc(r.name || r.id)}</option>`).join('');
+        sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
+    }
+    $('crashBtn').addEventListener('click', async () => {
+        const sel = $('crashDevice');
+        const id = sel.value;
+        const name = sel.options[sel.selectedIndex].text;
+        const st = $('crashStatus');
+        $('crashBtn').disabled = true;
+        try {
+            const res = await fetch(id ? '/receiver_coredump?rx=' + encodeURIComponent(id) : '/coredump',
+                { headers: authHeaders() });
+            if (res.ok) {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(await res.blob());
+                a.download = (id || 'transmitter') + '-coredump.bin';
+                a.click();
+                URL.revokeObjectURL(a.href);
+                formStatus(st, t('sys.crashDone', { name }), 'ok');
+            } else {
+                const why = await errorText(res);
+                const none = res.status === 404 && why.startsWith('No crash');
+                formStatus(st, none ? t('sys.crashNone', { name }) : t('sys.crashFailed', { why }), none ? 'ok' : 'err');
+            }
+        } catch (e) {
+            formStatus(st, t('sys.crashFailed', { why: t('msg.fail.network') }), 'err');
+        }
+        $('crashBtn').disabled = false;
+    });
+
     async function loadSettings() {
         [netForm, loginSetForm].forEach(f => formStatus(f.querySelector('.form-status'), ''));
         try {
@@ -1396,6 +1434,7 @@ document.addEventListener('DOMContentLoaded', () => {
         line.hidden = !text;
         renderOfflineWarn();
         renderMachineTable();
+        renderCrashSelect();
         // System
         if (status) {
             $('sysFw').textContent = status.tx_fw || '-';

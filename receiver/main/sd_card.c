@@ -422,6 +422,9 @@ bool sd_card_has_card_error(void) {
 
 static esp_err_t sd_card_ensure_fatfs_locked(void) {
     if (current_sd_card == NULL) {
+        // No card at boot: CARD_ERROR (there is no other storage)
+        s_card_error = true;
+        state_machine_transition(STATE_CARD_ERROR);
         return ESP_ERR_NOT_FOUND;
     }
 

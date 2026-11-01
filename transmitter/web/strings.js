@@ -155,6 +155,9 @@ window.STRINGS = {
     'msg.card.done': 'The card in {name} is formatted',
     'msg.card.doneWhy': 'It is empty and ready for files.',
     'msg.card.failed': 'Formatting didn\'t work',
+    'msg.nocard.title': 'No SD card in {name}',
+    'msg.nocard.why': 'Insert a FAT32 SD card, then restart the receiver.',
+    'storage.None': 'No SD card',
     'msg.done.title': '{file} is on {name}',
     'msg.done.why': 'Checked and complete. {size} in {time}.',
     'msg.done.slow': 'The drive is taking longer than usual to reconnect to the machine.',
@@ -287,7 +290,15 @@ window.STRINGS = {
     'sys.resetType': 'Type RESET to confirm',
     'sys.resetBtn': 'Factory reset',
     'sys.resetDone': 'Reset done. The transmitter is restarting: join {ssid} and log in with the factory admin account.',
-    'sys.resetFailed': 'Factory reset didn\'t work: {why}'
+    'sys.resetFailed': 'Factory reset didn\'t work: {why}',
+    'sys.crash': 'Crash report',
+    'sys.crashWhy': 'After an unexpected restart a device keeps a crash report. Download it for support.',
+    'sys.crashDevice': 'Device',
+    'sys.crashTx': 'Transmitter',
+    'sys.crashBtn': 'Download',
+    'sys.crashNone': 'No crash report saved on {name}.',
+    'sys.crashDone': 'Crash report from {name} downloaded.',
+    'sys.crashFailed': 'Couldn\'t get the crash report: {why}'
 };
 
 window.t = function (key, vars) {

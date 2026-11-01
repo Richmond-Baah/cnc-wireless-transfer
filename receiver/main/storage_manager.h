@@ -2,7 +2,6 @@
 #define STORAGE_MANAGER_H
 
 #include "esp_err.h"
-#include "wear_levelling.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -33,7 +32,7 @@ esp_err_t storage_manager_format(void);
 esp_err_t storage_manager_get_info(uint64_t *out_total, uint64_t *out_free, const char **out_type);
 
 /**
- * @brief Check whether any FatFS volume is currently mounted (SD or flash)
+ * @brief Check whether FatFS is currently mounted on the SD card
  */
 bool storage_manager_fatfs_available(void);
 
@@ -43,21 +42,11 @@ bool storage_manager_fatfs_available(void);
 bool storage_manager_is_sd_present(void);
 
 /**
- * @brief Check whether the internal flash FatFS is currently mounted
- */
-bool storage_manager_is_flash_mounted(void);
-
-/**
- * @brief Prepare storage for USB MSC operation.
- * If SD card is present, ensures it has a valid FAT filesystem and leaves it in raw mode.
- * If internal flash only, ensures it is formatted and switches to raw wear-levelling mode.
+ * @brief Prepare storage for USB MSC operation: checks the SD card has a valid
+ * FAT filesystem (never formats) and leaves it in raw mode. No card or an
+ * unreadable FAT sets CARD_ERROR.
  */
 esp_err_t storage_manager_prepare_for_usb(void);
-
-/**
- * @brief Unmount internal flash FatFS while retaining raw wear-levelling handle for USB MSC
- */
-esp_err_t storage_manager_unmount_flash_for_usb(void);
 
 /**
  * @brief Release storage so USB MSC can access the SD card exclusively
@@ -76,13 +65,7 @@ esp_err_t storage_manager_flush_and_release_for_usb(void);
 esp_err_t storage_manager_flush_sync(void);
 
 /**
- * @brief Get the wear leveling handle for MSC
- * @return wl_handle_t The active handle
- */
-wl_handle_t storage_manager_get_wl_handle(void);
-
-/**
- * @brief Get the base path for storage (/sdcard or /storage)
+ * @brief Get the base path for storage (/sdcard)
  */
 const char* storage_manager_get_base_path(void);
 

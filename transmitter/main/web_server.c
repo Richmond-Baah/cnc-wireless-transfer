@@ -10,6 +10,7 @@
 #include "esp_app_desc.h"
 
 #include "auth.h"
+#include "coredump_http.h"
 #include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -1029,6 +1030,60 @@ static esp_err_t factory_reset_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// GET /coredump: the transmitter's last crash report.
+// GET /receiver_coredump?rx=<id>: a receiver's, streamed through from it.
+static esp_err_t coredump_get_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  return coredump_http_send(req, "transmitter-coredump.bin");
+}
+
+static esp_err_t receiver_coredump_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char id[RX_ID_LEN];
+  rx_target_t rx;
+  bool known = false;
+  if (!get_rx_id(req, id, sizeof(id)) || !rx_registry_target(id, &rx, &known)) {
+    send_status_text(req, known ? 503 : 404, known ? "Machine is offline" : "Unknown machine");
+    return ESP_OK;
+  }
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s/coredump", rx.ip);
+  esp_http_client_config_t cfg = {.url = url, .timeout_ms = 5000};
+  esp_http_client_handle_t c = esp_http_client_init(&cfg);
+  if (c == NULL) {
+    send_status_text(req, 500, "HTTP client init failed");
+    return ESP_OK;
+  }
+  esp_http_client_set_header(c, "X-Auth-Key", rx.key);
+  int status = -1;
+  if (esp_http_client_open(c, 0) == ESP_OK && esp_http_client_fetch_headers(c) >= 0) {
+    status = esp_http_client_get_status_code(c);
+  }
+  if (status != 200) {
+    esp_http_client_cleanup(c);
+    send_status_text(req, status == 404 ? 404 : 502,
+                     status == 404 ? "No crash report saved" : "Machine did not answer");
+    return ESP_OK;
+  }
+  char disp[80];
+  snprintf(disp, sizeof(disp), "attachment; filename=\"%s-coredump.bin\"", id);
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Content-Disposition", disp);
+  int n;
+  while ((n = esp_http_client_read(c, s_rx_body, sizeof(s_rx_body))) > 0) {
+    if (httpd_resp_send_chunk(req, s_rx_body, n) != ESP_OK) break;
+  }
+  httpd_resp_send_chunk(req, NULL, 0);
+  esp_http_client_cleanup(c);
+  return ESP_OK;
+}
+
 // ─── Debug endpoint — shows connected stations and receiver connectivity
 static esp_err_t debug_get_handler(httpd_req_t *req) {
   char resp[1024];
@@ -1127,6 +1182,8 @@ static const route_t s_routes[] = {
     {"/pair_window/stop", HTTP_POST, pair_window_stop_handler, RT_SYNC},
     {"/recovery", HTTP_POST, recovery_post_handler, RT_RX},
     {"/factory_reset", HTTP_POST, factory_reset_handler, RT_RX},
+    {"/coredump", HTTP_GET, coredump_get_handler, RT_RX},
+    {"/receiver_coredump", HTTP_GET, receiver_coredump_handler, RT_RX},
     {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
     // Receivers
     {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler, RT_SYNC},

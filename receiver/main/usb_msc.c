@@ -105,19 +105,8 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16
 
 bool tud_msc_test_unit_ready_cb(uint8_t lun) {
     (void)lun;
-    // FatFS has exclusive ownership of the SD card -> host must retry later
-    if (current_sd_card != NULL && sd_card_is_mounted()) {
-        return false;
-    }
-    // FatFS has exclusive ownership of internal flash -> host must retry later
-    if (current_sd_card == NULL && storage_manager_is_flash_mounted()) {
-        return false;
-    }
-    // We are ready if we have ANY valid hardware pointer (SD or Internal Flash)
-    bool has_sd = (current_sd_card != NULL);
-    bool has_flash = (storage_manager_get_wl_handle() != WL_INVALID_HANDLE);
-
-    return (has_sd || has_flash);
+    // No card, or FatFS has exclusive ownership of it -> host must retry later
+    return current_sd_card != NULL && !sd_card_is_mounted();
 }
 
 void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_size) {
@@ -129,25 +118,9 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_siz
         *block_count = current_sd_card->csd.capacity;
         ESP_LOGI(TAG, "SD Card: block_size=512, blocks=%lu", *block_count);
     } else {
-        wl_handle_t wl = storage_manager_get_wl_handle();
-        ESP_LOGI(TAG, "=== CAPACITY CB: WL handle=%d ===", wl);
-        if (wl != WL_INVALID_HANDLE) {
-            // IMPORTANT: flash erase granularity = wl_sector_size() (typically 4096).
-            // Reporting 512-byte blocks causes wl_erase_range to erase 8 USB
-            // sectors for every single write, silently corrupting the FAT after
-            // every USB session. Report the actual erase-sector size so each USB
-            // LBA maps 1:1 to one erase operation, preserving files across reboots.
-            uint32_t sec_size  = wl_sector_size(wl);
-            uint32_t total     = wl_size(wl);
-            *block_size  = (uint16_t)sec_size;
-            *block_count = total / sec_size;
-            ESP_LOGI(TAG, "Flash: sector_size=%lu, total=%lu, blocks=%lu",
-                     sec_size, total, *block_count);
-        } else {
-            *block_size  = 512;
-            *block_count = 0;
-            ESP_LOGW(TAG, "NO STORAGE AVAILABLE!");
-        }
+        *block_size  = 512;
+        *block_count = 0;
+        ESP_LOGW(TAG, "No SD card: no storage");
     }
     ESP_LOGI(TAG, "USB Capacity: block_size=%u, blocks=%lu", *block_size, *block_count);
 }
@@ -197,22 +170,6 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buff
 
         sd_card_release_io();
         return result;
-    } else {
-        if (storage_manager_is_flash_mounted()) {
-            ESP_LOGE(TAG, "READ FAILED: Flash owned by FatFS, raw access refused");
-            return -1;
-        }
-        wl_handle_t wl = storage_manager_get_wl_handle();
-        if (wl != WL_INVALID_HANDLE) {
-            // Address is lba * sector_size (sector_size = wl_sector_size, not 512)
-            uint32_t sec_size = wl_sector_size(wl);
-            esp_err_t ret = wl_read(wl, (size_t)lba * sec_size + offset, buffer, bufsize);
-            if (ret == ESP_OK) {
-                return bufsize;
-            }
-            ESP_LOGE(TAG, "READ FAILED at LBA=%lu offset=%lu: %s", lba, offset, esp_err_to_name(ret));
-            return -1;
-        }
     }
     ESP_LOGE(TAG, "READ FAILED: No storage handle");
     return -1;
@@ -252,34 +209,6 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* 
 
         sd_card_release_io();
         return result;
-    } else {
-        if (storage_manager_is_flash_mounted()) {
-            ESP_LOGE(TAG, "WRITE FAILED: Flash owned by FatFS, raw access refused");
-            return -1;
-        }
-        wl_handle_t wl = storage_manager_get_wl_handle();
-        if (wl != WL_INVALID_HANDLE) {
-            // Each USB LBA maps to exactly one erase sector (wl_sector_size bytes).
-            // We must erase before writing — wl_erase_range requires the address
-            // and size to be multiples of wl_sector_size(); bufsize == sec_size here.
-            uint32_t sec_size = wl_sector_size(wl);
-            size_t addr = (size_t)lba * sec_size + offset;
-            // Erase the sector(s) covered by this write
-            size_t erase_size = ((bufsize + sec_size - 1) / sec_size) * sec_size;
-            esp_err_t ret = wl_erase_range(wl, addr, erase_size);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "wl_erase_range failed at addr 0x%zx (size %zu): %s",
-                         addr, erase_size, esp_err_to_name(ret));
-                return -1;
-            }
-            ret = wl_write(wl, addr, buffer, bufsize);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "wl_write failed at addr 0x%zx (size %lu): %s",
-                         addr, (unsigned long)bufsize, esp_err_to_name(ret));
-                return -1;
-            }
-            return bufsize;
-        }
     }
     return -1;
 }

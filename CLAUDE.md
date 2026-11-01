@@ -1,5 +1,5 @@
 # FileXfer (FILEXFER; formerly CNC Wireless Transfer, commercial product)
-ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFER-<last 4 MAC hex>" 192.168.4.1 (factory/recovery SSID "CNC_WIRELESS"), http://filexfer.local (alias cnc-transfer.local), web UI + auth, forwards uploads. Receiver: Wi-Fi client (DHCP), USB mass-storage drive for CNC/laser/printer, SD over SPI (fallback: internal flash).
+ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFER-<last 4 MAC hex>" 192.168.4.1 (factory/recovery SSID "CNC_WIRELESS"), http://filexfer.local (alias cnc-transfer.local), web UI + auth, forwards uploads. Receiver: Wi-Fi client (DHCP), USB mass-storage drive for CNC/laser/printer, SD over SPI (only storage; no internal-flash fallback).
 - Receiver ID "rx-"+last 3 MAC bytes; heartbeat POST <gateway>/rx/heartbeat every 10 s (receiver/main/pairing.c).
 - Transmitter rx_registry: paired list (id, name, key) in NVS, pending list in RAM, online = heartbeat < 30 s.
 - UI selects a machine; every receiver proxy takes X-Rx-Id (or ?rx=) and sends that receiver's X-Auth-Key.
@@ -9,6 +9,9 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 - Web UI (transmitter/web, one page: login + app views): all text in strings.js (t(key)), theme tokens in style.css (light/dark/system, saved in localStorage), no CDN/web fonts, messages inline (no alert/confirm/prompt); tools/bundle_ui.py inlines it into one gzipped HTML embedded in the app, served at /ui/<crc> (cached 1 year); API responses no-store.
 
 ## Build / flash
+- Both boards 4 MB flash. partitions.csv: nvs 0x9000 (tx 0x5000, rx 0x6000, offsets never move), otadata (tx 0xE000, rx 0x3D0000), ota_0 0x10000 + ota_1 0x1F0000 (0x1E0000 each), coredump 64 KB (tx 0x3D0000, rx 0x3E0000). Layout changes need a USB flash.
+- PROJECT_VER = `git describe --tags` without "v" (fallback 0.0.0-dev), refreshed on commit/checkout.
+- Core dump to flash (ELF). GET /coredump (tx, authed), GET /receiver_coredump?rx= (tx proxies rx /coredump, key, paired only); UI Settings > System > Crash report. Decode: `idf.py coredump-info -c <file>`.
 - ESP-IDF 5.5.1. `idf.py build` in receiver/ and transmitter/ (or build_all.ps1).
 - Receiver flash: hold BOOT, tap RST, then `idf.py -p COMx flash`; press RST after. Logs on UART0 (GPIO43/44), not USB.
 - Transmitter: `idf.py -p COMx flash monitor` (SPIFFS UI flashed automatically).
@@ -16,7 +19,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 
 ## Invariants (do not break)
 - While USB owns storage, receiver FS stays unmounted. Transfer: USB off → mount → write .tmp → MD5 → rename → unmount → USB on.
-- Storage chosen at boot (SD if present, else flash); never switch at runtime — SD failure → 503/CARD_ERROR.
+- SD card is the only storage. No card at boot → CARD_ERROR (storage_type "None", UI "No SD card") until restarted with one; SD failure → 503/CARD_ERROR.
 - Never auto-format. Mount failure → CARD_ERROR. Format/Wipe need typed FORMAT/WIPE, checked server-side.
 - Every error path: delete .tmp before unmount, release storage, reconnect USB.
 - Chunks: indexed; dup = ack+discard, out-of-order = 409.
@@ -39,7 +42,6 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 - ".." rejected anywhere in name (too strict; only whole-name matters).
 - Busy-guard threshold untuned (polling machines trigger it).
 - Commercial: own USB VID/PID (not SanDisk), per-device credentials, signed OTA, certified module.
-- Transmitter chip has 4 MB flash + 2 MB PSRAM; sdkconfig set to 2 MB flash. Fix before OTA.
 
 ## Working rules
 - Minimal changes. Cite file:line. Build both boards, commit. Short replies.

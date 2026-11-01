@@ -10,7 +10,7 @@ idf_component_register(SRCS "main.c"
                     REQUIRES nvs_flash esp_wifi esp_event esp_netif lwip
                              mbedtls esp_http_server esp_http_client
                              json driver led_strip esp_app_format esp_timer
-                             mdns pair_proto esp_rom boot_button)
+                             mdns pair_proto esp_rom boot_button coredump_http)
 
 # Web UI: ../web bundled into one gzipped HTML, embedded in the app image
 set(UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../web")

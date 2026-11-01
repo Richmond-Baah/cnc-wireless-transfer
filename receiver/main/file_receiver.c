@@ -1,3 +1,4 @@
+#include "coredump_http.h"
 #include "file_receiver.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -153,9 +154,9 @@ static bool s_file_cache_valid = false;
 static uint64_t s_cache_total = 0;
 static uint64_t s_cache_free = 0;
 
-// True if the storage that transfers target (SD if present, else flash) has FatFS mounted.
+// True if the SD card has FatFS mounted (the only storage).
 static bool active_storage_mounted(void) {
-    return storage_manager_is_sd_present() ? sd_card_is_mounted() : storage_manager_is_flash_mounted();
+    return sd_card_is_mounted();
 }
 
 static void clear_file_cache(void) {
@@ -441,8 +442,7 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     TM_ADD(mount);
     if (!storage_manager_fatfs_available()) {
         // Active storage could not be mounted: USB straight back, nothing else used
-        ESP_LOGE(TAG, "%s could not be mounted; aborting prepare, USB reconnected",
-                 storage_manager_is_sd_present() ? "SD card" : "Internal storage");
+        ESP_LOGE(TAG, "SD card could not be mounted; aborting prepare, USB reconnected");
         prepare_abort_reconnect();
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -774,6 +774,17 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddBoolToObject(obj, "card_error", sd_card_has_card_error());
     // Same rule as the busy guard: the machine read the drive in the last 10 s
     cJSON_AddBoolToObject(obj, "busy", usb_msc_ms_since_host_read() < 10000);
+}
+
+// GET /coredump: last crash report (paired only; it can hold RAM contents)
+static esp_err_t coredump_get_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    if (!pairing_is_paired()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "Not paired");
+        return ESP_OK;
+    }
+    return coredump_http_send(req, "receiver-coredump.bin");
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req) {
@@ -1196,6 +1207,7 @@ void file_receiver_init(void) {
         httpd_uri_t uri_pair = {.uri = "/pair", .method = HTTP_POST, .handler = pair_post_handler};
         httpd_uri_t uri_unpair = {.uri = "/unpair", .method = HTTP_POST, .handler = unpair_post_handler};
         httpd_uri_t uri_delete = {.uri = "/delete", .method = HTTP_POST, .handler = delete_post_handler};
+        httpd_uri_t uri_coredump = {.uri = "/coredump", .method = HTTP_GET, .handler = coredump_get_handler};
 
         httpd_register_uri_handler(server, &uri_prepare);
         httpd_register_uri_handler(server, &uri_chunk);
@@ -1210,6 +1222,7 @@ void file_receiver_init(void) {
         httpd_register_uri_handler(server, &uri_pair);
         httpd_register_uri_handler(server, &uri_unpair);
         httpd_register_uri_handler(server, &uri_delete);
+        httpd_register_uri_handler(server, &uri_coredump);
 
         ESP_LOGI(TAG, "File receiver HTTP server started on port %d", config.server_port);
     } else {
