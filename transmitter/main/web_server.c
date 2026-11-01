@@ -60,6 +60,14 @@ static void schedule_restart(void) {
 }
 static uint32_t s_restart_wait_ver; // non-zero: wait for receivers to fetch this config version
 
+// Receiver being updated (POST /rxfw/*): one at a time, idle 60 s = over
+static char s_rxfw_id[RX_ID_LEN];
+static int64_t s_rxfw_last_us;
+static bool rxfw_active(const char *except_id) {
+  if (!s_rxfw_id[0] || esp_timer_get_time() - s_rxfw_last_us > 60LL * 1000 * 1000) return false;
+  return !except_id || strcmp(except_id, s_rxfw_id) != 0;
+}
+
 // ─── Auth Helper
 // ────────────────────────────────────────────────────────────────
 static bool is_authorized(httpd_req_t *req) {
@@ -267,7 +275,7 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
     return ESP_OK;
   }
 
-  if (fw_update_active()) {
+  if (fw_update_active() || rxfw_active(NULL)) {
     cJSON_Delete(json);
     send_status_text(req, 409, "Firmware update in progress");
     return ESP_OK;
@@ -1129,6 +1137,9 @@ static esp_err_t fw_begin_handler(httpd_req_t *req) {
   } else if (file_transfer_active_rx(active, sizeof(active))) {
     code = 409;
     snprintf(msg, sizeof(msg), "A file transfer is running");
+  } else if (rxfw_active(NULL)) {
+    code = 409;
+    snprintf(msg, sizeof(msg), "A machine is being updated");
   } else {
     code = fw_update_begin((size_t)size, msg, sizeof(msg));
   }
@@ -1190,6 +1201,87 @@ static esp_err_t fw_cancel_handler(httpd_req_t *req) {
   fw_update_abort();
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_sendstr(req, "{\"status\":\"cancelled\"}");
+  return ESP_OK;
+}
+
+// ─── Firmware update (a receiver) ───────────────────────────────────────────
+// POST /rxfw/begin|chunk|finish|cancel ?rx=<id>: same protocol as /fw/*, each
+// request relayed to that receiver's /fw/* with its key. Nothing is stored
+// here; chunks are at most the receiver's chunk_size (16 KB).
+static char s_rxfw_buf[16 * 1024]; // rx worker only
+
+static esp_err_t rxfw_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  const char *op = req->uri + strlen("/rxfw/");
+  char id[RX_ID_LEN];
+  rx_target_t rx;
+  bool known = false;
+  if (!get_rx_id(req, id, sizeof(id)) || !rx_registry_target(id, &rx, &known)) {
+    send_status_text(req, known ? 503 : 404, known ? "Machine is offline" : "Unknown machine");
+    return ESP_OK;
+  }
+  bool begin = strncmp(op, "begin", 5) == 0;
+  bool chunk = strncmp(op, "chunk", 5) == 0;
+  char active[RX_ID_LEN];
+  if (begin && (file_transfer_active_rx(active, sizeof(active)) || fw_update_active() || rxfw_active(id))) {
+    send_status_text(req, 409, "Another transfer or update is running");
+    return ESP_OK;
+  }
+  if (!begin && !rxfw_active(NULL)) {
+    if (strncmp(op, "cancel", 6) != 0) {
+      send_status_text(req, 410, "No update running for this machine");
+      return ESP_OK;
+    }
+  } else if (!begin && strcmp(id, s_rxfw_id) != 0) {
+    send_status_text(req, 409, "Another machine is being updated");
+    return ESP_OK;
+  }
+  int len = req->content_len;
+  if (len < 0 || len > (int)sizeof(s_rxfw_buf) || !read_full_body(req, s_rxfw_buf, sizeof(s_rxfw_buf))) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  char path[16];
+  snprintf(path, sizeof(path), "/fw/%.8s", op);
+  int code;
+  if (chunk) {
+    char off_hdr[16] = {0};
+    char *end = NULL;
+    long offset = -1;
+    if (httpd_req_get_hdr_value_str(req, "X-Offset", off_hdr, sizeof(off_hdr)) == ESP_OK) {
+      offset = strtol(off_hdr, &end, 10);
+    }
+    if (offset < 0 || end == off_hdr || *end != '\0') {
+      send_status_text(req, 400, "Missing X-Offset");
+      return ESP_OK;
+    }
+    code = rx_http_chunk(&rx, path, (size_t)offset, s_rxfw_buf, len, 20000, s_rx_resp, sizeof(s_rx_resp));
+  } else {
+    s_rxfw_buf[len] = '\0';
+    // begin erases nothing up front (sequential writes); finish verifies the image
+    code = rx_http(&rx, HTTP_METHOD_POST, path, len ? s_rxfw_buf : "{}", false, 20000, s_rx_resp,
+                   sizeof(s_rx_resp), NULL);
+  }
+  if (begin && code == 200) {
+    strlcpy(s_rxfw_id, id, sizeof(s_rxfw_id));
+    ESP_LOGW(TAG, "Updating firmware of %s", id);
+  }
+  s_rxfw_last_us = esp_timer_get_time();
+  if (code != 200 || strncmp(op, "finish", 6) == 0 || strncmp(op, "cancel", 6) == 0) {
+    s_rxfw_id[0] = '\0'; // over; the browser stops on any error
+    ESP_LOGW(TAG, "Firmware update of %s: %s -> %d", id, op, code);
+  }
+  if (code == 423) {
+    send_status_text(req, 423, "The machine is reading its drive. Update it when it is idle.");
+  } else if (code == 200) {
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, s_rx_resp[0] ? s_rx_resp : "{}");
+  } else {
+    send_status_text(req, code < 0 ? 502 : code, s_rx_resp[0] ? s_rx_resp : "Machine did not answer");
+  }
   return ESP_OK;
 }
 
@@ -1296,6 +1388,10 @@ static const route_t s_routes[] = {
     {"/fw/chunk", HTTP_POST, fw_chunk_handler, RT_UPLOAD},
     {"/fw/finish", HTTP_POST, fw_finish_handler, RT_UPLOAD},
     {"/fw/cancel", HTTP_POST, fw_cancel_handler, RT_UPLOAD},
+    {"/rxfw/begin", HTTP_POST, rxfw_handler, RT_RX},
+    {"/rxfw/chunk", HTTP_POST, rxfw_handler, RT_RX},
+    {"/rxfw/finish", HTTP_POST, rxfw_handler, RT_RX},
+    {"/rxfw/cancel", HTTP_POST, rxfw_handler, RT_RX},
     {"/receiver_coredump", HTTP_GET, receiver_coredump_handler, RT_RX},
     {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
     // Receivers

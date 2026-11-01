@@ -231,9 +231,9 @@ void rx_registry_init(void) {
 }
 
 // ─── HTTP to a receiver ─────────────────────────────────────────────────────
-int rx_http(const rx_target_t *t, esp_http_client_method_t method, const char *path,
-            const char *body, bool force, int timeout_ms, char *resp, size_t resp_len,
-            bool *truncated) {
+static int rx_request(const rx_target_t *t, esp_http_client_method_t method, const char *path,
+                      const char *body, int len, const char *type, const char *offset, bool force,
+                      int timeout_ms, char *resp, size_t resp_len, bool *truncated) {
   char url[64];
   snprintf(url, sizeof(url), "http://%s%s", t->ip, path);
   resp[0] = '\0';
@@ -247,8 +247,8 @@ int rx_http(const rx_target_t *t, esp_http_client_method_t method, const char *p
   }
   if (t->key[0]) esp_http_client_set_header(c, "X-Auth-Key", t->key);
   if (force) esp_http_client_set_header(c, "X-Force", "1");
-  int len = body ? strlen(body) : 0;
-  if (body) esp_http_client_set_header(c, "Content-Type", "application/json");
+  if (offset) esp_http_client_set_header(c, "X-Offset", offset);
+  if (body) esp_http_client_set_header(c, "Content-Type", type);
 
   int status = -1;
   esp_err_t err = esp_http_client_open(c, len);
@@ -277,6 +277,21 @@ int rx_http(const rx_target_t *t, esp_http_client_method_t method, const char *p
     ESP_LOGW(TAG, "%s %s%s: %s", t->id, t->ip, path, resp);
   }
   return status;
+}
+
+int rx_http(const rx_target_t *t, esp_http_client_method_t method, const char *path,
+            const char *body, bool force, int timeout_ms, char *resp, size_t resp_len,
+            bool *truncated) {
+  return rx_request(t, method, path, body, body ? strlen(body) : 0, "application/json", NULL, force,
+                    timeout_ms, resp, resp_len, truncated);
+}
+
+int rx_http_chunk(const rx_target_t *t, const char *path, size_t offset, const void *data, int len,
+                  int timeout_ms, char *resp, size_t resp_len) {
+  char off[16];
+  snprintf(off, sizeof(off), "%u", (unsigned)offset);
+  return rx_request(t, HTTP_METHOD_POST, path, data, len, "application/octet-stream", off, false,
+                    timeout_ms, resp, resp_len, NULL);
 }
 
 // ─── Heartbeats ─────────────────────────────────────────────────────────────

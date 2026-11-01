@@ -1363,7 +1363,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Image header (24) + segment header (8) + esp_app_desc_t: version at +16,
     // project name at +48 (32 bytes each, NUL-padded)
     const FW_DESC = 32, FW_HEAD = FW_DESC + 256;
-    let fwFile = null, fwImage = null, fwCancelled = false;
+    let fwFile = null, fwImage = null, fwCancelled = false, fwBusy = false;
+    const fwRx = {};            // receiver id -> {text, kind, version, until} (update result)
+    let fwListHtml = '';
+    const isTxImage = () => !!fwImage && fwImage.project === 'cnc_transmitter';
+    const isRxImage = () => !!fwImage && fwImage.project === 'cnc_receiver';
     function readFwDesc(buf) {
         const u = new Uint8Array(buf);
         if (u.length < FW_HEAD || u[0] !== 0xE9 || new DataView(buf).getUint32(FW_DESC, true) !== 0xABCD5432) return null;
@@ -1374,6 +1378,26 @@ document.addEventListener('DOMContentLoaded', () => {
         $('fwBar').hidden = pct === null;
         $('fwFill').style.width = (pct || 0) + '%';
     }
+    // Receiver image: one row per machine with its own Update button and result
+    function renderFwMachines() {
+        const list = $('fwMachines');
+        list.hidden = !isRxImage();
+        if (list.hidden) return;
+        for (const r of receivers) {
+            const s = fwRx[r.id];
+            if (s && s.version && r.online && r.fw === s.version) fwRx[r.id] = { text: t('sys.fwRxDone', { v: s.version }), kind: 'ok' };
+            else if (s && s.version && Date.now() > s.until) fwRx[r.id] = { text: t('sys.fwRxLost', { v: s.version, cur: r.fw || '-' }), kind: 'err' };
+        }
+        const html = receivers.length ? receivers.map(r => {
+            const why = !r.online ? t('pill.offline') : r.state === 'RECEIVING' ? t('pill.receiving') : r.busy ? t('pill.job') : '';
+            const s = fwRx[r.id];
+            return `<li class="fw-row"><span class="fw-name"><b>${esc(r.name || r.id)}</b> <span class="muted small">${esc(r.fw || '-')}${why ? ' · ' + esc(why) : ''}</span></span>` +
+                `<button type="button" class="btn" data-fw-rx="${esc(r.id)}"${fwBusy || why ? ' disabled' : ''}>${esc(t('sys.fwUpdate', { name: r.name || r.id }))}</button>` +
+                (s ? `<span class="small ${s.kind === 'err' ? 'err-text' : 'ok-text'}" role="status">${esc(s.text)}</span>` : '') + '</li>';
+        }).join('') : `<li class="muted small">${esc(t('mac.none'))}</li>`;
+        if (html !== fwListHtml) list.innerHTML = fwListHtml = html; // keep focus when nothing changed
+    }
+    setInterval(() => { if (isRxImage()) renderFwMachines(); }, 2000);
     $('fwFile').addEventListener('change', async () => {
         fwFile = $('fwFile').files[0] || null;
         fwImage = null;
@@ -1383,12 +1407,12 @@ document.addEventListener('DOMContentLoaded', () => {
         info.hidden = !fwFile;
         if (fwFile) {
             fwImage = readFwDesc(await fwFile.slice(0, FW_HEAD).arrayBuffer());
-            info.textContent = !fwImage ? t('sys.fwBad')
-                : fwImage.project === 'cnc_transmitter' ? t('sys.fwTx', { v: fwImage.version, cur: status ? status.tx_fw : '-' })
-                : fwImage.project === 'cnc_receiver' ? t('sys.fwRx', { v: fwImage.version })
-                : t('sys.fwBad');
+            info.textContent = isTxImage() ? t('sys.fwTx', { v: fwImage.version, cur: status ? status.tx_fw : '-' })
+                : isRxImage() ? t('sys.fwRx', { v: fwImage.version }) : t('sys.fwBad');
         }
-        $('fwBtn').disabled = !(fwImage && fwImage.project === 'cnc_transmitter');
+        $('fwBtn').hidden = isRxImage();
+        $('fwBtn').disabled = !isTxImage();
+        renderFwMachines();
     });
     async function fwPost(path, headers, body) {
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -1400,47 +1424,77 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         throw new Error('network');
     }
+    // begin / chunks / finish against pathFor(op); returns the finish reply, null if cancelled
+    async function fwSend(pathFor, onPct) {
+        let res = await fwPost(pathFor('begin'), { 'Content-Type': 'application/json' }, JSON.stringify({ size: fwFile.size }));
+        if (!res.ok) throw new Error(await errorText(res));
+        const chunk = (await res.json()).chunk_size || 16384;
+        for (let off = 0; off < fwFile.size; off += chunk) {
+            if (fwCancelled) {
+                await fwPost(pathFor('cancel'), {}, '').catch(() => {});
+                return null;
+            }
+            res = await fwPost(pathFor('chunk'), { 'X-Offset': String(off), 'Content-Type': 'application/octet-stream' },
+                fwFile.slice(off, off + chunk));
+            if (!res.ok) throw new Error(await errorText(res));
+            onPct(Math.round(Math.min(off + chunk, fwFile.size) / fwFile.size * 100));
+        }
+        res = await fwPost(pathFor('finish'), {}, '');
+        if (!res.ok) throw new Error(await errorText(res));
+        return res.json();
+    }
+    const fwWhy = (e) => e.message === 'network' ? t('msg.fail.network') : e.message;
+    function fwLock(on) {
+        fwBusy = on;
+        fwCancelled = false;
+        $('fwFile').disabled = on;
+        $('fwCancel').hidden = !on;
+        $('fwBtn').disabled = on || !isTxImage() || signingOut;
+        renderFwMachines();
+    }
     $('fwCancel').addEventListener('click', () => { fwCancelled = true; });
     $('fwBtn').addEventListener('click', async () => {
-        if (!fwFile || !fwImage) return;
+        if (!fwFile || !isTxImage() || fwBusy) return;
         const st = $('fwStatus');
-        $('fwBtn').disabled = true;
-        $('fwFile').disabled = true;
-        $('fwCancel').hidden = false;
-        fwCancelled = false;
+        fwLock(true);
         fwProgress(0);
         try {
-            let res = await fwPost('/fw/begin', { 'Content-Type': 'application/json' }, JSON.stringify({ size: fwFile.size }));
-            if (!res.ok) throw new Error(await errorText(res));
-            const chunk = (await res.json()).chunk_size || 32768;
-            for (let off = 0; off < fwFile.size; off += chunk) {
-                if (fwCancelled) {
-                    await fwPost('/fw/cancel', {}, '').catch(() => {});
-                    formStatus(st, t('sys.fwCancelled'), 'ok');
-                    fwProgress(null);
-                    return;
-                }
-                res = await fwPost('/fw/chunk', { 'X-Offset': String(off), 'Content-Type': 'application/octet-stream' },
-                    fwFile.slice(off, off + chunk));
-                if (!res.ok) throw new Error(await errorText(res));
-                const pct = Math.round(Math.min(off + chunk, fwFile.size) / fwFile.size * 100);
+            const d = await fwSend(op => '/fw/' + op, pct => {
                 fwProgress(pct);
                 formStatus(st, t('sys.fwUploading', { pct }), 'ok');
+            });
+            fwProgress(null);
+            if (!d) {
+                formStatus(st, t('sys.fwCancelled'), 'ok');
+            } else {
+                signingOut = true; // restarting: the session ends with it
+                sessionStorage.removeItem('token');
+                formStatus(st, t('sys.fwDone', { v: d.version }), 'ok');
+                setTimeout(() => { window.location.href = '/'; }, 45000);
             }
-            res = await fwPost('/fw/finish', {}, '');
-            if (!res.ok) throw new Error(await errorText(res));
-            const d = await res.json();
-            signingOut = true; // restarting: the session ends with it
-            sessionStorage.removeItem('token');
-            formStatus(st, t('sys.fwDone', { v: d.version }), 'ok');
-            setTimeout(() => { window.location.href = '/'; }, 45000);
         } catch (e) {
             fwProgress(null);
-            formStatus(st, t('sys.fwFailed', { why: e.message === 'network' ? t('msg.fail.network') : e.message }), 'err');
+            formStatus(st, t('sys.fwFailed', { why: fwWhy(e) }), 'err');
         } finally {
-            $('fwCancel').hidden = true;
-            $('fwFile').disabled = false;
-            $('fwBtn').disabled = !(fwImage && fwImage.project === 'cnc_transmitter') || signingOut;
+            fwLock(false);
+        }
+    });
+    $('fwMachines').addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-fw-rx]');
+        if (!b || fwBusy || !isRxImage()) return;
+        const id = b.dataset.fwRx;
+        const version = fwImage.version;
+        fwLock(true);
+        const set = (s) => { fwRx[id] = s; renderFwMachines(); };
+        try {
+            const d = await fwSend(op => '/rxfw/' + op + '?rx=' + encodeURIComponent(id),
+                pct => set({ text: t('sys.fwRxProgress', { pct }), kind: 'ok' }));
+            set(d ? { text: t('sys.fwRxRestart'), kind: 'ok', version: d.version || version, until: Date.now() + 180000 }
+                  : { text: t('sys.fwCancelled'), kind: 'ok' });
+        } catch (err) {
+            set({ text: t('sys.fwRxFailed', { why: fwWhy(err) }), kind: 'err' });
+        } finally {
+            fwLock(false);
         }
     });
 

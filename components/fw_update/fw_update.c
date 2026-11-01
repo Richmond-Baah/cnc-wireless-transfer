@@ -191,17 +191,40 @@ int fw_update_finish(char *version, size_t version_len, char *msg, size_t msg_le
   return 200;
 }
 
-void fw_update_confirm_boot(bool ok) {
+static bool boot_pending(void) {
   esp_ota_img_states_t state;
   const esp_partition_t *running = esp_ota_get_running_partition();
-  if (esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) {
+  return esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+void fw_update_confirm_boot(bool ok) {
+  static bool s_done;
+  if (s_done || !boot_pending()) {
+    s_done = true;
     return;
   }
+  s_done = ok;
   if (ok) {
     esp_ota_mark_app_valid_cancel_rollback();
     ESP_LOGW(TAG, "New firmware %s confirmed", esp_app_get_description()->version);
   } else {
     ESP_LOGE(TAG, "New firmware failed its start checks: rolling back");
     esp_ota_mark_app_invalid_rollback_and_reboot();
+  }
+}
+
+static void rollback_timeout(void *arg) {
+  (void)arg;
+  fw_update_confirm_boot(false); // no-op once confirmed
+}
+
+void fw_update_rollback_timer(int seconds) {
+  if (!boot_pending()) return;
+  static esp_timer_handle_t t;
+  const esp_timer_create_args_t args = {.callback = rollback_timeout, .name = "fw_rollback"};
+  if (esp_timer_create(&args, &t) == ESP_OK) {
+    esp_timer_start_once(t, (uint64_t)seconds * 1000000ULL);
+    ESP_LOGW(TAG, "New firmware %s: rolls back unless confirmed within %d s",
+             esp_app_get_description()->version, seconds);
   }
 }

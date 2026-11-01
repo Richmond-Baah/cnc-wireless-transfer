@@ -469,3 +469,6 @@ fieldset { border: 0; min-width: 0; }
 .recovery h3 { margin-bottom: 6px; }
 .recovery .label { margin-top: 12px; }
 .recovery + .recovery { margin-top: 16px; }
+.fw-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.fw-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.fw-name { flex: 1 1 160px; overflow-wrap: anywhere; }

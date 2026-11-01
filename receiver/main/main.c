@@ -4,6 +4,7 @@
 #include "file_receiver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "fw_update.h"
 #include "led.h"
 #include "nvs_flash.h"
 #include "state_machine.h"
@@ -77,6 +78,9 @@ void app_main(void) {
     ESP_LOGI(TAG, "Step 7: mDNS responder init...");
     mdns_responder_init();
     ESP_LOGI(TAG, "Step 7: DONE");
+
+    // New firmware: kept only if a heartbeat is accepted within 5 min
+    fw_update_rollback_timer(300);
 
     ESP_LOGI(TAG, "Step 7b: Heartbeat + BOOT-button tasks...");
     pairing_start_tasks();

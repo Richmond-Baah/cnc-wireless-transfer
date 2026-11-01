@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "file_receiver.h"
+#include "fw_update.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led.h"
@@ -257,6 +258,9 @@ static void heartbeat_task(void *arg) {
     }
     cJSON *r = cJSON_Parse(resp);
     cJSON *paired = r ? cJSON_GetObjectItem(r, "paired") : NULL;
+    if (pairing_is_paired() && cJSON_IsTrue(paired)) {
+      fw_update_confirm_boot(true); // new firmware: Wi-Fi + accepted heartbeat = good
+    }
     cJSON *ver = r ? cJSON_GetObjectItem(r, "config_version") : NULL;
     if (pairing_is_paired() && s_provisional && r != NULL) {
       if (cJSON_IsTrue(paired)) {

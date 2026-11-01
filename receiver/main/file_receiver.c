@@ -1,4 +1,5 @@
 #include "coredump_http.h"
+#include "fw_update.h"
 #include "file_receiver.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -330,9 +331,10 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         return ESP_OK;
     }
     app_state_t cur = state_machine_get();
-    if (cur == STATE_RECEIVING) {
+    if (cur == STATE_RECEIVING || fw_update_active()) {
+        drain_request_body(req);
         httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_send(req, "Receiver Busy", -1);
+        httpd_resp_send(req, fw_update_active() ? "Firmware update running" : "Receiver Busy", -1);
         return ESP_FAIL;
     }
     if (cur == STATE_USB_ACTIVE) {
@@ -776,6 +778,131 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddBoolToObject(obj, "busy", usb_msc_ms_since_host_read() < 10000);
 }
 
+// ─── Firmware update (streamed from the transmitter, never stored) ─────────
+// POST /fw/begin {"size":n} -> {chunk_size}; /fw/chunk X-Offset + raw body
+// (<= RECEIVER_CHUNK_BUFSIZE) -> {written}; /fw/finish -> {version}, then
+// restart; /fw/cancel. Paired only; refused while the machine reads the
+// drive or a file transfer runs.
+static void fw_reply(httpd_req_t *req, int code, const char *json, const char *msg) {
+    if (code == 200) {
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
+        httpd_resp_sendstr(req, json);
+        return;
+    }
+    char status[40];
+    snprintf(status, sizeof(status), "%d %s", code,
+             code == 400 ? "Bad Request" : code == 403 ? "Forbidden" : code == 409 ? "Conflict" :
+             code == 410 ? "Gone" : "Internal Server Error");
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, msg);
+}
+
+static bool fw_request_allowed(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return false;
+    if (!pairing_is_paired()) {
+        drain_request_body(req);
+        fw_reply(req, 403, NULL, "Not paired");
+        return false;
+    }
+    return true;
+}
+
+static esp_err_t fw_begin_handler(httpd_req_t *req) {
+    if (!fw_request_allowed(req)) return ESP_OK;
+    if (reject_if_machine_busy(req)) { // X-Force is never sent for firmware
+        drain_request_body(req);
+        return ESP_OK;
+    }
+    char body[64] = {0};
+    int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len : 0;
+    if (len <= 0 || httpd_req_recv(req, body, len) != len) {
+        drain_request_body(req);
+        fw_reply(req, 400, NULL, "Invalid request body");
+        return ESP_OK;
+    }
+    cJSON *json = cJSON_Parse(body);
+    cJSON *j_size = json ? cJSON_GetObjectItem(json, "size") : NULL;
+    double size = cJSON_IsNumber(j_size) ? j_size->valuedouble : -1;
+    cJSON_Delete(json);
+    char msg[96] = "";
+    int code;
+    if (state_machine_get() == STATE_RECEIVING) {
+        code = 409;
+        snprintf(msg, sizeof(msg), "A file transfer is running");
+    } else if (size <= 0) {
+        code = 400;
+        snprintf(msg, sizeof(msg), "Missing size");
+    } else {
+        code = fw_update_begin((size_t)size, msg, sizeof(msg));
+    }
+    char resp[40];
+    snprintf(resp, sizeof(resp), "{\"chunk_size\":%d}", RECEIVER_CHUNK_BUFSIZE);
+    fw_reply(req, code, resp, msg);
+    return ESP_OK;
+}
+
+static esp_err_t fw_chunk_handler(httpd_req_t *req) {
+    if (!fw_request_allowed(req)) return ESP_OK;
+    char off_hdr[16] = {0};
+    char *end = NULL;
+    long offset = -1;
+    if (httpd_req_get_hdr_value_str(req, "X-Offset", off_hdr, sizeof(off_hdr)) == ESP_OK) {
+        offset = strtol(off_hdr, &end, 10);
+    }
+    int len = req->content_len;
+    int got = 0;
+    if (offset >= 0 && end != off_hdr && *end == '\0' && len > 0 && len <= RECEIVER_CHUNK_BUFSIZE) {
+        while (got < len) {
+            int r = httpd_req_recv(req, chunk_buf + got, len - got);
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            if (r <= 0) break;
+            got += r;
+        }
+    }
+    if (got != len || len <= 0) {
+        drain_request_body(req);
+        fw_reply(req, 400, NULL, "Missing X-Offset or bad chunk");
+        return ESP_OK;
+    }
+    char msg[96] = "";
+    size_t written = 0;
+    int code = fw_update_write((size_t)offset, (const uint8_t *)chunk_buf, len, &written, msg, sizeof(msg));
+    char resp[40];
+    snprintf(resp, sizeof(resp), "{\"written\":%u}", (unsigned)written);
+    fw_reply(req, code, resp, msg);
+    return ESP_OK;
+}
+
+static void fw_restart(void *arg) {
+    (void)arg;
+    esp_restart();
+}
+
+static esp_err_t fw_finish_handler(httpd_req_t *req) {
+    if (!fw_request_allowed(req)) return ESP_OK;
+    char msg[96] = "";
+    char ver[32] = "";
+    int code = fw_update_finish(ver, sizeof(ver), msg, sizeof(msg));
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"version\":\"%s\"}", ver);
+    fw_reply(req, code, resp, msg);
+    if (code == 200) {
+        ESP_LOGW(TAG, "Firmware %s installed; restarting in 1 s", ver);
+        static esp_timer_handle_t t;
+        const esp_timer_create_args_t args = {.callback = fw_restart, .name = "fw_restart"};
+        if (esp_timer_create(&args, &t) == ESP_OK) esp_timer_start_once(t, 1000000);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t fw_cancel_handler(httpd_req_t *req) {
+    if (!fw_request_allowed(req)) return ESP_OK;
+    fw_update_abort();
+    fw_reply(req, 200, "{\"status\":\"cancelled\"}", NULL);
+    return ESP_OK;
+}
+
 // GET /coredump: last crash report (paired only; it can hold RAM contents)
 static esp_err_t coredump_get_handler(httpd_req_t *req) {
     if (reject_unauthorized(req)) return ESP_OK;
@@ -1191,7 +1318,7 @@ void file_receiver_init(void) {
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
     config.stack_size = 10240;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;
 
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_uri_t uri_prepare = {.uri = "/prepare", .method = HTTP_POST, .handler = prepare_post_handler};
@@ -1208,6 +1335,10 @@ void file_receiver_init(void) {
         httpd_uri_t uri_unpair = {.uri = "/unpair", .method = HTTP_POST, .handler = unpair_post_handler};
         httpd_uri_t uri_delete = {.uri = "/delete", .method = HTTP_POST, .handler = delete_post_handler};
         httpd_uri_t uri_coredump = {.uri = "/coredump", .method = HTTP_GET, .handler = coredump_get_handler};
+        httpd_uri_t uri_fw_begin = {.uri = "/fw/begin", .method = HTTP_POST, .handler = fw_begin_handler};
+        httpd_uri_t uri_fw_chunk = {.uri = "/fw/chunk", .method = HTTP_POST, .handler = fw_chunk_handler};
+        httpd_uri_t uri_fw_finish = {.uri = "/fw/finish", .method = HTTP_POST, .handler = fw_finish_handler};
+        httpd_uri_t uri_fw_cancel = {.uri = "/fw/cancel", .method = HTTP_POST, .handler = fw_cancel_handler};
 
         httpd_register_uri_handler(server, &uri_prepare);
         httpd_register_uri_handler(server, &uri_chunk);
@@ -1223,6 +1354,10 @@ void file_receiver_init(void) {
         httpd_register_uri_handler(server, &uri_unpair);
         httpd_register_uri_handler(server, &uri_delete);
         httpd_register_uri_handler(server, &uri_coredump);
+        httpd_register_uri_handler(server, &uri_fw_begin);
+        httpd_register_uri_handler(server, &uri_fw_chunk);
+        httpd_register_uri_handler(server, &uri_fw_finish);
+        httpd_register_uri_handler(server, &uri_fw_cancel);
 
         ESP_LOGI(TAG, "File receiver HTTP server started on port %d", config.server_port);
     } else {

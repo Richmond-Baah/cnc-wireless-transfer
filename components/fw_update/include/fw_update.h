@@ -21,7 +21,7 @@ int fw_version_cmp(const char *a, const char *b);
 int fw_check_image(const uint8_t *data, size_t n, const char *project, const char *current_ver,
                    esp_app_desc_t *desc_out, char *msg, size_t msg_len);
 
-// Transmitter self-update into the inactive OTA slot. One session at a time;
+// Self-update of this board into the inactive OTA slot. One session at a time;
 // a session idle for 30 s is dropped by the next begin. All return an HTTP
 // status; msg gets the reason on failure.
 int fw_update_begin(size_t size, char *msg, size_t msg_len);
@@ -38,5 +38,8 @@ bool fw_update_active(void);
 // After boot: if this image is still pending verification, mark it valid when
 // ok (Wi-Fi + web server up), else roll back and reboot.
 void fw_update_confirm_boot(bool ok);
+// If this image is pending verification, rolls back unless fw_update_confirm_boot(true)
+// was called within seconds.
+void fw_update_rollback_timer(int seconds);
 
 #endif // FW_UPDATE_H
