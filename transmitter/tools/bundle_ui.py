@@ -4,7 +4,7 @@
     bundle_ui.py <web dir> <out .html.gz>
 
 Inlines every <link rel="stylesheet" href="X"> and <script src="X"></script>
-of index.html, then gzips with a fixed mtime so the output (and the version
+of index.html (except src="/..." : a device endpoint, loaded at run time), then gzips with a fixed mtime so the output (and the version
 hash the firmware derives from it) only changes when the sources do.
 """
 import gzip
@@ -23,10 +23,10 @@ def main():
     html = read('index.html')
     html = re.sub(r'<link rel="stylesheet" href="([^"]+)">',
                   lambda m: '<style>\n' + read(m.group(1)) + '</style>', html)
-    html = re.sub(r'<script src="([^"]+)"></script>',
+    html = re.sub(r'<script src="([^"/][^"]*)"></script>',
                   lambda m: '<script>\n' + read(m.group(1)).replace('</script', '<\\/script') + '</script>',
                   html)
-    if re.search(r'<(link|script)[^>]+(href|src)=', html):
+    if re.search(r'<(link|script)[^>]+(href|src)="(?!/)', html):
         sys.exit('bundle_ui: unresolved external reference left in index.html')
 
     raw = html.encode('utf-8')

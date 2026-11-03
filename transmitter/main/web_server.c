@@ -10,6 +10,7 @@
 #include "esp_app_desc.h"
 
 #include "auth.h"
+#include "ui_prefs.h"
 #include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -84,6 +85,49 @@ static esp_err_t ui_redirect_handler(httpd_req_t *req) {
   httpd_resp_set_status(req, "302 Found");
   httpd_resp_set_hdr(req, "Location", s_ui_path);
   return httpd_resp_send(req, NULL, 0);
+}
+
+// GET /api/ui -> {"accent":"#RRGGBB"}; GET /api/ui.js -> window.FX_ACCENT=...
+// (loaded by the page head, so the first paint already has the colour; no
+// auth: the login page uses it too). POST /api/ui {"accent":"#rrggbb"} (authed).
+static esp_err_t api_ui_get_handler(httpd_req_t *req) {
+  char accent[8];
+  ui_accent_get(accent, sizeof(accent));
+  char out[48];
+  if (strcmp(req->uri, "/api/ui.js") == 0) {
+    snprintf(out, sizeof(out), "window.FX_ACCENT=\"%s\";", accent);
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
+  } else {
+    snprintf(out, sizeof(out), "{\"accent\":\"%s\"}", accent);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+  }
+  httpd_resp_sendstr(req, out);
+  return ESP_OK;
+}
+
+static bool read_full_body(httpd_req_t *req, char *buf, size_t cap);
+static void send_status_text(httpd_req_t *req, int code, const char *msg);
+
+static esp_err_t api_ui_post_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char body[64] = {0};
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body) ||
+      !read_full_body(req, body, sizeof(body) - 1)) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  cJSON *json = cJSON_Parse(body);
+  cJSON *j = json ? cJSON_GetObjectItem(json, "accent") : NULL;
+  bool ok = cJSON_IsString(j) && ui_accent_set(j->valuestring);
+  cJSON_Delete(json);
+  if (!ok) {
+    send_status_text(req, 400, "accent must be #rrggbb");
+    return ESP_OK;
+  }
+  return api_ui_get_handler(req);
 }
 
 static esp_err_t ui_get_handler(httpd_req_t *req) {
@@ -1010,6 +1054,7 @@ static esp_err_t factory_reset_handler(httpd_req_t *req) {
   nvs_commit(h);
   nvs_close(h);
   auth_reset_defaults();
+  ui_accent_reset();
 
   if (ap_changed && !remove) {
     s_restart_wait_ver = rx_registry_bump_config_version();
@@ -1127,6 +1172,9 @@ static const route_t s_routes[] = {
     {"/pair_window/stop", HTTP_POST, pair_window_stop_handler, RT_SYNC},
     {"/recovery", HTTP_POST, recovery_post_handler, RT_RX},
     {"/factory_reset", HTTP_POST, factory_reset_handler, RT_RX},
+    {"/api/ui", HTTP_GET, api_ui_get_handler, RT_SYNC},
+    {"/api/ui.js", HTTP_GET, api_ui_get_handler, RT_SYNC},
+    {"/api/ui", HTTP_POST, api_ui_post_handler, RT_SYNC},
     {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
     // Receivers
     {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler, RT_SYNC},
