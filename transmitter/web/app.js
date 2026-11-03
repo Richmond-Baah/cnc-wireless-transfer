@@ -1373,6 +1373,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function saveAccent(hex) {
         applyAccent(hex); // live preview
         markAccent();
+        if (window.FX_ACCENT === accentSaved) return; // unchanged: nothing to store
         try {
             const res = await fetch('/api/ui', {
                 method: 'POST',
@@ -1392,8 +1393,24 @@ document.addEventListener('DOMContentLoaded', () => {
         const b = e.target.closest('[data-accent]');
         if (b) saveAccent(b.dataset.accent);
     });
-    $('accentCustom').addEventListener('input', () => applyAccent($('accentCustom').value)); // preview while dragging
-    $('accentCustom').addEventListener('change', () => saveAccent($('accentCustom').value));
+    // Custom picker: preview on input; save on change (debounced 400 ms); picker
+    // closed without a change -> back to the saved colour
+    let accentTimer = null, accentPreview = false;
+    $('accentCustom').addEventListener('input', () => {
+        accentPreview = true;
+        applyAccent($('accentCustom').value);
+    });
+    $('accentCustom').addEventListener('change', () => {
+        accentPreview = false;
+        clearTimeout(accentTimer);
+        accentTimer = setTimeout(() => saveAccent($('accentCustom').value), 400);
+    });
+    $('accentCustom').addEventListener('blur', () => {
+        if (!accentPreview) return;
+        accentPreview = false;
+        applyAccent(accentSaved);
+        markAccent();
+    });
     $('accentReset').addEventListener('click', () => saveAccent(ACCENT_DEFAULT));
     markAccent();
 
