@@ -16,7 +16,8 @@
 #define RX_ID_LEN 16
 #define RX_NAME_LEN 32
 #define RX_KEY_HEX_LEN 64
-#define RX_ONLINE_US (30LL * 1000 * 1000) // online = heartbeat within 30 s
+// Offline after 3 missed heartbeats (10 s apart), plus 5 s for a late one
+#define RX_ONLINE_US ((3 * 10 + 5) * 1000LL * 1000)
 
 // What a proxy needs to talk to one paired, online receiver.
 typedef struct {

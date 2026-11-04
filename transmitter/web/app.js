@@ -135,7 +135,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function lastSeenText(s) {
         if (typeof s !== 'number' || s < 0) return t('mc.lastSeen.never');
-        if (s < 60) return t('mc.lastSeen.now');
+        if (s < 5) return t('mc.lastSeen.now');
+        if (s < 60) return t('mc.lastSeen.s', { n: Math.round(s) });
         if (s < 3600) return t('mc.lastSeen.min', { n: Math.round(s / 60) });
         return t('mc.lastSeen.h', { n: Math.round(s / 3600) });
     }
@@ -254,6 +255,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? `<span class="small err-text">${esc(t('state.CARD_ERROR'))}</span>`
                         : `<span class="bar bar-sm" aria-hidden="true"><span class="bar-fill" style="width:${used.toFixed(1)}%"></span></span>
                            <span class="muted small">${esc(storage)}</span>`}
+                ${r.online ? `<span class="muted small">${esc(lastSeenText(r.last_seen_s))}</span>` : ''}
             </button>`;
         }).join('');
     }

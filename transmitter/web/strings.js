@@ -39,6 +39,7 @@ window.STRINGS = {
     'mc.add': 'Add machine',
     'mc.storage': '{type} · {free} free of {total}',
     'mc.lastSeen.now': 'Last seen just now',
+    'mc.lastSeen.s': 'Last seen {n} s ago',
     'mc.lastSeen.min': 'Last seen {n} min ago',
     'mc.lastSeen.h': 'Last seen {n} h ago',
     'mc.lastSeen.never': 'Not seen since the transmitter started',
