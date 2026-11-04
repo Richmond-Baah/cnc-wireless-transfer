@@ -20,7 +20,7 @@ int file_transfer_begin(const char *rx_id, const char *name, size_t size, const 
                         char *msg, size_t msg_len);
 // Forwards one chunk to the session's receiver and returns after it acks;
 // acked_out = total bytes acknowledged so far.
-int file_transfer_chunk(const char *session, int index, const char *data, int len,
+int file_transfer_chunk(const char *session, int index, const char *data, int len, int64_t recv_us,
                         uint64_t *acked_out, char *msg, size_t msg_len);
 // Calls receiver /finalize with the browser's MD5 and ends the session.
 int file_transfer_finish(const char *session, char *msg, size_t msg_len);

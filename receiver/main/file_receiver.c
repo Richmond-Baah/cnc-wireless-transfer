@@ -50,7 +50,9 @@ static struct {
     int64_t usb_reconnect;// disconnect + settle wait + connect
     uint64_t bytes;
     uint32_t chunks;
+    uint64_t next_log;    // bytes at which the next progress line is logged
 } s_tm;
+#define RX_KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
 #define TM_START() int64_t _tm0 = esp_timer_get_time()
 #define TM_ADD(field) (s_tm.field += esp_timer_get_time() - _tm0, _tm0 = esp_timer_get_time())
 #define TM_MS(us) ((long long)((us) / 1000))
@@ -604,6 +606,12 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
     }
     expected_chunk_index++;
     s_tm.chunks++;
+    if (s_tm.bytes >= s_tm.next_log) {
+        s_tm.next_log = s_tm.bytes + 1024 * 1024;
+        ESP_LOGI(TAG, "RX %llu KB: recv %.0f KB/s, SD write %.0f KB/s, md5 %.0f KB/s",
+                 (unsigned long long)(s_tm.bytes / 1024), RX_KBPS(s_tm.bytes, s_tm.recv),
+                 RX_KBPS(s_tm.bytes, s_tm.write), RX_KBPS(s_tm.bytes, s_tm.md5));
+    }
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
@@ -725,10 +733,11 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
 
     int64_t total_us = esp_timer_get_time() - s_tm.t_start;
     ESP_LOGI(TAG, "XFER summary: %llu bytes, %lu chunks in %lld ms = %.1f KB/s | "
+                  "recv %.0f KB/s, SD write %.0f KB/s | "
                   "usb_release %lld, mount %lld, open %lld, recv %lld, write %lld, md5 %lld, "
                   "commit %lld, snapshot %lld, unmount %lld, usb_reconnect %lld ms",
              (unsigned long long)s_tm.bytes, (unsigned long)s_tm.chunks, TM_MS(total_us),
-             total_us > 0 ? (double)s_tm.bytes / 1024.0 / ((double)total_us / 1e6) : 0.0,
+             RX_KBPS(s_tm.bytes, total_us), RX_KBPS(s_tm.bytes, s_tm.recv), RX_KBPS(s_tm.bytes, s_tm.write),
              TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.open), TM_MS(s_tm.recv),
              TM_MS(s_tm.write), TM_MS(s_tm.md5), TM_MS(s_tm.commit), TM_MS(s_tm.snapshot),
              TM_MS(s_tm.unmount), TM_MS(s_tm.usb_reconnect));

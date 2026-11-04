@@ -52,9 +52,14 @@ static struct {
   esp_http_client_handle_t chunk_client; // reused for all chunks (HTTP keep-alive)
   int connects;            // TCP connects made by chunk_client (1 = full reuse)
   uint32_t chunks;
-  int64_t chunk_total_us;
+  int64_t chunk_total_us;  // TX -> RX (forward + RX write + ack)
   int64_t chunk_max_us;
+  int64_t recv_total_us;   // browser -> TX (reading the chunk body)
+  uint64_t next_log;       // acked bytes at which the next progress line is logged
 } s_up;
+
+#define KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
+#define PROGRESS_LOG_BYTES (1024 * 1024)
 
 static esp_err_t chunk_client_event(esp_http_client_event_t *evt) {
   if (evt->event_id == HTTP_EVENT_ON_CONNECTED && evt->user_data) {
@@ -190,7 +195,7 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
   return 200;
 }
 
-static int chunk_locked(const char *session, int index, const char *data, int len,
+static int chunk_locked(const char *session, int index, const char *data, int len, int64_t recv_us,
                         uint64_t *acked_out, char *msg, size_t msg_len) {
   msg[0] = '\0';
   if (!session_matches(session)) {
@@ -238,6 +243,14 @@ static int chunk_locked(const char *session, int index, const char *data, int le
   if (index == s_up.next_index) {
     s_up.next_index++;
     s_up.acked += len;
+    s_up.recv_total_us += recv_us;
+    if (s_up.acked >= s_up.next_log) {
+      s_up.next_log = s_up.acked + PROGRESS_LOG_BYTES;
+      ESP_LOGI(TAG, "XFER %llu KB: browser->TX %.0f KB/s, TX->RX %.0f KB/s, overall %.0f KB/s",
+               (unsigned long long)(s_up.acked / 1024), KBPS(s_up.acked, s_up.recv_total_us),
+               KBPS(s_up.acked, s_up.chunk_total_us),
+               KBPS(s_up.acked, esp_timer_get_time() - s_up.t_start_us - s_up.prepare_us));
+    }
   }
   *acked_out = s_up.acked;
   return 200;
@@ -266,10 +279,11 @@ static int finish_locked(const char *session, char *msg, size_t msg_len) {
   int64_t fin_us = esp_timer_get_time() - t0;
 
   int64_t total_us = esp_timer_get_time() - s_up.t_start_us;
-  ESP_LOGI(TAG, "XFER summary -> %s: %u bytes in %lld ms = %.1f KB/s | prepare %lld ms, "
+  ESP_LOGI(TAG, "XFER summary -> %s: %u bytes in %lld ms = %.1f KB/s | browser->TX %.0f KB/s, "
+                "TX->RX %.0f KB/s | prepare %lld ms, "
                 "%lu chunks (rtt avg %lld, max %lld ms, connections %d), finalize %lld ms | %s",
-           s_up.rx.id, (unsigned)s_up.size, (long long)(total_us / 1000),
-           total_us > 0 ? (double)s_up.size / 1024.0 / ((double)total_us / 1e6) : 0.0,
+           s_up.rx.id, (unsigned)s_up.size, (long long)(total_us / 1000), KBPS(s_up.size, total_us),
+           KBPS(s_up.acked, s_up.recv_total_us), KBPS(s_up.acked, s_up.chunk_total_us),
            (long long)(s_up.prepare_us / 1000), (unsigned long)s_up.chunks,
            (long long)(s_up.chunks ? s_up.chunk_total_us / s_up.chunks / 1000 : 0),
            (long long)(s_up.chunk_max_us / 1000), s_up.connects,
@@ -310,10 +324,10 @@ int file_transfer_begin(const char *rx_id, const char *name, size_t size, const 
   return r;
 }
 
-int file_transfer_chunk(const char *session, int index, const char *data, int len,
+int file_transfer_chunk(const char *session, int index, const char *data, int len, int64_t recv_us,
                         uint64_t *acked_out, char *msg, size_t msg_len) {
   up_lock();
-  int r = chunk_locked(session, index, data, len, acked_out, msg, msg_len);
+  int r = chunk_locked(session, index, data, len, recv_us, acked_out, msg, msg_len);
   up_unlock();
   return r;
 }

@@ -325,14 +325,16 @@ static esp_err_t upload_chunk_handler(httpd_req_t *req) {
     send_status_text(req, 413, "Chunk must be 1-32768 bytes");
     return ESP_OK;
   }
+  int64_t t0 = esp_timer_get_time();
   if (!read_full_body(req, s_chunk_buf, sizeof(s_chunk_buf))) {
     send_status_text(req, 400, "Failed to read chunk from browser");
     return ESP_OK;
   }
+  int64_t recv_us = esp_timer_get_time() - t0; // browser -> TX leg
 
   uint64_t acked = 0;
   char msg[160];
-  int code = file_transfer_chunk(session, (int)index, s_chunk_buf, req->content_len,
+  int code = file_transfer_chunk(session, (int)index, s_chunk_buf, req->content_len, recv_us,
                                  &acked, msg, sizeof(msg));
   if (code != 200) {
     send_status_text(req, code, msg);

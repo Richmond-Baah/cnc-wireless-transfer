@@ -87,6 +87,7 @@ window.STRINGS = {
     'tx.checking': 'Checking the file…',
     'tx.preparing': 'Getting {name} ready…',
     'tx.uploading': 'Uploading · {progress}',
+    'tx.rate': '{rate}/s · {eta} left',
     'tx.verifying': 'Verifying…',
     'tx.reconnecting': 'Reconnecting the drive…',
     'tx.done': 'Done',

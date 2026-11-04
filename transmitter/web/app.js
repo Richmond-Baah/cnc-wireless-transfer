@@ -1190,6 +1190,18 @@ document.addEventListener('DOMContentLoaded', () => {
         return null;
     }
 
+    // Bytes/s over the last ~5 s of acked progress (0 until there is 1 s of data)
+    function rateMeter() {
+        const pts = [];
+        return (bytes) => {
+            const now = performance.now();
+            pts.push([now, bytes]);
+            while (pts.length > 2 && now - pts[1][0] > 5000) pts.shift();
+            const dt = (now - pts[0][0]) / 1000;
+            return dt >= 1 ? (bytes - pts[0][1]) / dt : 0;
+        };
+    }
+
     // step: 0 Upload, 1 Verify, 2 Reconnect drive, 3 Done
     function setProgress(percent, text, step) {
         const p = Math.min(100, Math.max(0, Math.round(percent)));
@@ -1270,10 +1282,13 @@ document.addEventListener('DOMContentLoaded', () => {
             stage = 'Uploading';
             const total = file.size;
             let acked = 0;
+            const rate = rateMeter();
             for (let index = 0, offset = 0; offset < total; index++, offset += CHUNK_SIZE) {
                 if (cancelRequested) throw new UploadError(stage, 'cancelled');
                 acked = await sendChunk(session, index, file.slice(offset, offset + CHUNK_SIZE));
-                setProgress(total ? (acked / total) * 100 : 100, t('tx.uploading', { progress: fmtPair(acked, total) }), 0);
+                const bps = rate(acked);
+                setProgress(total ? (acked / total) * 100 : 100, t('tx.uploading', { progress: fmtPair(acked, total) }) +
+                    (bps ? ' · ' + t('tx.rate', { rate: fmtBytes(bps), eta: fmtDuration((total - acked) / bps) }) : ''), 0);
             }
             if (cancelRequested) throw new UploadError(stage, 'cancelled');
 
