@@ -70,7 +70,7 @@ window.STRINGS = {
     'file.drop': 'Drop a file here or',
     'file.choose': 'Choose file',
     'file.chooseAnother': 'Choose another file',
-    'file.types': 'Machine programs: {list}',
+    'file.types': 'Any file can be sent. Common types: {list}',
     'file.fits': 'fits ({free} free)',
     'file.tooBig': 'too big ({free} free)',
     'file.short.why': 'Some machines (e.g. Ruida lasers) need short names: up to 8 letters or digits, a dot and up to 3, no spaces.',

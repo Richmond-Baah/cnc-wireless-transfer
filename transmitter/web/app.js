@@ -113,8 +113,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return res;
     };
 
-    // Single source of truth for accepted machine-program extensions
-    const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso', '.rd', '.dst', '.tif', '.tiff'];
+    // Known machine-file extensions: a hint and a soft warning only, any file can be sent
+    const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso', '.rd', '.dst', '.tif', '.tiff', '.tff'];
 
     // DOS 8.3 names (Ruida lasers and other controllers that read short names only)
     const SFN_CHARS = "A-Z0-9!#$%&'()@^_`{}~-";
@@ -509,7 +509,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const msgBox = $('msgBox');
     const progressBox = $('progressBox');
     $('fileTypes').textContent = t('file.types', { list: VALID_EXTS.join(', ') });
-    fileInput.accept = VALID_EXTS.join(',');
 
     // Same rule as the receiver's /prepare check: size + max(64 KB, 1% of drive)
     const spaceNeeded = (size, total) => size + Math.max(64 * 1024, Math.floor((total || 0) / 100));
