@@ -114,7 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // Single source of truth for accepted machine-program extensions
-    const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso', '.rd', '.dst'];
+    const VALID_EXTS = ['.nc', '.gcode', '.tap', '.cnc', '.gc', '.ngc', '.pcn', '.plt', '.hnc', '.txt', '.crv', '.sbp', '.dxf', '.svg', '.xcn', '.din', '.cut', '.iso', '.rd', '.dst', '.tif', '.tiff'];
 
     // DOS 8.3 names (Ruida lasers and other controllers that read short names only)
     const SFN_CHARS = "A-Z0-9!#$%&'()@^_`{}~-";
