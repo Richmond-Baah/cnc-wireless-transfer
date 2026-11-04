@@ -288,7 +288,22 @@ window.STRINGS = {
     'sys.resetType': 'Type RESET to confirm',
     'sys.resetBtn': 'Factory reset',
     'sys.resetDone': 'Reset done. The transmitter is restarting: join {ssid} and log in with the factory admin account.',
-    'sys.resetFailed': 'Factory reset didn\'t work: {why}'
+    'sys.resetFailed': 'Factory reset didn\'t work: {why}',
+    'perf.title': 'Speed test',
+    'perf.why': 'Measures each part of a transfer to the chosen machine. The SD and full tests briefly take the drive from the machine and leave no file behind. Run it while the machine is idle.',
+    'perf.machine': 'Machine',
+    'perf.size': 'Test size',
+    'perf.run': 'Run speed test',
+    'perf.leg': 'Part',
+    'perf.speed': 'Speed',
+    'perf.time': 'Time',
+    'perf.up': 'This device → transmitter',
+    'perf.link': 'Transmitter → machine',
+    'perf.sd': 'Machine SD card write',
+    'perf.full': 'Full transfer',
+    'perf.running': 'Running: {leg}…',
+    'perf.done': 'Done. Results are also in the transmitter log (PERF lines).',
+    'perf.failed': '{leg} failed: {why}'
 };
 
 window.t = function (key, vars) {

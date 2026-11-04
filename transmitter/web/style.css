@@ -333,6 +333,7 @@ input::placeholder { color: var(--muted); opacity: 0.8; }
 .files-feedback { margin-bottom: 12px; }
 .files-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
 .ftable { width: 100%; border-collapse: collapse; }
+.perf-table { margin-top: 12px; }
 .ftable th { text-align: left; font-size: 0.8125rem; color: var(--muted); font-weight: 600; padding: 0 8px 6px; border-bottom: 1px solid var(--line); }
 .ftable td { padding: 0 8px; border-bottom: 1px solid var(--line); height: var(--tap); }
 .ftable tr.sel td { background: var(--tint); }

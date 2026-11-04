@@ -11,6 +11,7 @@
 #include "sd_card.h"
 #include "pairing.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
 #include <dirent.h>
@@ -785,6 +786,130 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddBoolToObject(obj, "busy", usb_msc_ms_since_host_read() < 10000);
 }
 
+// ─── Speed test (Settings > System on the transmitter) ──────────────────────
+// SD write pattern of chunk_post_handler, so /perf/sd measures what a real
+// transfer does: one fwrite per piece, fflush+fsync every PERF_SD_FSYNC_EVERY.
+#define PERF_SD_PIECE 1436       // typical httpd_req_recv() return (one TCP segment)
+#define PERF_SD_FSYNC_EVERY 16
+#define PERF_SD_MAX (100u * 1024 * 1024)
+
+static void perf_reply(httpd_req_t *req, uint64_t bytes, int64_t us) {
+    char out[96];
+    snprintf(out, sizeof(out), "{\"bytes\":%llu,\"ms\":%lld,\"kbps\":%.1f}", (unsigned long long)bytes,
+             (long long)(us / 1000), RX_KBPS(bytes, us));
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, out);
+}
+
+// POST /perf/sink: read and discard the body (TX -> RX link test)
+static esp_err_t perf_sink_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    int64_t t0 = esp_timer_get_time();
+    int remaining = req->content_len;
+    while (remaining > 0) {
+        int r = httpd_req_recv(req, chunk_buf, remaining < (int)sizeof(chunk_buf) ? remaining : (int)sizeof(chunk_buf));
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) return ESP_FAIL;
+        remaining -= r;
+    }
+    perf_reply(req, req->content_len, esp_timer_get_time() - t0);
+    return ESP_OK;
+}
+
+// POST /perf/sd {"size":n}: USB off -> mount -> write n bytes from RAM to
+// FXPERF.TMP -> fsync -> delete -> unmount -> USB on. Busy guard applies.
+static esp_err_t perf_sd_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    if (reject_if_machine_busy(req)) {
+        drain_request_body(req);
+        return ESP_OK;
+    }
+    char body[48] = {0};
+    int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len : 0;
+    if (len <= 0 || httpd_req_recv(req, body, len) != len) {
+        drain_request_body(req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+        return ESP_OK;
+    }
+    cJSON *json = cJSON_Parse(body);
+    cJSON *j_size = json ? cJSON_GetObjectItem(json, "size") : NULL;
+    double size = cJSON_IsNumber(j_size) ? j_size->valuedouble : 0;
+    cJSON_Delete(json);
+    if (size <= 0 || size > PERF_SD_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "size must be 1..100 MB");
+        return ESP_OK;
+    }
+    app_state_t cur = state_machine_get();
+    if (cur == STATE_RECEIVING || cur == STATE_CARD_ERROR || sd_card_has_card_error()) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, cur == STATE_RECEIVING ? "Receiver Busy" : "Card error");
+        return ESP_OK;
+    }
+    char *buf = malloc(PERF_SD_PIECE);
+    if (!buf || !state_machine_transition(STATE_RECEIVING)) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory or busy");
+        return ESP_OK;
+    }
+    for (int i = 0; i < PERF_SD_PIECE; i++) buf[i] = (char)(i * 31 + 7);
+
+    usb_msc_disconnect();
+    if (storage_manager_is_sd_present() && !sd_card_is_mounted() && sd_card_remount() == ESP_ERR_TIMEOUT) {
+        free(buf);
+        prepare_abort_reconnect();
+        httpd_resp_set_status(req, "423 Locked");
+        httpd_resp_sendstr(req, "{\"error\":\"machine_busy\"}");
+        return ESP_OK;
+    }
+    if (!storage_manager_fatfs_available()) storage_manager_remount();
+    uint64_t vol_total = 0, vol_free = 0;
+    const char *vol_type = NULL;
+    if (!storage_manager_fatfs_available() ||
+        storage_manager_get_info(&vol_total, &vol_free, &vol_type) != ESP_OK ||
+        vol_free < (uint64_t)size + space_margin(vol_total)) {
+        free(buf);
+        prepare_abort_reconnect();
+        httpd_resp_set_status(req, "507 Insufficient Storage");
+        httpd_resp_sendstr(req, "Not enough free space (or drive not mounted) for the SD test");
+        return ESP_OK;
+    }
+    char path[48];
+    snprintf(path, sizeof(path), "%s/FXPERF.TMP", STORAGE_PATH);
+    FILE *f = fopen(path, "wb");
+    uint64_t done = 0;
+    int pieces = 0;
+    int64_t t0 = esp_timer_get_time();
+    while (f && done < (uint64_t)size) {
+        size_t n = (uint64_t)size - done < PERF_SD_PIECE ? (size_t)((uint64_t)size - done) : PERF_SD_PIECE;
+        if (fwrite(buf, 1, n, f) != n) break;
+        done += n;
+        if (PERF_SD_FSYNC_EVERY && ++pieces % PERF_SD_FSYNC_EVERY == 0) {
+            fflush(f);
+            fsync(fileno(f));
+        }
+    }
+    if (f) {
+        fflush(f);
+        fsync(fileno(f));
+        fclose(f);
+    }
+    int64_t us = esp_timer_get_time() - t0;
+    remove(path);
+    free(buf);
+    storage_manager_flush_and_release_for_usb();
+    state_machine_transition(STATE_IDLE);
+    usb_msc_connect();
+    if (done != (uint64_t)size) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD write failed");
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "PERF SD write: %llu bytes in %lld ms = %.1f KB/s (%d-byte writes, fsync every %d)",
+             (unsigned long long)done, (long long)(us / 1000), RX_KBPS(done, us), PERF_SD_PIECE,
+             PERF_SD_FSYNC_EVERY);
+    perf_reply(req, done, us);
+    return ESP_OK;
+}
+
 static esp_err_t status_get_handler(httpd_req_t *req) {
     if (reject_unauthorized(req)) return ESP_OK;
     cJSON *obj = cJSON_CreateObject();
@@ -1205,6 +1330,8 @@ void file_receiver_init(void) {
         httpd_uri_t uri_pair = {.uri = "/pair", .method = HTTP_POST, .handler = pair_post_handler};
         httpd_uri_t uri_unpair = {.uri = "/unpair", .method = HTTP_POST, .handler = unpair_post_handler};
         httpd_uri_t uri_delete = {.uri = "/delete", .method = HTTP_POST, .handler = delete_post_handler};
+        httpd_uri_t uri_perf_sink = {.uri = "/perf/sink", .method = HTTP_POST, .handler = perf_sink_handler};
+        httpd_uri_t uri_perf_sd = {.uri = "/perf/sd", .method = HTTP_POST, .handler = perf_sd_handler};
 
         httpd_register_uri_handler(server, &uri_prepare);
         httpd_register_uri_handler(server, &uri_chunk);
@@ -1219,6 +1346,8 @@ void file_receiver_init(void) {
         httpd_register_uri_handler(server, &uri_pair);
         httpd_register_uri_handler(server, &uri_unpair);
         httpd_register_uri_handler(server, &uri_delete);
+        httpd_register_uri_handler(server, &uri_perf_sink);
+        httpd_register_uri_handler(server, &uri_perf_sd);
 
         ESP_LOGI(TAG, "File receiver HTTP server started on port %d", config.server_port);
     } else {

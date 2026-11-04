@@ -1411,6 +1411,7 @@ document.addEventListener('DOMContentLoaded', () => {
         line.hidden = !text;
         renderOfflineWarn();
         renderMachineTable();
+        renderPerfSelect();
         // System
         if (status) {
             $('sysFw').textContent = status.tx_fw || '-';
@@ -1575,6 +1576,86 @@ document.addEventListener('DOMContentLoaded', () => {
             formStatus(st, t('sys.recoveryStarted'), 'ok');
         }
         $('recoveryWord').value = '';
+    });
+
+    // ─── Speed test: each leg separately, then a real upload of test data ──
+    function renderPerfSelect() {
+        const sel = $('perfRx');
+        const keep = sel.value || selectedRx;
+        sel.innerHTML = receivers.filter(r => r.online)
+            .map(r => `<option value="${esc(r.id)}">${esc(r.name || r.id)}</option>`).join('');
+        if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+        $('perfBtn').disabled = !sel.options.length || uploading;
+    }
+    function perfRow(leg, d) {
+        const kbps = d.bytes / 1024 / (d.ms / 1000);
+        $('perfTable').querySelector('tbody').insertAdjacentHTML('beforeend',
+            `<tr><td>${esc(leg)}</td><td>${esc(fmtBytes(kbps * 1024))}/s</td><td>${esc(fmtDuration(d.ms / 1000))}</td></tr>`);
+        $('perfTable').hidden = false;
+    }
+    async function perfJson(res) {
+        if (!res.ok) throw new Error(await errorText(res));
+        return res.json();
+    }
+    // Upload size bytes of a repeated 32 KB block through the normal path, then delete it
+    async function perfFull(rxId, size, relay) {
+        const block = new Uint8Array(CHUNK_SIZE);
+        for (let i = 0; i < block.length; i++) block[i] = (i * 31 + 7) & 255;
+        const spark = new SparkMD5.ArrayBuffer();
+        for (let off = 0; off < size; off += CHUNK_SIZE) spark.append(block.subarray(0, Math.min(CHUNK_SIZE, size - off)).slice().buffer);
+        const name = 'FXSPEED.BIN';
+        const t0 = performance.now();
+        const begin = await perfJson(await fetch('/upload_begin', { method: 'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId, 'X-Relay': relay }),
+            body: JSON.stringify({ name, size, md5: spark.end() }) }));
+        for (let i = 0, off = 0; off < size; i++, off += CHUNK_SIZE) {
+            await sendChunk(begin.session, i, new Blob([block.subarray(0, Math.min(CHUNK_SIZE, size - off))]));
+        }
+        await perfJson(await fetch('/upload_finish', { method: 'POST', headers: authHeaders({ 'X-Session': begin.session }) }));
+        const ms = performance.now() - t0;
+        await fetch('/receiver_delete', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId }),
+            body: JSON.stringify({ files: [name] }) }).catch(() => {});
+        return { bytes: size, ms };
+    }
+    $('perfBtn').addEventListener('click', async () => {
+        const rxId = $('perfRx').value, size = Number($('perfSize').value);
+        if (!rxId || uploading) return;
+        const st = $('perfStatus');
+        $('perfBtn').disabled = true;
+        $('perfTable').querySelector('tbody').innerHTML = '';
+        const legs = [
+            ['perf.up', async () => {
+                const blob = new Blob([new Uint8Array(CHUNK_SIZE)]);
+                const n = Math.ceil(size / CHUNK_SIZE), t0 = performance.now();
+                for (let i = 0; i < n; i++) {
+                    const mark = i === 0 ? 'begin' : i === n - 1 ? 'end' : 'mid';
+                    await perfJson(await fetch('/perf/sink', { method: 'POST', body: blob,
+                        headers: authHeaders({ 'Content-Type': 'application/octet-stream', 'X-Perf': mark }) }));
+                }
+                return { bytes: n * CHUNK_SIZE, ms: performance.now() - t0 };
+            }],
+            ['perf.link', async () => perfJson(await fetch('/perf/link?rx=' + encodeURIComponent(rxId), { method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ size }) }))],
+            ['perf.sd', async () => perfJson(await fetch('/perf/sd?rx=' + encodeURIComponent(rxId), { method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ size }) }))],
+            ['perf.full', async () => perfFull(rxId, size, 'buffered')]
+        ];
+        uploading = true; // keep the dashboard from starting a transfer meanwhile
+        try {
+            for (const [key, run] of legs) {
+                formStatus(st, t('perf.running', { leg: t(key) }), 'ok');
+                try {
+                    perfRow(t(key), await run());
+                } catch (e) {
+                    formStatus(st, t('perf.failed', { leg: t(key), why: e.message }), 'err');
+                    return;
+                }
+            }
+            formStatus(st, t('perf.done'), 'ok');
+        } finally {
+            uploading = false;
+            renderPerfSelect();
+        }
     });
 
     // Factory reset (typed RESET, checked server-side)

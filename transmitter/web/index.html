@@ -277,6 +277,23 @@
                         </div>
                         <p id="resetStatus" class="form-status small" hidden></p>
                     </div>
+                    <div class="recovery">
+                        <h3 data-t="perf.title"></h3>
+                        <p class="small" data-t="perf.why"></p>
+                        <div class="confirm-actions">
+                            <select id="perfRx" data-t-aria="perf.machine"></select>
+                            <select id="perfSize" data-t-aria="perf.size">
+                                <option value="2097152">2 MB</option>
+                                <option value="52428800">50 MB</option>
+                            </select>
+                            <button type="button" id="perfBtn" class="btn btn-primary" data-t="perf.run"></button>
+                        </div>
+                        <table class="ftable perf-table" id="perfTable" hidden>
+                            <thead><tr><th data-t="perf.leg"></th><th data-t="perf.speed"></th><th data-t="perf.time"></th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                        <p id="perfStatus" class="form-status small" hidden></p>
+                    </div>
                 </section>
             </div>
         </div>

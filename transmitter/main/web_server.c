@@ -1031,6 +1031,157 @@ static esp_err_t factory_reset_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// ─── Speed test (Settings > System) ─────────────────────────────────────────
+// POST /perf/sink              browser -> TX: body read and discarded. X-Perf:
+//                              begin resets the totals, end logs them.
+// POST /perf/link?rx= {size}   TX -> RX: size bytes from RAM in 32 KB POSTs
+//                              (one keep-alive socket, like an upload) to rx /perf/sink
+// POST /perf/sd?rx= {size}     relays to rx /perf/sd (local SD write)
+#define PERF_KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
+#define PERF_MAX (100u * 1024 * 1024)
+static struct {
+  uint64_t bytes;
+  uint32_t requests;
+  int64_t recv_us;
+  int64_t t_begin;
+} s_perf_sink;
+
+static bool perf_refused(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return true;
+  }
+  char active[RX_ID_LEN];
+  if (file_transfer_active_rx(active, sizeof(active))) {
+    send_status_text(req, 409, "A file transfer is running");
+    return true;
+  }
+  return false;
+}
+
+static void perf_send(httpd_req_t *req, uint64_t bytes, int64_t us) {
+  char out[96];
+  snprintf(out, sizeof(out), "{\"bytes\":%llu,\"ms\":%lld,\"kbps\":%.1f}", (unsigned long long)bytes,
+           (long long)(us / 1000), PERF_KBPS(bytes, us));
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, out);
+}
+
+static esp_err_t perf_sink_handler(httpd_req_t *req) {
+  if (perf_refused(req)) return ESP_OK;
+  char mark[8] = {0};
+  httpd_req_get_hdr_value_str(req, "X-Perf", mark, sizeof(mark));
+  if (strcmp(mark, "begin") == 0) {
+    memset(&s_perf_sink, 0, sizeof(s_perf_sink));
+    s_perf_sink.t_begin = esp_timer_get_time();
+  }
+  int64_t t0 = esp_timer_get_time();
+  int remaining = req->content_len;
+  int timeouts = 0;
+  while (remaining > 0) {
+    int r = httpd_req_recv(req, s_chunk_buf, remaining < UPLOAD_CHUNK_MAX ? remaining : UPLOAD_CHUNK_MAX);
+    if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < BODY_RECV_TIMEOUTS) continue;
+    if (r <= 0) return ESP_FAIL;
+    remaining -= r;
+  }
+  int64_t us = esp_timer_get_time() - t0;
+  s_perf_sink.bytes += req->content_len;
+  s_perf_sink.requests++;
+  s_perf_sink.recv_us += us;
+  if (strcmp(mark, "end") == 0) {
+    int64_t wall = esp_timer_get_time() - s_perf_sink.t_begin;
+    ESP_LOGI(TAG, "PERF browser->TX: %llu bytes, %lu requests in %lld ms = %.1f KB/s (body recv only %.1f KB/s)",
+             (unsigned long long)s_perf_sink.bytes, (unsigned long)s_perf_sink.requests,
+             (long long)(wall / 1000), PERF_KBPS(s_perf_sink.bytes, wall),
+             PERF_KBPS(s_perf_sink.bytes, s_perf_sink.recv_us));
+  }
+  perf_send(req, req->content_len, us);
+  return ESP_OK;
+}
+
+// {"size":n} body -> n, or 0 after sending 400
+static uint32_t perf_size(httpd_req_t *req) {
+  char body[48] = {0};
+  if (req->content_len > 0 && req->content_len < (int)sizeof(body) &&
+      read_full_body(req, body, sizeof(body) - 1)) {
+    cJSON *json = cJSON_Parse(body);
+    cJSON *j = json ? cJSON_GetObjectItem(json, "size") : NULL;
+    double size = cJSON_IsNumber(j) ? j->valuedouble : 0;
+    cJSON_Delete(json);
+    if (size > 0 && size <= PERF_MAX) return (uint32_t)size;
+  }
+  send_status_text(req, 400, "size must be 1..100 MB");
+  return 0;
+}
+
+static bool perf_target(httpd_req_t *req, rx_target_t *rx) {
+  char id[RX_ID_LEN];
+  bool known = false;
+  if (get_rx_id(req, id, sizeof(id)) && rx_registry_target(id, rx, &known)) return true;
+  send_status_text(req, known ? 502 : 404, known ? "Receiver offline" : "Unknown receiver");
+  return false;
+}
+
+static esp_err_t perf_link_handler(httpd_req_t *req) {
+  if (perf_refused(req)) return ESP_OK;
+  rx_target_t rx;
+  uint32_t size = perf_size(req);
+  if (size == 0 || !perf_target(req, &rx)) return ESP_OK;
+  for (int i = 0; i < UPLOAD_CHUNK_MAX; i++) s_chunk_buf[i] = (char)(i * 31 + 7);
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s/perf/sink", rx.ip);
+  esp_http_client_config_t cfg = {.url = url, .timeout_ms = 10000, .keep_alive_enable = true};
+  esp_http_client_handle_t c = esp_http_client_init(&cfg);
+  if (c == NULL) {
+    send_status_text(req, 500, "HTTP client init failed");
+    return ESP_OK;
+  }
+  esp_http_client_set_method(c, HTTP_METHOD_POST);
+  esp_http_client_set_header(c, "Content-Type", "application/octet-stream");
+  esp_http_client_set_header(c, "X-Auth-Key", rx.key);
+  uint32_t sent = 0, posts = 0;
+  int64_t t0 = esp_timer_get_time();
+  while (sent < size) {
+    int n = size - sent < UPLOAD_CHUNK_MAX ? (int)(size - sent) : UPLOAD_CHUNK_MAX;
+    esp_http_client_set_post_field(c, s_chunk_buf, n);
+    if (esp_http_client_perform(c) != ESP_OK || esp_http_client_get_status_code(c) != 200) break;
+    sent += n;
+    posts++;
+  }
+  int64_t us = esp_timer_get_time() - t0;
+  esp_http_client_cleanup(c);
+  if (sent != size) {
+    send_status_text(req, 502, "Receiver link failed during the test");
+    return ESP_OK;
+  }
+  ESP_LOGI(TAG, "PERF TX->RX %s: %lu bytes, %lu x %d B POSTs in %lld ms = %.1f KB/s", rx.id,
+           (unsigned long)sent, (unsigned long)posts, UPLOAD_CHUNK_MAX, (long long)(us / 1000),
+           PERF_KBPS(sent, us));
+  perf_send(req, sent, us);
+  return ESP_OK;
+}
+
+static esp_err_t perf_sd_handler(httpd_req_t *req) {
+  if (perf_refused(req)) return ESP_OK;
+  rx_target_t rx;
+  uint32_t size = perf_size(req);
+  if (size == 0 || !perf_target(req, &rx)) return ESP_OK;
+  char json[40];
+  snprintf(json, sizeof(json), "{\"size\":%lu}", (unsigned long)size);
+  // Allow 50 KB/s worst case plus mount/unmount
+  int timeout_ms = 30000 + (int)(size / 50);
+  int status = rx_http(&rx, HTTP_METHOD_POST, "/perf/sd", json, false, timeout_ms, s_rx_resp,
+                       sizeof(s_rx_resp), NULL);
+  if (status == 200) {
+    ESP_LOGI(TAG, "PERF SD write on %s: %s", rx.id, s_rx_resp);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, s_rx_resp);
+  } else {
+    send_status_text(req, status < 0 ? 502 : status, s_rx_resp[0] ? s_rx_resp : "Receiver did not answer");
+  }
+  return ESP_OK;
+}
+
 // ─── Debug endpoint — shows connected stations and receiver connectivity
 static esp_err_t debug_get_handler(httpd_req_t *req) {
   char resp[1024];
@@ -1116,6 +1267,9 @@ static const route_t s_routes[] = {
     {"/upload_chunk", HTTP_POST, upload_chunk_handler, RT_UPLOAD},
     {"/upload_finish", HTTP_POST, upload_finish_handler, RT_UPLOAD},
     {"/upload_cancel", HTTP_POST, upload_cancel_handler, RT_UPLOAD},
+    {"/perf/sink", HTTP_POST, perf_sink_handler, RT_UPLOAD},
+    {"/perf/link", HTTP_POST, perf_link_handler, RT_UPLOAD},
+    {"/perf/sd", HTTP_POST, perf_sd_handler, RT_RX},
     {"/receiver_list", HTTP_GET, receiver_list_get_handler, RT_RX},
     {"/receiver_delete", HTTP_POST, delete_post_handler, RT_RX},
     {"/receiver_clear", HTTP_POST, clear_post_handler, RT_RX},
