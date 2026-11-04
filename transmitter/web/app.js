@@ -695,10 +695,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 const busy = r.busy || r.state === 'RECEIVING';
                 return `<button type="button" class="chip" data-msg-act="again" data-id="${esc(r.id)}"${busy ? ' disabled' : ''}>${esc(r.name)}${busy ? ' · ' + esc(t('pill.job')) : ''}</button>`;
             }).join('');
-            return { key: 'done:' + others.map(r => r.id + (r.busy ? 'b' : '')).join(','), kind: 'ok', icon: 'ok',
+            const pText = m.phases ? phaseText(m.phases) : '';
+            return { key: 'done:' + others.map(r => r.id + (r.busy ? 'b' : '')).join(',') + (m.showDetails ? ':' + pText : ''), kind: 'ok', icon: 'ok',
                 title: t('msg.done.title', { file: m.file, name }),
                 why: t('msg.done.why', { size: fmtBytes(m.size), time: fmtDuration(m.secs) }) + (m.slow ? ' ' + t('msg.done.slow') : ''),
-                extra: chips ? `<div class="again"><span class="small muted">${esc(t('msg.done.again'))}</span><div class="chips">${chips}</div></div>` : '' };
+                extra: (chips ? `<div class="again"><span class="small muted">${esc(t('msg.done.again'))}</span><div class="chips">${chips}</div></div>` : '') +
+                    (m.showDetails && pText ? `<pre class="details">${esc(pText)}</pre>` : ''),
+                actions: pText ? btn('details', t(m.showDetails ? 'msg.fail.hide' : 'msg.fail.details'), 'btn-ghost') : '' };
         }
         case 'offline':
             return { key: 'offline:' + (v ? v.id + ':' + Math.round((v.last_seen_s || 0) / 60) : ''), kind: 'info', icon: 'offline',
@@ -1183,7 +1186,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (res.ok) {
                     const d = await res.json();
                     // RECEIVING may still be the transmitter's cached value from mid-upload
-                    if (d.state && d.state !== 'FILE_READY' && d.state !== 'RECEIVING') return d.state;
+                    if (d.state && d.state !== 'FILE_READY' && d.state !== 'RECEIVING') return d;
                 }
             } catch (e) { /* keep waiting */ }
         }
@@ -1200,6 +1203,31 @@ document.addEventListener('DOMContentLoaded', () => {
             const dt = (now - pts[0][0]) / 1000;
             return dt >= 1 ? (bytes - pts[0][1]) / dt : 0;
         };
+    }
+
+    // Phases of the last transfer, for "Show details" on the done message
+    const PHASES = ['hash', 'start', 'ready', 'data', 'flush', 'verify', 'list', 'unmount', 'reattach', 'host'];
+    function phaseText(p) {
+        return PHASES.filter(k => typeof p[k] === 'number' && p[k] >= 0)
+            .map(k => t('phase.' + k) + ': ' + Math.round(p[k]) + ' ms').join('\n');
+    }
+    // The drive's re-attach and the host's mount come after the done message:
+    // fill them in from the heartbeat cache as they arrive
+    async function fillLatePhases(rxId) {
+        for (let i = 0; i < 30; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            const m = explicitMsg;
+            if (!m || m.type !== 'done' || m.rxId !== rxId || !m.phases) return;
+            try {
+                const res = await fetch('/status', { headers: authHeaders({ 'X-Rx-Id': rxId }) });
+                if (!res.ok) continue;
+                const d = await res.json();
+                if (d.reattach_ms >= 0) m.phases.reattach = d.reattach_ms;
+                if (d.host_ms >= 0) m.phases.host = d.host_ms;
+                renderMsgArea();
+                if (d.reattach_ms >= 0 && d.host_ms >= 0) return;
+            } catch (e) { /* keep trying */ }
+        }
     }
 
     // step: 0 Upload, 1 Verify, 2 Reconnect drive, 3 Done
@@ -1236,11 +1264,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const tStart = performance.now();
         try {
             setProgress(0, t('tx.checking'), 0);
+            const phases = {};
+            let tp = performance.now();
             const md5 = await calculateMD5(file);
+            phases.hash = performance.now() - tp;
             if (cancelRequested) throw new UploadError(stage, 'cancelled');
 
             stage = 'Starting';
             setProgress(0, t('tx.preparing', { name: target.name }), 0);
+            tp = performance.now();
             const beginHeaders = { 'Content-Type': 'application/json', 'X-Rx-Id': target.id };
             if (force) beginHeaders['X-Force'] = '1';
             let res;
@@ -1277,7 +1309,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             if (!res.ok) throw new UploadError(stage, await errorText(res), res.status);
-            session = (await res.json()).session;
+            const begun = await res.json();
+            session = begun.session;
+            const ready = (begun.rx && begun.rx.ms) || {};
+            phases.ready = (ready.detach || 0) + (ready.mount || 0) + (ready.space || 0) + (ready.open || 0);
+            phases.start = performance.now() - tp - phases.ready;
+            tp = performance.now();
 
             stage = 'Uploading';
             const total = file.size;
@@ -1295,16 +1332,24 @@ document.addEventListener('DOMContentLoaded', () => {
             stage = 'Verifying';
             cancelBtn.disabled = true; // past the point of a clean cancel
             setProgress(100, t('tx.verifying'), 1);
-            const fin = await apiPost('/upload_finish', { 'X-Session': session }, '');
+            phases.data = performance.now() - tp;
+            const fin = await apiPost('/upload_finish', { 'X-Session': session, 'Content-Type': 'application/json' },
+                JSON.stringify({ hash_ms: Math.round(phases.hash) }));
             session = null; // the transmitter ends the session either way
             if (!fin.ok) throw new UploadError(stage, await errorText(fin), fin.status);
+            const finMs = ((await fin.json()).rx || {}).ms || {};
+            phases.flush = finMs.flush;
+            phases.verify = (finMs.md5 || 0) + (finMs.commit || 0);
+            phases.list = finMs.list;
+            phases.unmount = finMs.unmount;
             const secs = (performance.now() - tStart) / 1000;
 
             stage = 'Reconnecting drive';
             setProgress(100, t('tx.reconnecting'), 2);
             const state = await waitForDriveReconnect(10000);
             setProgress(100, t('tx.done'), 3);
-            outcome = { type: 'done', name: target.name, rxId: target.id, file: name, size: file.size, secs, slow: !state };
+            outcome = { type: 'done', name: target.name, rxId: target.id, file: name, size: file.size, secs, slow: !state, phases };
+            fillLatePhases(target.id);
             lastSent = { file, name, rxId: target.id };
             setFile(null);
         } catch (e) {

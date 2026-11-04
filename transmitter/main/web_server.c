@@ -299,8 +299,10 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
     send_status_text(req, code, msg);
     return ESP_OK;
   }
-  char resp[96];
-  snprintf(resp, sizeof(resp), "{\"session\":\"%s\",\"chunk_size\":%d}", session, UPLOAD_CHUNK_MAX);
+  char resp[256];
+  // rx: the receiver's /prepare reply (phase timings)
+  snprintf(resp, sizeof(resp), "{\"session\":\"%s\",\"chunk_size\":%d,\"rx\":%s}", session, UPLOAD_CHUNK_MAX,
+           msg[0] == '{' ? msg : "{}");
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_sendstr(req, resp);
   return ESP_OK;
@@ -385,14 +387,26 @@ static esp_err_t upload_finish_handler(httpd_req_t *req) {
     send_status_text(req, 400, "Missing X-Session");
     return ESP_OK;
   }
+  // Optional body {"hash_ms":n}: browser hash time, for the log
+  char body[96] = {0};
+  if (req->content_len > 0 && req->content_len < (int)sizeof(body) &&
+      read_full_body(req, body, sizeof(body) - 1)) {
+    cJSON *json = cJSON_Parse(body);
+    cJSON *j = json ? cJSON_GetObjectItem(json, "hash_ms") : NULL;
+    if (cJSON_IsNumber(j)) ESP_LOGI(TAG, "PHASE browser hash %d ms", j->valueint);
+    cJSON_Delete(json);
+  }
   char msg[160];
   int code = file_transfer_finish(session, msg, sizeof(msg));
   if (code != 200) {
     send_status_text(req, code, msg);
     return ESP_OK;
   }
+  // rx: the receiver's /finalize reply (phase timings)
+  char resp[200];
+  snprintf(resp, sizeof(resp), "{\"status\":\"verified\",\"rx\":%s}", msg[0] == '{' ? msg : "{}");
   httpd_resp_set_type(req, "application/json; charset=utf-8");
-  httpd_resp_sendstr(req, "{\"status\":\"verified\"}");
+  httpd_resp_sendstr(req, resp);
   return ESP_OK;
 }
 

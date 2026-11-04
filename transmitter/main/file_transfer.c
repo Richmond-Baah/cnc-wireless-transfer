@@ -449,6 +449,14 @@ static int finish_locked(const char *session, char *msg, size_t msg_len) {
            (long long)(s_up.chunk_max_us / 1000), s_up.connects,
            (long long)(fin_us / 1000), status == 200 ? "OK" : "FAILED");
 
+  if (status == 200) {
+    // The cached timings are from the previous transfer until the next heartbeat
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "reattach_ms", -1);
+    cJSON_AddNumberToObject(o, "host_ms", -1);
+    rx_registry_update_status(s_up.rx.id, o);
+    cJSON_Delete(o);
+  }
   session_end();
   if (status != 200) {
     led_set_state(LED_STATE_ERROR);

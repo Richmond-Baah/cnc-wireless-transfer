@@ -38,6 +38,8 @@ typedef struct {
   double free_bytes;
   bool card_error;
   bool busy;
+  int reattach_ms;      // last transfer, reported by the receiver (-1 = not yet)
+  int host_ms;
   uint32_t cfg_fetched;
   int64_t last_seen_us; // 0 = never since boot
 } rx_entry_t;
@@ -298,6 +300,8 @@ static void apply_status_locked(rx_entry_t *e, const cJSON *o) {
   if ((s = json_str(o, "storage_type"))) strlcpy(e->storage_type, s, sizeof(e->storage_type));
   e->total_bytes = json_num(o, "total_bytes", e->total_bytes);
   e->free_bytes = json_num(o, "free_bytes", e->free_bytes);
+  e->reattach_ms = (int)json_num(o, "reattach_ms", e->reattach_ms);
+  e->host_ms = (int)json_num(o, "host_ms", e->host_ms);
   const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, "card_error");
   if (cJSON_IsBool(v)) e->card_error = cJSON_IsTrue(v);
   v = cJSON_GetObjectItemCaseSensitive(o, "busy");
@@ -461,6 +465,8 @@ static void add_entry_fields_locked(const rx_entry_t *e, cJSON *o) {
   cJSON_AddNumberToObject(o, "free_bytes", e->free_bytes);
   cJSON_AddBoolToObject(o, "card_error", e->card_error);
   cJSON_AddBoolToObject(o, "busy", e->busy);
+  cJSON_AddNumberToObject(o, "reattach_ms", e->reattach_ms);
+  cJSON_AddNumberToObject(o, "host_ms", e->host_ms);
   cJSON_AddNumberToObject(o, "last_seen_s",
                           e->last_seen_us ? (double)((esp_timer_get_time() - e->last_seen_us) / 1000000) : -1);
 }

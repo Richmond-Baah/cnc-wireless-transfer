@@ -180,6 +180,16 @@ window.STRINGS = {
     'stage.verifying': 'Verifying',
     'stage.reconnecting': 'Reconnecting the drive',
     'msg.error.pairing': 'Pairing failed',
+    'phase.hash': 'Checking the file (browser)',
+    'phase.start': 'Upload start (network)',
+    'phase.ready': 'Machine getting ready (drive detach, mount, space check)',
+    'phase.data': 'Data transfer',
+    'phase.flush': 'SD flush',
+    'phase.verify': 'Verify and rename',
+    'phase.list': 'File list refresh',
+    'phase.unmount': 'SD unmount',
+    'phase.reattach': 'Drive re-attach',
+    'phase.host': 'Machine mounts the drive',
 
     // New receivers (dashboard notice)
     'mc.found': 'New receiver found',

@@ -40,9 +40,11 @@ static struct {
     int64_t t_start;      // /prepare accepted
     int64_t usb_release;  // USB disconnect
     int64_t mount;        // FatFS mount
+    int64_t space;        // free-space check (f_getfree)
     int64_t open;         // staging file open
     int64_t recv;         // network reads inside /chunk
-    int64_t write;        // fwrite + periodic/final fsync
+    int64_t write;        // fwrite of the chunks
+    int64_t flush;        // final fflush + fsync + fclose
     int64_t md5;          // incremental MD5 + finish/verify
     int64_t commit;       // remove + rename
     int64_t snapshot;     // file-list/free-space cache refresh
@@ -52,6 +54,7 @@ static struct {
     uint32_t chunks;
     uint64_t next_log;    // bytes at which the next progress line is logged
 } s_tm;
+static int s_reattach_ms = -1; // last transfer: /finalize reply -> drive back on USB (-1 = not yet)
 #define RX_KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
 #define TM_START() int64_t _tm0 = esp_timer_get_time()
 #define TM_ADD(field) (s_tm.field += esp_timer_get_time() - _tm0, _tm0 = esp_timer_get_time())
@@ -414,6 +417,7 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
 
     memset(&s_tm, 0, sizeof(s_tm));
     s_tm.t_start = esp_timer_get_time();
+    s_reattach_ms = -1;
     TM_START();
 
     // Step 1: Disconnect USB so the host stops reading raw SD sectors
@@ -481,6 +485,7 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     }
 
     // Build paths only after the active storage path has been resolved
+    TM_ADD(space);
     snprintf(final_filename, sizeof(final_filename), "%s/%s", STORAGE_PATH, sanitized);
     snprintf(active_filename, sizeof(active_filename), "%s/%s.tmp", STORAGE_PATH, sanitized);
     strncpy(expected_md5, md5->valuestring, sizeof(expected_md5) - 1);
@@ -521,11 +526,14 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     }
 
     ESP_LOGI(TAG, "Ready to receive staging file: %s (final: %s, expected MD5: %s)", active_filename, final_filename, expected_md5);
-    ESP_LOGI(TAG, "Stage prepare: usb_release %lld ms, mount %lld ms, open %lld ms",
-             TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.open));
+    ESP_LOGI(TAG, "Stage prepare: usb_release %lld ms, mount %lld ms, space %lld ms, open %lld ms",
+             TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.space), TM_MS(s_tm.open));
     
+    char ready[160];
+    snprintf(ready, sizeof(ready), "{\"status\":\"ok\",\"ms\":{\"detach\":%lld,\"mount\":%lld,\"space\":%lld,\"open\":%lld}}",
+             TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.space), TM_MS(s_tm.open));
     httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_sendstr(req, ready);
 
     cJSON_Delete(json);
     return ESP_OK;
@@ -660,7 +668,7 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     long final_size = ftell(active_file);
     fclose(active_file);
     active_file = NULL;
-    TM_ADD(write);
+    TM_ADD(flush);
 
     unsigned char hash[16];
     mbedtls_md5_finish(&active_md5_ctx, hash);
@@ -717,8 +725,11 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     // The file is safely on disk: answer now so the sender isn't held up by
     // the USB reconnect wait. State stays FILE_READY until the drive is back
     // (the transmitter UI shows "Reconnecting drive" meanwhile).
+    char done[192];
+    snprintf(done, sizeof(done), "{\"status\":\"ok\",\"ms\":{\"flush\":%lld,\"md5\":%lld,\"commit\":%lld,\"list\":%lld,\"unmount\":%lld}}",
+             TM_MS(s_tm.flush), TM_MS(s_tm.md5), TM_MS(s_tm.commit), TM_MS(s_tm.snapshot), TM_MS(s_tm.unmount));
     httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_sendstr(req, done);
 
     // Drop the USB connection to signal disconnect to the PC
     usb_msc_disconnect();
@@ -728,6 +739,7 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     vTaskDelay(pdMS_TO_TICKS(1500));
     usb_msc_connect();
     TM_ADD(usb_reconnect);
+    s_reattach_ms = (int)TM_MS(s_tm.usb_reconnect);
     if (state_machine_get() == STATE_FILE_READY) {
         state_machine_transition(STATE_IDLE); // host mount then moves it to USB_ACTIVE
     }
@@ -735,12 +747,12 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     int64_t total_us = esp_timer_get_time() - s_tm.t_start;
     ESP_LOGI(TAG, "XFER summary: %llu bytes, %lu chunks in %lld ms = %.1f KB/s | "
                   "recv %.0f KB/s, SD write %.0f KB/s | "
-                  "usb_release %lld, mount %lld, open %lld, recv %lld, write %lld, md5 %lld, "
-                  "commit %lld, snapshot %lld, unmount %lld, usb_reconnect %lld ms",
+                  "usb_release %lld, mount %lld, space %lld, open %lld, recv %lld, write %lld, flush %lld, md5 %lld, "
+                  "commit %lld, snapshot %lld, unmount %lld, usb_reconnect %lld ms (host mount logged separately)",
              (unsigned long long)s_tm.bytes, (unsigned long)s_tm.chunks, TM_MS(total_us),
              RX_KBPS(s_tm.bytes, total_us), RX_KBPS(s_tm.bytes, s_tm.recv), RX_KBPS(s_tm.bytes, s_tm.write),
-             TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.open), TM_MS(s_tm.recv),
-             TM_MS(s_tm.write), TM_MS(s_tm.md5), TM_MS(s_tm.commit), TM_MS(s_tm.snapshot),
+             TM_MS(s_tm.usb_release), TM_MS(s_tm.mount), TM_MS(s_tm.space), TM_MS(s_tm.open), TM_MS(s_tm.recv),
+             TM_MS(s_tm.write), TM_MS(s_tm.flush), TM_MS(s_tm.md5), TM_MS(s_tm.commit), TM_MS(s_tm.snapshot),
              TM_MS(s_tm.unmount), TM_MS(s_tm.usb_reconnect));
     return ESP_OK;
 }
@@ -784,6 +796,8 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddBoolToObject(obj, "card_error", sd_card_has_card_error());
     // Same rule as the busy guard: the machine read the drive in the last 10 s
     cJSON_AddBoolToObject(obj, "busy", usb_msc_ms_since_host_read() < 10000);
+    cJSON_AddNumberToObject(obj, "reattach_ms", s_reattach_ms);
+    cJSON_AddNumberToObject(obj, "host_ms", usb_msc_host_mount_ms());
 }
 
 // ─── Speed test (Settings > System on the transmitter) ──────────────────────

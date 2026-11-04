@@ -13,5 +13,7 @@ esp_err_t usb_msc_format_storage(void);
 bool usb_msc_is_host_mounted(void);
 // Milliseconds since the host last read a sector (UINT32_MAX if never)
 uint32_t usb_msc_ms_since_host_read(void);
+// USB connect -> host mounted the drive, for the last connect (-1 = not yet)
+int usb_msc_host_mount_ms(void);
 
 #endif // USB_MSC_H

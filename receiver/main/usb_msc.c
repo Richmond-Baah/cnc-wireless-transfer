@@ -1,6 +1,7 @@
 #include "usb_msc.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "storage_manager.h"
 #include "tinyusb.h"
 #include "state_machine.h"
@@ -18,6 +19,8 @@ static const char *TAG = "USB_MSC";
 static bool s_usb_mounted_by_host = false;
 static volatile TickType_t s_last_host_read_tick = 0; // last SCSI READ10 from the host
 static volatile bool s_host_read_seen = false;
+static int64_t s_connect_us = 0;      // last tud_connect()
+static volatile int s_host_ms = -1;   // tud_connect() -> host mounted us (-1 = not yet)
 
 #if CONFIG_CNC_USB_READ_LOG
 // Per-second host read statistics, filled in READ10 and drained by a log task
@@ -328,6 +331,10 @@ void tud_msc_writable_changed_cb(uint8_t lun) {
 void tud_mount_cb(void) {
     ESP_LOGI(TAG, "========== USB MOUNTED BY HOST ==========");
     s_usb_mounted_by_host = true;
+    if (s_connect_us && s_host_ms < 0) {
+        s_host_ms = (int)((esp_timer_get_time() - s_connect_us) / 1000);
+        ESP_LOGI(TAG, "PHASE host mounted the drive %d ms after USB connect", s_host_ms);
+    }
 
     if (state_machine_get() != STATE_RECEIVING) {
         state_machine_transition(STATE_USB_ACTIVE);
@@ -367,8 +374,12 @@ void usb_msc_connect(void) {
     // Force a complete physical disconnect state first
     tud_disconnect();
     vTaskDelay(pdMS_TO_TICKS(500));
+    s_host_ms = -1;
+    s_connect_us = esp_timer_get_time();
     tud_connect();
 }
+
+int usb_msc_host_mount_ms(void) { return s_host_ms; }
 
 void usb_msc_notify_change(void) {
     ESP_LOGI(TAG, "Re-enumerating device...");
