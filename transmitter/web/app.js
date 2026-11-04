@@ -1638,7 +1638,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ size }) }))],
             ['perf.sd', async () => perfJson(await fetch('/perf/sd?rx=' + encodeURIComponent(rxId), { method: 'POST',
                 headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ size }) }))],
-            ['perf.full', async () => perfFull(rxId, size, 'buffered')]
+            ['perf.full', async () => perfFull(rxId, size, 'buffered')],
+            ['perf.fullStream', async () => perfFull(rxId, size, 'stream')]
         ];
         uploading = true; // keep the dashboard from starting a transfer meanwhile
         try {

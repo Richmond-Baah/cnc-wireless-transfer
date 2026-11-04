@@ -31,9 +31,8 @@ static char final_filename[256] = {0};  // target filename after successful veri
 static char expected_md5[33] = {0};
 static mbedtls_md5_context active_md5_ctx;
 
-#define RECEIVER_CHUNK_BUFSIZE 16384
+#define RECEIVER_CHUNK_BUFSIZE 32768 // one whole upload chunk (UPLOAD_CHUNK_MAX on the transmitter)
 static char chunk_buf[RECEIVER_CHUNK_BUFSIZE];
-static int chunk_count = 0;
 static int expected_chunk_index = 0;
 
 // Per-transfer stage timings (µs), logged as one summary line at /finalize
@@ -509,7 +508,6 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
     TM_ADD(open);
     mbedtls_md5_init(&active_md5_ctx);
     mbedtls_md5_starts(&active_md5_ctx);
-    chunk_count = 0;
     expected_chunk_index = 0;
 
     if (esp_timer_get_time() - t_req > PREPARE_BUDGET_US) {
@@ -571,40 +569,42 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    int remaining = req->content_len;
-    TM_START();
-    while (remaining > 0) {
-        int to_read = remaining < (int)sizeof(chunk_buf) ? remaining : (int)sizeof(chunk_buf);
-        int read_len = httpd_req_recv(req, chunk_buf, to_read);
-        if (read_len <= 0) {
-            if (read_len == HTTPD_SOCK_ERR_TIMEOUT) continue;
-            ESP_LOGE(TAG, "Error reading chunk data");
-            fail_transfer_and_release();
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Chunk read error");
-            return ESP_FAIL;
-        }
-        TM_ADD(recv);
-
-        size_t written = fwrite(chunk_buf, 1, read_len, active_file);
-        if ((int)written != read_len) {
-            ESP_LOGE(TAG, "Write error (wrote %d of %d)", (int)written, read_len);
-            fail_transfer_and_release();
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write error");
-            return ESP_FAIL;
-        }
-        
-        // Flush every 16 chunks (approx 256KB) to improve speed while maintaining some safety
-        if (++chunk_count % 16 == 0) {
-            fflush(active_file);
-            fsync(fileno(active_file));
-        }
-        TM_ADD(write);
-
-        mbedtls_md5_update(&active_md5_ctx, (const unsigned char *)chunk_buf, read_len);
-        TM_ADD(md5);
-        s_tm.bytes += read_len;
-        remaining -= read_len;
+    // The whole chunk is read into RAM first and then written with one fwrite
+    // (32 KB, sector aligned). A short body (sender gone mid-chunk) writes
+    // nothing, so the sender can retry the same index. No fsync per chunk: the
+    // staging file is fsynced once in /finalize and deleted on any failure.
+    int len = req->content_len;
+    if (len <= 0 || len > (int)sizeof(chunk_buf)) {
+        drain_request_body(req);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Chunk must be 1-32768 bytes");
+        return ESP_OK;
     }
+    TM_START();
+    int got = 0;
+    while (got < len) {
+        int read_len = httpd_req_recv(req, chunk_buf + got, len - got);
+        if (read_len == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (read_len <= 0) {
+            ESP_LOGW(TAG, "Chunk %ld: body ended after %d of %d bytes; not written, retry expected",
+                     chunk_index, got, len);
+            return ESP_FAIL; // socket is gone: httpd closes it
+        }
+        got += read_len;
+    }
+    TM_ADD(recv);
+
+    size_t written = fwrite(chunk_buf, 1, len, active_file);
+    if ((int)written != len) {
+        ESP_LOGE(TAG, "Write error (wrote %d of %d)", (int)written, len);
+        fail_transfer_and_release();
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write error");
+        return ESP_FAIL;
+    }
+    TM_ADD(write);
+
+    mbedtls_md5_update(&active_md5_ctx, (const unsigned char *)chunk_buf, len);
+    TM_ADD(md5);
+    s_tm.bytes += len;
     expected_chunk_index++;
     s_tm.chunks++;
     if (s_tm.bytes >= s_tm.next_log) {
@@ -789,8 +789,8 @@ void file_receiver_add_status_fields(cJSON *obj) {
 // ─── Speed test (Settings > System on the transmitter) ──────────────────────
 // SD write pattern of chunk_post_handler, so /perf/sd measures what a real
 // transfer does: one fwrite per piece, fflush+fsync every PERF_SD_FSYNC_EVERY.
-#define PERF_SD_PIECE 1436       // typical httpd_req_recv() return (one TCP segment)
-#define PERF_SD_FSYNC_EVERY 16
+#define PERF_SD_PIECE RECEIVER_CHUNK_BUFSIZE // one fwrite per whole chunk
+#define PERF_SD_FSYNC_EVERY 0                // fsync only at the end (/finalize)
 #define PERF_SD_MAX (100u * 1024 * 1024)
 
 static void perf_reply(httpd_req_t *req, uint64_t bytes, int64_t us) {
@@ -883,7 +883,7 @@ static esp_err_t perf_sd_handler(httpd_req_t *req) {
         size_t n = (uint64_t)size - done < PERF_SD_PIECE ? (size_t)((uint64_t)size - done) : PERF_SD_PIECE;
         if (fwrite(buf, 1, n, f) != n) break;
         done += n;
-        if (PERF_SD_FSYNC_EVERY && ++pieces % PERF_SD_FSYNC_EVERY == 0) {
+        if (PERF_SD_FSYNC_EVERY > 0 && ++pieces % (PERF_SD_FSYNC_EVERY > 0 ? PERF_SD_FSYNC_EVERY : 1) == 0) {
             fflush(f);
             fsync(fileno(f));
         }

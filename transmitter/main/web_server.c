@@ -275,7 +275,10 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
 
   char session[24];
   char msg[160];
-  int code = file_transfer_begin(rx_id, name, (size_t)size, md5, force, session, sizeof(session),
+  char relay[12] = {0};
+  bool has_relay = httpd_req_get_hdr_value_str(req, "X-Relay", relay, sizeof(relay)) == ESP_OK;
+  int code = file_transfer_begin(rx_id, name, (size_t)size, md5, force, has_relay ? relay : NULL,
+                                 session, sizeof(session),
                                  msg, sizeof(msg));
   cJSON_Delete(json);
 
@@ -303,6 +306,16 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// Stream relay: next piece of the chunk body from the browser (<= 0 on error)
+static int relay_read(void *ctx, char *buf, int len) {
+  httpd_req_t *req = (httpd_req_t *)ctx;
+  for (int timeouts = 0;;) {
+    int r = httpd_req_recv(req, buf, len);
+    if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < BODY_RECV_TIMEOUTS) continue;
+    return r;
+  }
+}
+
 static esp_err_t upload_chunk_handler(httpd_req_t *req) {
   if (!is_authorized(req)) {
     send_status_text(req, 401, "Unauthorized");
@@ -323,6 +336,21 @@ static esp_err_t upload_chunk_handler(httpd_req_t *req) {
   }
   if (req->content_len == 0 || req->content_len > UPLOAD_CHUNK_MAX) {
     send_status_text(req, 413, "Chunk must be 1-32768 bytes");
+    return ESP_OK;
+  }
+  if (file_transfer_streams(session)) {
+    uint64_t acked = 0;
+    char msg[160];
+    int code = file_transfer_chunk_stream(session, (int)index, req->content_len, relay_read, req,
+                                          s_chunk_buf, sizeof(s_chunk_buf), &acked, msg, sizeof(msg));
+    if (code != 200) {
+      send_status_text(req, code, msg);
+      return ESP_OK;
+    }
+    char resp[48];
+    snprintf(resp, sizeof(resp), "{\"acked\":%llu}", (unsigned long long)acked);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, resp);
     return ESP_OK;
   }
   int64_t t0 = esp_timer_get_time();

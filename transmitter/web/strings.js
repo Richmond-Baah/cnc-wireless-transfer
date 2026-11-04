@@ -300,7 +300,8 @@ window.STRINGS = {
     'perf.up': 'This device → transmitter',
     'perf.link': 'Transmitter → machine',
     'perf.sd': 'Machine SD card write',
-    'perf.full': 'Full transfer',
+    'perf.full': 'Full transfer (buffered relay)',
+    'perf.fullStream': 'Full transfer (streaming relay)',
     'perf.running': 'Running: {leg}…',
     'perf.done': 'Done. Results are also in the transmitter log (PERF lines).',
     'perf.failed': '{leg} failed: {why}'

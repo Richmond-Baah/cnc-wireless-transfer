@@ -9,9 +9,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 static const char *TAG = "TRANSFER";
 
@@ -56,7 +60,13 @@ static struct {
   int64_t chunk_max_us;
   int64_t recv_total_us;   // browser -> TX (reading the chunk body)
   uint64_t next_log;       // acked bytes at which the next progress line is logged
-} s_up;
+  bool stream;             // X-Relay: stream (pieces forwarded as they arrive)
+  int relay_fd;            // stream mode: keep-alive socket to the receiver, -1 = none
+} s_up = {.relay_fd = -1};
+
+// Default relay for uploads that don't send X-Relay. Pick from the speed
+// test's "Full transfer" rows (buffered vs stream).
+#define RELAY_STREAM_DEFAULT false
 
 #define KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
 #define PROGRESS_LOG_BYTES (1024 * 1024)
@@ -75,11 +85,20 @@ static int cancel_on_receiver(const rx_target_t *t) {
   return rx_http(t, HTTP_METHOD_POST, "/cancel", "{}", false, 2000, resp, sizeof(resp), NULL);
 }
 
+static void relay_close(void) {
+  if (s_up.relay_fd >= 0) {
+    close(s_up.relay_fd);
+    s_up.relay_fd = -1;
+  }
+}
+
 static void session_end(void) {
   if (s_up.chunk_client) {
     esp_http_client_cleanup(s_up.chunk_client);
   }
+  relay_close();
   memset(&s_up, 0, sizeof(s_up));
+  s_up.relay_fd = -1;
 }
 
 static bool session_matches(const char *session) {
@@ -87,7 +106,7 @@ static bool session_matches(const char *session) {
 }
 
 static int begin_locked(const char *rx_id, const char *name, size_t size, const char *md5, bool force,
-                        char *session_out, size_t session_len,
+                        const char *relay, char *session_out, size_t session_len,
                         char *msg, size_t msg_len) {
   int64_t now = esp_timer_get_time();
   msg[0] = '\0';
@@ -157,6 +176,8 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
   }
 
   memset(&s_up, 0, sizeof(s_up));
+  s_up.relay_fd = -1;
+  s_up.stream = relay ? strcmp(relay, "stream") == 0 : RELAY_STREAM_DEFAULT;
   snprintf(s_up.id, sizeof(s_up.id), "%08lx%08lx",
            (unsigned long)esp_random(), (unsigned long)esp_random());
   s_up.rx = rx;
@@ -190,7 +211,8 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
   s_up.active = true;
 
   led_set_state(LED_STATE_SENDING);
-  ESP_LOGI(TAG, "Stage prepare: %lld ms, session %s", (long long)(s_up.prepare_us / 1000), s_up.id);
+  ESP_LOGI(TAG, "Stage prepare: %lld ms, session %s, relay %s", (long long)(s_up.prepare_us / 1000), s_up.id,
+           s_up.stream ? "stream" : "buffered");
   strlcpy(session_out, s_up.id, session_len);
   return 200;
 }
@@ -256,6 +278,142 @@ static int chunk_locked(const char *session, int index, const char *data, int le
   return 200;
 }
 
+// ─── Streaming relay ────────────────────────────────────────────────────────
+// esp_http_client can't reuse a keep-alive connection with open()/write(), so
+// stream mode speaks HTTP/1.1 on a plain socket kept for the whole session.
+static int relay_connect(const rx_target_t *rx) {
+  struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(80)};
+  if (inet_pton(AF_INET, rx->ip, &a.sin_addr) != 1) return -1;
+  int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0) return -1;
+  struct timeval tv = {.tv_sec = 10};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+    close(fd);
+    return -1;
+  }
+  s_up.connects++;
+  return fd;
+}
+
+static bool send_all(int fd, const char *p, int n) {
+  while (n > 0) {
+    int w = send(fd, p, n, 0);
+    if (w <= 0) return false;
+    p += w;
+    n -= w;
+  }
+  return true;
+}
+
+// Reads the receiver's reply; returns the HTTP status, -1 on error. Leaves the
+// socket at the next request unless the receiver closes it.
+static int relay_response(int fd, bool *keep) {
+  char h[512];
+  int n = 0;
+  char *end = NULL;
+  while (!end) {
+    if (n >= (int)sizeof(h) - 1) return -1;
+    int r = recv(fd, h + n, sizeof(h) - 1 - n, 0);
+    if (r <= 0) return -1;
+    n += r;
+    h[n] = '\0';
+    end = strstr(h, "\r\n\r\n");
+  }
+  int status = (strncmp(h, "HTTP/1.", 7) == 0) ? atoi(h + 9) : -1;
+  int body = 0;
+  for (char *p = h; p < end; p = strstr(p, "\r\n") + 2) {
+    if (strncasecmp(p, "Content-Length:", 15) == 0) body = atoi(p + 15);
+    if (strncasecmp(p, "Connection: close", 17) == 0) *keep = false;
+  }
+  body -= n - (int)(end + 4 - h); // body bytes already read with the header
+  char sink[64];
+  while (body > 0) {
+    int r = recv(fd, sink, body < (int)sizeof(sink) ? body : (int)sizeof(sink), 0);
+    if (r <= 0) return -1;
+    body -= r;
+  }
+  return status;
+}
+
+static int chunk_stream_locked(const char *session, int index, int len, ft_read_fn read, void *ctx,
+                               char *buf, int buf_len, uint64_t *acked_out, char *msg, size_t msg_len) {
+  msg[0] = '\0';
+  if (!session_matches(session)) {
+    snprintf(msg, msg_len, "Unknown or expired upload session");
+    return 410;
+  }
+  s_up.last_activity_us = esp_timer_get_time();
+  if (index > s_up.next_index) {
+    snprintf(msg, msg_len, "Out-of-order chunk %d (expected %d)", index, s_up.next_index);
+    return 409;
+  }
+  if (index == s_up.next_index && s_up.acked + (uint64_t)len > s_up.size) {
+    snprintf(msg, msg_len, "Chunk exceeds declared file size");
+    return 400;
+  }
+  int64_t t0 = esp_timer_get_time();
+  int64_t recv_us = 0;
+  if (s_up.relay_fd < 0 && (s_up.relay_fd = relay_connect(&s_up.rx)) < 0) {
+    snprintf(msg, msg_len, "Receiver unreachable");
+    return 502;
+  }
+  char head[256];
+  int hl = snprintf(head, sizeof(head),
+                    "POST /chunk HTTP/1.1\r\nHost: %s\r\nX-Auth-Key: %s\r\nX-Chunk-Index: %d\r\n"
+                    "Content-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n",
+                    s_up.rx.ip, s_up.rx.key, index, len);
+  bool ok = send_all(s_up.relay_fd, head, hl);
+  int done = 0;
+  while (ok && done < len) {
+    int64_t r0 = esp_timer_get_time();
+    int n = read(ctx, buf, len - done < buf_len ? len - done : buf_len);
+    recv_us += esp_timer_get_time() - r0;
+    if (n <= 0) {
+      // Browser gone mid-chunk: the receiver sees a short body and writes nothing
+      relay_close();
+      snprintf(msg, msg_len, "Lost the browser connection during chunk %d", index);
+      return 400;
+    }
+    ok = send_all(s_up.relay_fd, buf, n);
+    done += n;
+  }
+  bool keep = true;
+  int status = ok ? relay_response(s_up.relay_fd, &keep) : -1;
+  if (status != 200 || !keep) relay_close();
+  int64_t fwd_us = esp_timer_get_time() - t0 - recv_us;
+  s_up.chunk_total_us += fwd_us;
+  if (fwd_us > s_up.chunk_max_us) s_up.chunk_max_us = fwd_us;
+  s_up.chunks++;
+  if (status < 0) {
+    snprintf(msg, msg_len, "Receiver unreachable (chunk %d)", index);
+    ESP_LOGW(TAG, "%s", msg);
+    return 502;
+  }
+  if (status != 200) {
+    snprintf(msg, msg_len, "Receiver rejected chunk %d (HTTP %d)", index, status);
+    ESP_LOGW(TAG, "%s", msg);
+    return status == 409 ? 409 : 502;
+  }
+  if (index == s_up.next_index) {
+    s_up.next_index++;
+    s_up.acked += len;
+    s_up.recv_total_us += recv_us;
+    if (s_up.acked >= s_up.next_log) {
+      s_up.next_log = s_up.acked + PROGRESS_LOG_BYTES;
+      ESP_LOGI(TAG, "XFER %llu KB (stream): browser->TX %.0f KB/s, TX->RX %.0f KB/s, overall %.0f KB/s",
+               (unsigned long long)(s_up.acked / 1024), KBPS(s_up.acked, s_up.recv_total_us),
+               KBPS(s_up.acked, s_up.chunk_total_us),
+               KBPS(s_up.acked, esp_timer_get_time() - s_up.t_start_us - s_up.prepare_us));
+    }
+  }
+  *acked_out = s_up.acked;
+  return 200;
+}
+
 static int finish_locked(const char *session, char *msg, size_t msg_len) {
   msg[0] = '\0';
   if (!session_matches(session)) {
@@ -270,6 +428,7 @@ static int finish_locked(const char *session, char *msg, size_t msg_len) {
   // Close the chunk connection first so it doesn't hold a receiver socket
   esp_http_client_cleanup(s_up.chunk_client);
   s_up.chunk_client = NULL;
+  relay_close();
 
   char json[64];
   snprintf(json, sizeof(json), "{\"md5\":\"%s\"}", s_up.md5); // browser MD5: end-to-end check
@@ -279,10 +438,11 @@ static int finish_locked(const char *session, char *msg, size_t msg_len) {
   int64_t fin_us = esp_timer_get_time() - t0;
 
   int64_t total_us = esp_timer_get_time() - s_up.t_start_us;
-  ESP_LOGI(TAG, "XFER summary -> %s: %u bytes in %lld ms = %.1f KB/s | browser->TX %.0f KB/s, "
+  ESP_LOGI(TAG, "XFER summary -> %s (%s relay): %u bytes in %lld ms = %.1f KB/s | browser->TX %.0f KB/s, "
                 "TX->RX %.0f KB/s | prepare %lld ms, "
                 "%lu chunks (rtt avg %lld, max %lld ms, connections %d), finalize %lld ms | %s",
-           s_up.rx.id, (unsigned)s_up.size, (long long)(total_us / 1000), KBPS(s_up.size, total_us),
+           s_up.rx.id, s_up.stream ? "stream" : "buffered", (unsigned)s_up.size, (long long)(total_us / 1000),
+           KBPS(s_up.size, total_us),
            KBPS(s_up.acked, s_up.recv_total_us), KBPS(s_up.acked, s_up.chunk_total_us),
            (long long)(s_up.prepare_us / 1000), (unsigned long)s_up.chunks,
            (long long)(s_up.chunks ? s_up.chunk_total_us / s_up.chunks / 1000 : 0),
@@ -317,9 +477,9 @@ static int cancel_locked(const char *session) {
 }
 
 int file_transfer_begin(const char *rx_id, const char *name, size_t size, const char *md5, bool force,
-                        char *session_out, size_t session_len, char *msg, size_t msg_len) {
+                        const char *relay, char *session_out, size_t session_len, char *msg, size_t msg_len) {
   up_lock();
-  int r = begin_locked(rx_id, name, size, md5, force, session_out, session_len, msg, msg_len);
+  int r = begin_locked(rx_id, name, size, md5, force, relay, session_out, session_len, msg, msg_len);
   up_unlock();
   return r;
 }
@@ -328,6 +488,21 @@ int file_transfer_chunk(const char *session, int index, const char *data, int le
                         uint64_t *acked_out, char *msg, size_t msg_len) {
   up_lock();
   int r = chunk_locked(session, index, data, len, recv_us, acked_out, msg, msg_len);
+  up_unlock();
+  return r;
+}
+
+bool file_transfer_streams(const char *session) {
+  up_lock();
+  bool s = session_matches(session) && s_up.stream;
+  up_unlock();
+  return s;
+}
+
+int file_transfer_chunk_stream(const char *session, int index, int len, ft_read_fn read, void *ctx,
+                               char *buf, int buf_len, uint64_t *acked_out, char *msg, size_t msg_len) {
+  up_lock();
+  int r = chunk_stream_locked(session, index, len, read, ctx, buf, buf_len, acked_out, msg, msg_len);
   up_unlock();
   return r;
 }
