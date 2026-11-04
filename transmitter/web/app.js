@@ -627,7 +627,7 @@ document.addEventListener('DOMContentLoaded', () => {
         card: '<path d="M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><path d="M8 6v3M11 6v3M14 6v3"/><path d="M12 13v3M12 19h.01"/>',
         big: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>'
     };
-    const STAGE_KEYS = { Checksum: 'stage.checksum', Starting: 'stage.starting', Uploading: 'stage.uploading',
+    const STAGE_KEYS = { Starting: 'stage.starting', Uploading: 'stage.uploading',
                          Verifying: 'stage.verifying', 'Reconnecting drive': 'stage.reconnecting' };
     let explicitMsg = null;
     let msgKey = '';
@@ -1180,7 +1180,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function waitForDriveReconnect(timeoutMs) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
-            await new Promise(r => setTimeout(r, 700));
+            await new Promise(r => setTimeout(r, 250));
             try {
                 const res = await fetch('/status', { headers: rxHeaders() });
                 if (res.ok) {
@@ -1258,19 +1258,14 @@ document.addEventListener('DOMContentLoaded', () => {
         clearInterval(statusInterval);
         renderAll(); // lock the selection while uploading
 
-        let stage = 'Checksum';
+        let stage = 'Starting';
         let session = null;
         let outcome = null; // message shown in place of the progress area
         const tStart = performance.now();
         try {
-            setProgress(0, t('tx.checking'), 0);
-            const phases = {};
+            if (typeof SparkMD5 === 'undefined') throw new UploadError(stage, t('msg.fail.reload'));
+            const phases = { hash: 0 };
             let tp = performance.now();
-            const md5 = await calculateMD5(file);
-            phases.hash = performance.now() - tp;
-            if (cancelRequested) throw new UploadError(stage, 'cancelled');
-
-            stage = 'Starting';
             setProgress(0, t('tx.preparing', { name: target.name }), 0);
             tp = performance.now();
             const beginHeaders = { 'Content-Type': 'application/json', 'X-Rx-Id': target.id };
@@ -1279,7 +1274,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 // Transmitter gives up on the receiver after 10 s (504); this is the backstop
                 res = await apiPost('/upload_begin', beginHeaders,
-                    JSON.stringify({ name, size: file.size, md5 }), 12000);
+                    JSON.stringify({ name, size: file.size }), 12000);
             } catch (e) {
                 if (e.name !== 'AbortError') throw e;
                 throw new UploadError(stage, t('msg.fail.timeout', { name: target.name }));
@@ -1320,9 +1315,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const total = file.size;
             let acked = 0;
             const rate = rateMeter();
+            const spark = new SparkMD5.ArrayBuffer(); // hashed as it is read for sending
             for (let index = 0, offset = 0; offset < total; index++, offset += CHUNK_SIZE) {
                 if (cancelRequested) throw new UploadError(stage, 'cancelled');
-                acked = await sendChunk(session, index, file.slice(offset, offset + CHUNK_SIZE));
+                const th = performance.now();
+                let part;
+                try {
+                    part = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+                } catch (x) {
+                    throw new UploadError(stage, t('msg.fail.read'));
+                }
+                spark.append(part);
+                phases.hash += performance.now() - th;
+                acked = await sendChunk(session, index, part);
                 const bps = rate(acked);
                 setProgress(total ? (acked / total) * 100 : 100, t('tx.uploading', { progress: fmtPair(acked, total) }) +
                     (bps ? ' · ' + t('tx.rate', { rate: fmtBytes(bps), eta: fmtDuration((total - acked) / bps) }) : ''), 0);
@@ -1332,9 +1337,9 @@ document.addEventListener('DOMContentLoaded', () => {
             stage = 'Verifying';
             cancelBtn.disabled = true; // past the point of a clean cancel
             setProgress(100, t('tx.verifying'), 1);
-            phases.data = performance.now() - tp;
+            phases.data = performance.now() - tp - phases.hash;
             const fin = await apiPost('/upload_finish', { 'X-Session': session, 'Content-Type': 'application/json' },
-                JSON.stringify({ hash_ms: Math.round(phases.hash) }));
+                JSON.stringify({ md5: spark.end(), hash_ms: Math.round(phases.hash) }));
             session = null; // the transmitter ends the session either way
             if (!fin.ok) throw new UploadError(stage, await errorText(fin), fin.status);
             const finMs = ((await fin.json()).rx || {}).ms || {};
@@ -1731,34 +1736,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         $('resetWord').value = '';
     });
-
-    // ─── Chunked MD5 (via spark-md5) ────────────────────────────────────
-    // Read the file in 2 MB slices so we don't load the whole G-code into RAM.
-    // Output is a lowercase hex digest that matches the receiver's mbedtls result.
-    const MD5_CHUNK_SIZE = 2 * 1024 * 1024;
-
-    function hashSlice(spark, blob) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                try {
-                    spark.append(e.target.result);
-                    resolve();
-                } catch (err) { reject(err); }
-            };
-            reader.onerror = () => reject(new Error(t('msg.fail.read')));
-            reader.readAsArrayBuffer(blob);
-        });
-    }
-
-    async function calculateMD5(file) {
-        if (typeof SparkMD5 === 'undefined') throw new Error(t('msg.fail.reload'));
-        const spark = new SparkMD5.ArrayBuffer();
-        for (let offset = 0; offset < file.size; offset += MD5_CHUNK_SIZE) {
-            await hashSlice(spark, file.slice(offset, offset + MD5_CHUNK_SIZE));
-        }
-        return spark.end();
-    }
 
     // ─── Start ──────────────────────────────────────────────────────────
     route();

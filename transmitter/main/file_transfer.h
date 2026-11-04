@@ -29,8 +29,9 @@ typedef int (*ft_read_fn)(void *ctx, char *buf, int len); // >0 bytes, <=0 error
 bool file_transfer_streams(const char *session);
 int file_transfer_chunk_stream(const char *session, int index, int len, ft_read_fn read, void *ctx,
                                char *buf, int buf_len, uint64_t *acked_out, char *msg, size_t msg_len);
-// Calls receiver /finalize with the browser's MD5 and ends the session.
-int file_transfer_finish(const char *session, char *msg, size_t msg_len);
+// Calls receiver /finalize with the browser's MD5 (md5, else the one given at
+// begin) and ends the session.
+int file_transfer_finish(const char *session, const char *md5, char *msg, size_t msg_len);
 // Ends the session (if it matches, or none is given) and calls receiver /cancel.
 int file_transfer_cancel(const char *session);
 // True while a session is active; rx_id_out gets its receiver.

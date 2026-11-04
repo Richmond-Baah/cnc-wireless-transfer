@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sd_card.h"
+#include "pairing.h"
 #include "sdmmc_cmd.h"
 #include "driver/gpio.h"
 #include "soc/usb_serial_jtag_struct.h"
@@ -20,6 +21,7 @@ static bool s_usb_mounted_by_host = false;
 static volatile TickType_t s_last_host_read_tick = 0; // last SCSI READ10 from the host
 static volatile bool s_host_read_seen = false;
 static int64_t s_connect_us = 0;      // last tud_connect()
+static int64_t s_off_us = 0;          // first tud_disconnect() since then (0 = connected)
 static volatile int s_host_ms = -1;   // tud_connect() -> host mounted us (-1 = not yet)
 
 #if CONFIG_CNC_USB_READ_LOG
@@ -334,6 +336,7 @@ void tud_mount_cb(void) {
     if (s_connect_us && s_host_ms < 0) {
         s_host_ms = (int)((esp_timer_get_time() - s_connect_us) / 1000);
         ESP_LOGI(TAG, "PHASE host mounted the drive %d ms after USB connect", s_host_ms);
+        pairing_heartbeat_now();
     }
 
     if (state_machine_get() != STATE_RECEIVING) {
@@ -366,7 +369,22 @@ void tud_resume_cb(void) {
 void usb_msc_disconnect(void) {
     ESP_LOGI(TAG, "Disconnecting USB MSC...");
     s_usb_mounted_by_host = false;
+    if (s_off_us == 0) s_off_us = esp_timer_get_time();
     tud_disconnect();
+}
+
+// Waits only for what is left of min_off_ms since the first disconnect: a long
+// transfer has kept the drive off long enough already.
+void usb_msc_connect_after_off(int min_off_ms) {
+    int64_t off_ms = s_off_us ? (esp_timer_get_time() - s_off_us) / 1000 : 0;
+    if (off_ms < min_off_ms) {
+        vTaskDelay(pdMS_TO_TICKS(min_off_ms - off_ms));
+    }
+    ESP_LOGI(TAG, "Connecting USB (drive was off %lld ms)...", (long long)(s_off_us ? (esp_timer_get_time() - s_off_us) / 1000 : 0));
+    s_off_us = 0;
+    s_host_ms = -1;
+    s_connect_us = esp_timer_get_time();
+    tud_connect();
 }
 
 void usb_msc_connect(void) {
@@ -374,6 +392,7 @@ void usb_msc_connect(void) {
     // Force a complete physical disconnect state first
     tud_disconnect();
     vTaskDelay(pdMS_TO_TICKS(500));
+    s_off_us = 0;
     s_host_ms = -1;
     s_connect_us = esp_timer_get_time();
     tud_connect();

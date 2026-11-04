@@ -33,4 +33,7 @@ uint32_t pairing_config_version(void);
 // BOOT-button watcher (hold 10 s = clear pairing).
 void pairing_start_tasks(void);
 
+// Sends the next heartbeat now instead of at the 10 s tick (state just changed).
+void pairing_heartbeat_now(void);
+
 #endif // PAIRING_H

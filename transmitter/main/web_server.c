@@ -250,12 +250,12 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
 
   // Transmitter-side checks; the receiver also validates the filename
   const char *problem = NULL;
-  if (!name || !md5 || size < 0) {
-    problem = "Missing name, size or md5";
+  if (!name || size < 0) {
+    problem = "Missing name or size";
   } else if (strlen(name) == 0 || strlen(name) > 127) {
     problem = "Filename must be 1-127 characters";
-  } else if (strlen(md5) != 32 || strspn(md5, "0123456789abcdefABCDEF") != 32) {
-    problem = "md5 must be 32 hex characters";
+  } else if (md5 && md5[0] && (strlen(md5) != 32 || strspn(md5, "0123456789abcdefABCDEF") != 32)) {
+    problem = "md5 must be 32 hex characters"; // optional here: the browser may send it at finish
   } else if (size > 0xFFFFFFFFu) {
     problem = "File too large";
   }
@@ -277,7 +277,7 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
   char msg[160];
   char relay[12] = {0};
   bool has_relay = httpd_req_get_hdr_value_str(req, "X-Relay", relay, sizeof(relay)) == ESP_OK;
-  int code = file_transfer_begin(rx_id, name, (size_t)size, md5, force, has_relay ? relay : NULL,
+  int code = file_transfer_begin(rx_id, name, (size_t)size, md5 ? md5 : "", force, has_relay ? relay : NULL,
                                  session, sizeof(session),
                                  msg, sizeof(msg));
   cJSON_Delete(json);
@@ -387,17 +387,20 @@ static esp_err_t upload_finish_handler(httpd_req_t *req) {
     send_status_text(req, 400, "Missing X-Session");
     return ESP_OK;
   }
-  // Optional body {"hash_ms":n}: browser hash time, for the log
+  // Optional body {"md5":"...","hash_ms":n}: file hash, browser hash time (log)
   char body[96] = {0};
+  char md5[33] = "";
   if (req->content_len > 0 && req->content_len < (int)sizeof(body) &&
       read_full_body(req, body, sizeof(body) - 1)) {
     cJSON *json = cJSON_Parse(body);
     cJSON *j = json ? cJSON_GetObjectItem(json, "hash_ms") : NULL;
     if (cJSON_IsNumber(j)) ESP_LOGI(TAG, "PHASE browser hash %d ms", j->valueint);
+    j = json ? cJSON_GetObjectItem(json, "md5") : NULL;
+    if (cJSON_IsString(j)) strlcpy(md5, j->valuestring, sizeof(md5));
     cJSON_Delete(json);
   }
   char msg[160];
-  int code = file_transfer_finish(session, msg, sizeof(msg));
+  int code = file_transfer_finish(session, md5, msg, sizeof(msg));
   if (code != 200) {
     send_status_text(req, code, msg);
     return ESP_OK;

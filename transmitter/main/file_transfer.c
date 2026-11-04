@@ -71,11 +71,51 @@ static struct {
 #define KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
 #define PROGRESS_LOG_BYTES (1024 * 1024)
 
+// Reply of the request on chunk_client that wants one (/prepare, /finalize)
+static char *s_ka_resp;
+static size_t s_ka_cap, s_ka_len;
+
 static esp_err_t chunk_client_event(esp_http_client_event_t *evt) {
   if (evt->event_id == HTTP_EVENT_ON_CONNECTED && evt->user_data) {
     (*(int *)evt->user_data)++;
+  } else if (evt->event_id == HTTP_EVENT_ON_DATA && s_ka_resp && s_ka_len + 1 < s_ka_cap) {
+    size_t n = evt->data_len < (int)(s_ka_cap - 1 - s_ka_len) ? evt->data_len : s_ka_cap - 1 - s_ka_len;
+    memcpy(s_ka_resp + s_ka_len, evt->data, n);
+    s_ka_len += n;
+    s_ka_resp[s_ka_len] = '\0';
   }
   return ESP_OK;
+}
+
+// JSON POST on the session's keep-alive connection. HTTP status, -1 on failure.
+static int ka_post(const char *path, const char *json, bool force, int timeout_ms, char *resp, size_t resp_len) {
+  esp_http_client_handle_t c = s_up.chunk_client;
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s%s", s_up.rx.ip, path);
+  esp_http_client_set_url(c, url);
+  esp_http_client_set_method(c, HTTP_METHOD_POST);
+  esp_http_client_set_timeout_ms(c, timeout_ms);
+  esp_http_client_set_header(c, "Content-Type", "application/json");
+  if (force) {
+    esp_http_client_set_header(c, "X-Force", "1");
+  } else {
+    esp_http_client_delete_header(c, "X-Force");
+  }
+  esp_http_client_delete_header(c, "X-Chunk-Index");
+  esp_http_client_set_post_field(c, json, strlen(json));
+  resp[0] = '\0';
+  s_ka_resp = resp;
+  s_ka_cap = resp_len;
+  s_ka_len = 0;
+  esp_err_t err = esp_http_client_perform(c);
+  s_ka_resp = NULL;
+  if (err != ESP_OK) {
+    snprintf(resp, resp_len, "Receiver unreachable: %s", esp_err_to_name(err));
+    esp_http_client_close(c);
+    ESP_LOGW(TAG, "%s %s: %s", s_up.rx.id, path, resp);
+    return -1;
+  }
+  return esp_http_client_get_status_code(c);
 }
 
 #define PREPARE_TIMEOUT_MS 10000
@@ -126,6 +166,28 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
     session_end();
   }
 
+  // One keep-alive connection for /prepare, the chunks and /finalize
+  memset(&s_up, 0, sizeof(s_up));
+  s_up.relay_fd = -1;
+  s_up.rx = rx;
+  char prep_url[64];
+  snprintf(prep_url, sizeof(prep_url), "http://%s/prepare", rx.ip);
+  esp_http_client_config_t chunk_cfg = {
+      .url = prep_url,
+      .timeout_ms = PREPARE_TIMEOUT_MS,
+      .keep_alive_enable = true, // TCP keepalive probes
+      .event_handler = chunk_client_event,
+      .user_data = &s_up.connects,
+  };
+  s_up.chunk_client = esp_http_client_init(&chunk_cfg);
+  if (s_up.chunk_client == NULL) {
+    session_end();
+    snprintf(msg, msg_len, "HTTP client init failed");
+    return 500;
+  }
+  esp_http_client_set_header(s_up.chunk_client, "Connection", "keep-alive");
+  esp_http_client_set_header(s_up.chunk_client, "X-Auth-Key", rx.key);
+
   // Build the /prepare body with cJSON so names with quotes stay valid JSON
   cJSON *obj = cJSON_CreateObject();
   cJSON_AddStringToObject(obj, "filename", name);
@@ -134,6 +196,7 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
   char *json = cJSON_PrintUnformatted(obj);
   cJSON_Delete(obj);
   if (json == NULL) {
+    session_end();
     snprintf(msg, msg_len, "Out of memory");
     return 500;
   }
@@ -142,21 +205,23 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
            force ? ", forced" : "");
   // One 10 s budget for the whole prepare (incl. the stale-transfer retry)
   int64_t deadline = now + PREPARE_TIMEOUT_MS * 1000LL;
-  int status = rx_http(&rx, HTTP_METHOD_POST, "/prepare", json, force, PREPARE_TIMEOUT_MS, msg, msg_len, NULL);
+  int status = ka_post("/prepare", json, force, PREPARE_TIMEOUT_MS, msg, msg_len);
   if (status == 503) {
     // Receiver is stuck RECEIVING from an abandoned transfer we no longer
     // track (e.g. transmitter rebooted mid-upload): reset it once and retry.
     ESP_LOGW(TAG, "Receiver busy with no session here; cancelling stale transfer and retrying");
+    esp_http_client_close(s_up.chunk_client); // the receiver closes its side after a 503
     cancel_on_receiver(&rx);
     int left_ms = (int)((deadline - esp_timer_get_time()) / 1000);
     if (left_ms >= 1000) {
-      status = rx_http(&rx, HTTP_METHOD_POST, "/prepare", json, force, left_ms, msg, msg_len, NULL);
+      status = ka_post("/prepare", json, force, left_ms, msg, msg_len);
     } else {
       status = -1;
     }
   }
   cJSON_free(json);
   if (status < 0 && esp_timer_get_time() >= deadline - 500000) {
+    session_end();
     led_set_state(LED_STATE_ERROR);
     ESP_LOGW(TAG, "Receiver %s did not answer /prepare within %d s", rx.id, PREPARE_TIMEOUT_MS / 1000);
     snprintf(msg, msg_len, "Receiver did not respond within %d s while preparing. "
@@ -166,6 +231,7 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
   }
 
   if (status != 200) {
+    session_end();
     led_set_state((status == 423 || status == 507) ? LED_STATE_IDLE : LED_STATE_ERROR);
     if (status == 423) {
       snprintf(msg, msg_len, "machine_busy");
@@ -175,12 +241,9 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
     return status < 0 ? 502 : status;
   }
 
-  memset(&s_up, 0, sizeof(s_up));
-  s_up.relay_fd = -1;
   s_up.stream = relay ? strcmp(relay, "stream") == 0 : RELAY_STREAM_DEFAULT;
   snprintf(s_up.id, sizeof(s_up.id), "%08lx%08lx",
            (unsigned long)esp_random(), (unsigned long)esp_random());
-  s_up.rx = rx;
   strlcpy(s_up.name, name, sizeof(s_up.name));
   strlcpy(s_up.md5, md5, sizeof(s_up.md5));
   s_up.size = size;
@@ -190,24 +253,13 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
 
   char chunk_url[64];
   snprintf(chunk_url, sizeof(chunk_url), "http://%s/chunk", rx.ip);
-  esp_http_client_config_t chunk_cfg = {
-      .url = chunk_url,
-      .timeout_ms = 10000,
-      .keep_alive_enable = true, // TCP keepalive probes
-      .event_handler = chunk_client_event,
-      .user_data = &s_up.connects,
-  };
-  s_up.chunk_client = esp_http_client_init(&chunk_cfg);
-  if (s_up.chunk_client == NULL) {
-    cancel_on_receiver(&rx);
-    session_end();
-    snprintf(msg, msg_len, "HTTP client init failed");
-    return 500;
-  }
-  esp_http_client_set_method(s_up.chunk_client, HTTP_METHOD_POST);
+  esp_http_client_set_url(s_up.chunk_client, chunk_url);
+  esp_http_client_set_timeout_ms(s_up.chunk_client, 10000);
   esp_http_client_set_header(s_up.chunk_client, "Content-Type", "application/octet-stream");
-  esp_http_client_set_header(s_up.chunk_client, "Connection", "keep-alive");
-  esp_http_client_set_header(s_up.chunk_client, "X-Auth-Key", rx.key);
+  esp_http_client_delete_header(s_up.chunk_client, "X-Force");
+  if (s_up.stream) {
+    esp_http_client_close(s_up.chunk_client); // chunks use the relay socket; /finalize reconnects
+  }
   s_up.active = true;
 
   led_set_state(LED_STATE_SENDING);
@@ -414,7 +466,7 @@ static int chunk_stream_locked(const char *session, int index, int len, ft_read_
   return 200;
 }
 
-static int finish_locked(const char *session, char *msg, size_t msg_len) {
+static int finish_locked(const char *session, const char *md5, char *msg, size_t msg_len) {
   msg[0] = '\0';
   if (!session_matches(session)) {
     snprintf(msg, msg_len, "Unknown or expired upload session");
@@ -425,16 +477,23 @@ static int finish_locked(const char *session, char *msg, size_t msg_len) {
              (unsigned long long)s_up.acked, (unsigned)s_up.size);
     return 400;
   }
-  // Close the chunk connection first so it doesn't hold a receiver socket
-  esp_http_client_cleanup(s_up.chunk_client);
-  s_up.chunk_client = NULL;
+  // Hashed while sending: the browser's MD5 comes now (older callers gave it at begin)
+  const char *check = (md5 && md5[0]) ? md5 : s_up.md5;
+  if (strlen(check) != 32 || strspn(check, "0123456789abcdefABCDEF") != 32) {
+    snprintf(msg, msg_len, "md5 must be 32 hex characters");
+    return 400;
+  }
   relay_close();
 
   char json[64];
-  snprintf(json, sizeof(json), "{\"md5\":\"%s\"}", s_up.md5); // browser MD5: end-to-end check
+  snprintf(json, sizeof(json), "{\"md5\":\"%s\"}", check); // browser MD5: end-to-end check
   int64_t t0 = esp_timer_get_time();
   // receiver: fsync, MD5 verify, rename, list snapshot, unmount (replies before USB reconnect)
-  int status = rx_http(&s_up.rx, HTTP_METHOD_POST, "/finalize", json, false, 30000, msg, msg_len, NULL);
+  int status = ka_post("/finalize", json, false, 30000, msg, msg_len);
+  if (status < 0) {
+    // Kept connection went stale: once more on a new one
+    status = rx_http(&s_up.rx, HTTP_METHOD_POST, "/finalize", json, false, 30000, msg, msg_len, NULL);
+  }
   int64_t fin_us = esp_timer_get_time() - t0;
 
   int64_t total_us = esp_timer_get_time() - s_up.t_start_us;
@@ -450,8 +509,10 @@ static int finish_locked(const char *session, char *msg, size_t msg_len) {
            (long long)(fin_us / 1000), status == 200 ? "OK" : "FAILED");
 
   if (status == 200) {
-    // The cached timings are from the previous transfer until the next heartbeat
+    // The cached state and timings are from before /finalize until the next
+    // heartbeat (the receiver sends one as soon as the drive is back)
     cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "state", "FILE_READY");
     cJSON_AddNumberToObject(o, "reattach_ms", -1);
     cJSON_AddNumberToObject(o, "host_ms", -1);
     rx_registry_update_status(s_up.rx.id, o);
@@ -515,9 +576,9 @@ int file_transfer_chunk_stream(const char *session, int index, int len, ft_read_
   return r;
 }
 
-int file_transfer_finish(const char *session, char *msg, size_t msg_len) {
+int file_transfer_finish(const char *session, const char *md5, char *msg, size_t msg_len) {
   up_lock();
-  int r = finish_locked(session, msg, msg_len);
+  int r = finish_locked(session, md5, msg, msg_len);
   up_unlock();
   return r;
 }

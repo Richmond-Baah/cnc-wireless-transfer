@@ -91,6 +91,7 @@ static void prepare_abort_reconnect(void) {
 // Receiver-side budget for /prepare, below the transmitter's 10 s timeout so a
 // prepare the transmitter already gave up on never leaves USB disconnected.
 #define PREPARE_BUDGET_US (8LL * 1000 * 1000)
+#define USB_MIN_OFF_MS 1500
 
 // Discard any unread request body so the connection stays usable.
 static void drain_request_body(httpd_req_t *req) {
@@ -731,18 +732,15 @@ static esp_err_t finalize_post_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_sendstr(req, done);
 
-    // Drop the USB connection to signal disconnect to the PC
-    usb_msc_disconnect();
-
-    // Give the host time to notice the disconnect, then reconnect USB
-    ESP_LOGI(TAG, "Waiting 1.5s before reconnecting USB host...");
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    usb_msc_connect();
+    // USB has been off since /prepare. The host must see it gone for at least
+    // USB_MIN_OFF_MS in total; a transfer that took longer needs no extra wait.
+    usb_msc_connect_after_off(USB_MIN_OFF_MS);
     TM_ADD(usb_reconnect);
     s_reattach_ms = (int)TM_MS(s_tm.usb_reconnect);
     if (state_machine_get() == STATE_FILE_READY) {
         state_machine_transition(STATE_IDLE); // host mount then moves it to USB_ACTIVE
     }
+    pairing_heartbeat_now(); // the UI is waiting for this state
 
     int64_t total_us = esp_timer_get_time() - s_tm.t_start;
     ESP_LOGI(TAG, "XFER summary: %llu bytes, %lu chunks in %lld ms = %.1f KB/s | "

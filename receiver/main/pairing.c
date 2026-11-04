@@ -223,12 +223,18 @@ static void pull_config(uint32_t tx_ver) {
   cJSON_Delete(j);
 }
 
+static TaskHandle_t s_heartbeat_task;
+
+void pairing_heartbeat_now(void) {
+  if (s_heartbeat_task) xTaskNotifyGive(s_heartbeat_task);
+}
+
 static void heartbeat_task(void *arg) {
   (void)arg;
   char resp[160];
   int rejects = 0;
   for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS)); // or pairing_heartbeat_now()
     char ip[16];
     if (!wifi_manager_get_ip(ip, sizeof(ip))) {
       continue;
@@ -292,6 +298,6 @@ static void boot_fired(void) {
 }
 
 void pairing_start_tasks(void) {
-  xTaskCreate(heartbeat_task, "rx_heartbeat", 4096, NULL, 3, NULL);
+  xTaskCreate(heartbeat_task, "rx_heartbeat", 4096, NULL, 3, &s_heartbeat_task);
   boot_button_start(BOOT_HOLD_MS, boot_pressed, boot_fired);
 }
