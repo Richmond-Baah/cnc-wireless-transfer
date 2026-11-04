@@ -40,6 +40,8 @@ typedef struct {
   bool busy;
   int reattach_ms;      // last transfer, reported by the receiver (-1 = not yet)
   int host_ms;
+  int rssi;             // at the receiver, dBm (0 = unknown)
+  int brownouts;        // receiver's count since it was flashed
   uint32_t cfg_fetched;
   int64_t last_seen_us; // 0 = never since boot
 } rx_entry_t;
@@ -302,6 +304,8 @@ static void apply_status_locked(rx_entry_t *e, const cJSON *o) {
   e->free_bytes = json_num(o, "free_bytes", e->free_bytes);
   e->reattach_ms = (int)json_num(o, "reattach_ms", e->reattach_ms);
   e->host_ms = (int)json_num(o, "host_ms", e->host_ms);
+  e->rssi = (int)json_num(o, "rssi", e->rssi);
+  e->brownouts = (int)json_num(o, "brownouts", e->brownouts);
   const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, "card_error");
   if (cJSON_IsBool(v)) e->card_error = cJSON_IsTrue(v);
   v = cJSON_GetObjectItemCaseSensitive(o, "busy");
@@ -467,6 +471,8 @@ static void add_entry_fields_locked(const rx_entry_t *e, cJSON *o) {
   cJSON_AddBoolToObject(o, "busy", e->busy);
   cJSON_AddNumberToObject(o, "reattach_ms", e->reattach_ms);
   cJSON_AddNumberToObject(o, "host_ms", e->host_ms);
+  cJSON_AddNumberToObject(o, "rssi", e->rssi);
+  cJSON_AddNumberToObject(o, "brownouts", e->brownouts);
   cJSON_AddNumberToObject(o, "last_seen_s",
                           e->last_seen_us ? (double)((esp_timer_get_time() - e->last_seen_us) / 1000000) : -1);
 }
@@ -481,6 +487,21 @@ bool rx_registry_add_cached_status(const char *id, cJSON *obj) {
   }
   unlock();
   return i >= 0;
+}
+
+int rx_registry_online_targets(rx_target_t *out, int max) {
+  int n = 0;
+  lock();
+  for (int i = 0; i < s_rx_count && n < max; i++) {
+    if (!is_online(s_rx[i].last_seen_us)) continue;
+    strlcpy(out[n].id, s_rx[i].id, sizeof(out[n].id));
+    strlcpy(out[n].name, s_rx[i].name, sizeof(out[n].name));
+    strlcpy(out[n].ip, s_rx[i].ip, sizeof(out[n].ip));
+    strlcpy(out[n].key, s_rx[i].key, sizeof(out[n].key));
+    n++;
+  }
+  unlock();
+  return n;
 }
 
 char *rx_registry_list_json(void) {

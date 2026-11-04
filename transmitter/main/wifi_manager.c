@@ -1,6 +1,7 @@
 #include "wifi_manager.h"
 #include "sdkconfig.h"
 #include "esp_event.h"
+#include "radio_power.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
@@ -398,12 +399,7 @@ void wifi_init(void) {
     {
       // Units of 0.25 dBm (CONFIG_CNC_WIFI_MAX_TX_POWER); max power can brown
       // out small boards and leave the AP invisible
-      esp_err_t txp_err = esp_wifi_set_max_tx_power(CONFIG_CNC_WIFI_MAX_TX_POWER);
-      int8_t txp = 0;
-      esp_wifi_get_max_tx_power(&txp);
-      ESP_LOGI(TAG, "Wi-Fi max TX power: requested %d (%.2f dBm), actual %d (%.2f dBm)%s%s",
-               CONFIG_CNC_WIFI_MAX_TX_POWER, CONFIG_CNC_WIFI_MAX_TX_POWER / 4.0, txp, txp / 4.0,
-               txp_err == ESP_OK ? "" : ", set failed: ", txp_err == ESP_OK ? "" : esp_err_to_name(txp_err));
+      radio_power_apply(radio_power_saved());
     }
 
     // Configure DHCP server for faster IP assignment

@@ -51,6 +51,8 @@ const char *rx_registry_tx_id(void);
 
 // Paired + online receiver -> target. False: unknown id (404) or offline (502).
 bool rx_registry_target(const char *id, rx_target_t *out, bool *known);
+// All paired + online receivers; returns how many (at most max).
+int rx_registry_online_targets(rx_target_t *out, int max);
 
 // Receiver auth for /rx/config (constant-time key compare).
 bool rx_registry_check_key(const char *id, const char *key);

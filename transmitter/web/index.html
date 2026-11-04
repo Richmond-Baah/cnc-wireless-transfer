@@ -278,6 +278,27 @@
                         <p id="resetStatus" class="form-status small" hidden></p>
                     </div>
                     <div class="recovery">
+                        <h3 data-t="radio.title"></h3>
+                        <p class="small" data-t="radio.why"></p>
+                        <p id="radioInfo" class="small muted"></p>
+                        <div class="confirm-actions">
+                            <select id="radioLevel" data-t-aria="radio.level"></select>
+                            <button type="button" id="radioSave" class="btn" data-t="radio.save"></button>
+                        </div>
+                        <p id="radioStatus" class="form-status small" hidden></p>
+                        <h4 class="radio-test-title" data-t="radio.test"></h4>
+                        <p class="small" data-t="radio.testWhy"></p>
+                        <div class="confirm-actions">
+                            <select id="radioRx" data-t-aria="perf.machine"></select>
+                            <button type="button" id="radioTest" class="btn btn-primary" data-t="radio.testRun"></button>
+                        </div>
+                        <table class="ftable perf-table" id="radioTable" hidden>
+                            <thead><tr><th data-t="radio.colLevel"></th><th data-t="radio.colSpeed"></th><th data-t="radio.colRssi"></th><th data-t="radio.colResult"></th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                        <p id="radioTestStatus" class="form-status small" hidden></p>
+                    </div>
+                    <div class="recovery">
                         <h3 data-t="perf.title"></h3>
                         <p class="small" data-t="perf.why"></p>
                         <div class="confirm-actions">

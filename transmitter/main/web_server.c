@@ -10,6 +10,7 @@
 #include "esp_app_desc.h"
 
 #include "auth.h"
+#include "radio_power.h"
 #include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -1057,6 +1058,7 @@ static esp_err_t factory_reset_handler(httpd_req_t *req) {
   nvs_commit(h);
   nvs_close(h);
   auth_reset_defaults();
+  radio_power_reset();
 
   if (ap_changed && !remove) {
     s_restart_wait_ver = rx_registry_bump_config_version();
@@ -1227,6 +1229,192 @@ static esp_err_t perf_sd_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// ─── Radio power (Settings > System) ────────────────────────────────────────
+// GET /radio -> saved/actual level, brownouts, reset reason of this board.
+// POST /radio {"qdbm":n}: saved here and on every online machine.
+// POST /radio/test?rx= {"qdbm":n,"seconds":30}: both boards at qdbm (not saved),
+// data TX->RX then RX->TX, RSSI at both ends, then back to the saved level.
+static esp_err_t radio_get_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char out[128];
+  snprintf(out, sizeof(out), "{\"saved\":%d,\"actual\":%d,\"brownouts\":%lu,\"reset_reason\":\"%s\"}", radio_power_saved(),
+           radio_power_actual(), (unsigned long)radio_brownouts(), radio_reset_reason());
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, out);
+  return ESP_OK;
+}
+
+static int json_body_int(httpd_req_t *req, const char *key, int dflt) {
+  char body[64] = {0};
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body) ||
+      !read_full_body(req, body, sizeof(body) - 1)) {
+    return dflt;
+  }
+  cJSON *json = cJSON_Parse(body);
+  cJSON *j = json ? cJSON_GetObjectItem(json, key) : NULL;
+  int v = cJSON_IsNumber(j) ? j->valueint : dflt;
+  cJSON_Delete(json);
+  return v;
+}
+
+static rx_target_t s_radio_targets[RX_MAX_PAIRED]; // rx worker only
+
+static esp_err_t radio_post_handler(httpd_req_t *req) {
+  if (perf_refused(req)) return ESP_OK;
+  int qdbm = json_body_int(req, "qdbm", 0);
+  if (!radio_power_valid(qdbm)) {
+    send_status_text(req, 400, "Unsupported TX power level");
+    return ESP_OK;
+  }
+  if (radio_power_save(qdbm) != ESP_OK) {
+    send_status_text(req, 500, "Could not save the level");
+    return ESP_OK;
+  }
+  char json[40];
+  snprintf(json, sizeof(json), "{\"qdbm\":%d,\"save\":true}", qdbm);
+  int n = rx_registry_online_targets(s_radio_targets, RX_MAX_PAIRED);
+  int ok = 0;
+  for (int i = 0; i < n; i++) {
+    if (rx_http(&s_radio_targets[i], HTTP_METHOD_POST, "/radio", json, false, 3000, s_rx_resp,
+                sizeof(s_rx_resp), NULL) == 200) {
+      ok++;
+    }
+  }
+  radio_power_apply(qdbm); // last: the machines were reached at the old level
+  char out[64];
+  snprintf(out, sizeof(out), "{\"qdbm\":%d,\"machines\":%d,\"failed\":%d}", qdbm, ok, n - ok);
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, out);
+  return ESP_OK;
+}
+
+// rx /radio with body; fills rssi/brownouts/uptime. False if it did not answer.
+static bool rx_radio_call(const rx_target_t *rx, const char *body, int *rssi, int *brownouts, long *uptime) {
+  char resp[160];
+  if (rx_http(rx, HTTP_METHOD_POST, "/radio", body, false, 3000, resp, sizeof(resp), NULL) != 200) return false;
+  cJSON *r = cJSON_Parse(resp);
+  if (!r) return false;
+  cJSON *j;
+  if (rssi && cJSON_IsNumber(j = cJSON_GetObjectItem(r, "rssi"))) *rssi = j->valueint;
+  if (brownouts && cJSON_IsNumber(j = cJSON_GetObjectItem(r, "brownouts"))) *brownouts = j->valueint;
+  if (uptime && cJSON_IsNumber(j = cJSON_GetObjectItem(r, "uptime_s"))) *uptime = (long)j->valuedouble;
+  cJSON_Delete(r);
+  return true;
+}
+
+static esp_err_t radio_test_handler(httpd_req_t *req) {
+  if (perf_refused(req)) return ESP_OK;
+  char body[64] = {0};
+  int qdbm = 0, seconds = 30;
+  if (req->content_len > 0 && req->content_len < (int)sizeof(body) &&
+      read_full_body(req, body, sizeof(body) - 1)) {
+    cJSON *json = cJSON_Parse(body);
+    cJSON *j = json ? cJSON_GetObjectItem(json, "qdbm") : NULL;
+    if (cJSON_IsNumber(j)) qdbm = j->valueint;
+    j = json ? cJSON_GetObjectItem(json, "seconds") : NULL;
+    if (cJSON_IsNumber(j) && j->valueint >= 2 && j->valueint <= 120) seconds = j->valueint;
+    cJSON_Delete(json);
+  }
+  rx_target_t rx;
+  if (!radio_power_valid(qdbm)) {
+    send_status_text(req, 400, "Unsupported TX power level");
+    return ESP_OK;
+  }
+  if (!perf_target(req, &rx)) return ESP_OK;
+  int brown0 = 0, brown1 = 0, rssi_rx = 0;
+  long up0 = 0, up1 = 0;
+  char set[24];
+  snprintf(set, sizeof(set), "{\"qdbm\":%d}", qdbm);
+  if (!rx_radio_call(&rx, set, NULL, &brown0, &up0)) {
+    send_status_text(req, 502, "Machine did not answer");
+    return ESP_OK;
+  }
+  radio_power_apply(qdbm);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+
+  // TX -> RX
+  for (int i = 0; i < UPLOAD_CHUNK_MAX; i++) s_chunk_buf[i] = (char)(i * 31 + 7);
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s/perf/sink", rx.ip);
+  esp_http_client_config_t cfg = {.url = url, .timeout_ms = 10000, .keep_alive_enable = true};
+  esp_http_client_handle_t c = esp_http_client_init(&cfg);
+  uint64_t up = 0, down = 0;
+  bool link_ok = c != NULL;
+  int64_t t0 = esp_timer_get_time();
+  int64_t half_us = (int64_t)seconds * 500000;
+  if (c) {
+    esp_http_client_set_method(c, HTTP_METHOD_POST);
+    esp_http_client_set_header(c, "Content-Type", "application/octet-stream");
+    esp_http_client_set_header(c, "X-Auth-Key", rx.key);
+    while (esp_timer_get_time() - t0 < half_us) {
+      esp_http_client_set_post_field(c, s_chunk_buf, UPLOAD_CHUNK_MAX);
+      if (esp_http_client_perform(c) != ESP_OK || esp_http_client_get_status_code(c) != 200) {
+        link_ok = false;
+        break;
+      }
+      up += UPLOAD_CHUNK_MAX;
+    }
+    esp_http_client_cleanup(c);
+  }
+  int64_t up_us = esp_timer_get_time() - t0;
+
+  // RX -> TX
+  int64_t t1 = esp_timer_get_time();
+  if (link_ok) {
+    snprintf(url, sizeof(url), "http://%s/perf/source", rx.ip);
+    esp_http_client_config_t cfg2 = {.url = url, .timeout_ms = 10000};
+    c = esp_http_client_init(&cfg2);
+    link_ok = c != NULL;
+    if (c) {
+      esp_http_client_set_header(c, "X-Auth-Key", rx.key);
+      if (esp_http_client_open(c, 0) != ESP_OK || esp_http_client_fetch_headers(c) < 0) {
+        link_ok = false;
+      } else {
+        while (esp_timer_get_time() - t1 < half_us) {
+          int r = esp_http_client_read(c, s_chunk_buf, UPLOAD_CHUNK_MAX);
+          if (r <= 0) {
+            link_ok = false;
+            break;
+          }
+          down += r;
+        }
+      }
+      esp_http_client_close(c);
+      esp_http_client_cleanup(c);
+    }
+  }
+  int64_t down_us = esp_timer_get_time() - t1;
+
+  // RSSI at both ends, still at the test level. A receiver that browned out
+  // needs a few seconds to come back.
+  int rssi_tx = radio_ap_client_rssi(rx.id);
+  bool answered = false;
+  for (int i = 0; i < 4 && !answered; i++) {
+    if (i) vTaskDelay(pdMS_TO_TICKS(3000));
+    answered = rx_radio_call(&rx, "{}", &rssi_rx, &brown1, &up1);
+  }
+  rx_radio_call(&rx, "{\"restore\":true}", NULL, NULL, NULL);
+  radio_power_apply(radio_power_saved());
+
+  bool rebooted = answered && (brown1 != brown0 || up1 < up0);
+  ESP_LOGI(TAG, "PERF RADIO %.2f dBm -> %s: TX->RX %.1f KB/s, RX->TX %.1f KB/s, RSSI at RX %d, at TX %d dBm, "
+                "link %s, RX %s, RX brownouts %d -> %d",
+           qdbm / 4.0, rx.id, PERF_KBPS(up, up_us), PERF_KBPS(down, down_us), rssi_rx, rssi_tx,
+           link_ok ? "ok" : "LOST", !answered ? "NOT ANSWERING" : rebooted ? "REBOOTED" : "ok", brown0, brown1);
+  char out[224];
+  snprintf(out, sizeof(out),
+           "{\"qdbm\":%d,\"up_kbps\":%.1f,\"down_kbps\":%.1f,\"rssi_rx\":%d,\"rssi_tx\":%d,\"link_ok\":%s,"
+           "\"answered\":%s,\"rebooted\":%s,\"brownouts\":%d}",
+           qdbm, PERF_KBPS(up, up_us), PERF_KBPS(down, down_us), rssi_rx, rssi_tx, link_ok ? "true" : "false",
+           answered ? "true" : "false", rebooted ? "true" : "false", brown1 - brown0);
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, out);
+  return ESP_OK;
+}
+
 // ─── Debug endpoint — shows connected stations and receiver connectivity
 static esp_err_t debug_get_handler(httpd_req_t *req) {
   char resp[1024];
@@ -1315,6 +1503,9 @@ static const route_t s_routes[] = {
     {"/perf/sink", HTTP_POST, perf_sink_handler, RT_UPLOAD},
     {"/perf/link", HTTP_POST, perf_link_handler, RT_UPLOAD},
     {"/perf/sd", HTTP_POST, perf_sd_handler, RT_RX},
+    {"/radio", HTTP_GET, radio_get_handler, RT_SYNC},
+    {"/radio", HTTP_POST, radio_post_handler, RT_RX},
+    {"/radio/test", HTTP_POST, radio_test_handler, RT_UPLOAD},
     {"/receiver_list", HTTP_GET, receiver_list_get_handler, RT_RX},
     {"/receiver_delete", HTTP_POST, delete_post_handler, RT_RX},
     {"/receiver_clear", HTTP_POST, clear_post_handler, RT_RX},

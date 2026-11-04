@@ -250,6 +250,14 @@ input::placeholder { color: var(--muted); opacity: 0.8; }
 .mcard.offline .mcard-name { color: var(--muted); }
 .mcard:disabled { cursor: default; }
 .mcard-top { display: flex; align-items: center; gap: 8px; }
+.rssi { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; flex: none; }
+.rssi i { display: block; width: 3px; background: var(--track); border-radius: 1px; }
+.rssi i:nth-child(1) { height: 25%; }
+.rssi i:nth-child(2) { height: 50%; }
+.rssi i:nth-child(3) { height: 75%; }
+.rssi i:nth-child(4) { height: 100%; }
+.rssi i.on { background: var(--ink); }
+.radio-test-title { margin-top: 16px; }
 .mcard-name { font-weight: 650; margin-right: auto; overflow-wrap: anywhere; min-width: 0; }
 
 /* Transfer card */

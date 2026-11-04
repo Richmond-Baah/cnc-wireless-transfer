@@ -223,6 +223,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── Machines (left column) ─────────────────────────────────────────
     const machineList = $('machineList');
 
+    // Signal bars from the RSSI the machine reports in its heartbeat
+    function rssiBars(rssi) {
+        if (!rssi) return '';
+        const on = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : rssi >= -85 ? 1 : 0;
+        const label = esc(t('mc.signal', { rssi }));
+        return `<span class="rssi" role="img" aria-label="${label}" title="${label}">` +
+            [1, 2, 3, 4].map(i => `<i${i <= on ? ' class="on"' : ''}></i>`).join('') + '</span>';
+    }
+
     function renderMachines() {
         if (!receivers.length) {
             machineList.innerHTML = '<p class="muted small">' + esc(t('mc.none')) + '</p>';
@@ -238,7 +247,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const sel = r.id === selectedRx;
             return `<button type="button" class="mcard${sel ? ' selected' : ''}${r.online ? '' : ' offline'}"
                     data-id="${esc(r.id)}" aria-pressed="${sel}"${uploading ? ' disabled' : ''}>
-                <span class="mcard-top"><span class="mcard-name">${esc(r.name)}</span><span class="${pcls}">${esc(ptxt)}</span></span>
+                <span class="mcard-top"><span class="mcard-name">${esc(r.name)}</span>${r.online ? rssiBars(r.rssi) : ''}<span class="${pcls}">${esc(ptxt)}</span></span>
                 ${!r.online
                     ? `<span class="muted small">${esc(lastSeenText(r.last_seen_s))}</span>`
                     : (r.card_error || r.state === 'CARD_ERROR')
@@ -1421,6 +1430,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('configBtn').addEventListener('click', () => { location.hash = 'settings/network'; });
 
     async function loadSettings() {
+        loadRadio();
         [netForm, loginSetForm].forEach(f => formStatus(f.querySelector('.form-status'), ''));
         try {
             const r = await fetch('/config', { headers: authHeaders() });
@@ -1627,6 +1637,76 @@ document.addEventListener('DOMContentLoaded', () => {
         $('recoveryWord').value = '';
     });
 
+    // ─── Radio power: saved level, and a test of each level ────────────────
+    const RADIO_LEVELS = [[34, '8.5'], [44, '11'], [52, '13'], [60, '15'], [68, '17'], [78, '19.5']];
+    const radioDbm = (q) => { const l = RADIO_LEVELS.find(x => x[0] === q); return l ? l[1] : (q / 4).toFixed(1); };
+    $('radioLevel').innerHTML = RADIO_LEVELS.map(l => `<option value="${l[0]}">${l[1]} dBm</option>`).join('');
+    async function loadRadio() {
+        try {
+            const res = await fetch('/radio', { headers: authHeaders() });
+            if (!res.ok) return;
+            const d = await res.json();
+            $('radioLevel').value = String(d.saved);
+            $('radioInfo').textContent = t('radio.info', { dbm: radioDbm(d.saved), reason: d.reset_reason, n: d.brownouts });
+        } catch (e) { /* shown again on the next visit */ }
+    }
+    $('radioSave').addEventListener('click', async () => {
+        const st = $('radioStatus');
+        const qdbm = Number($('radioLevel').value);
+        $('radioSave').disabled = true;
+        try {
+            const res = await fetch('/radio', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ qdbm }) });
+            if (!res.ok) throw new Error(await errorText(res));
+            const d = await res.json();
+            formStatus(st, t(d.failed ? 'radio.savedSome' : 'radio.saved', { dbm: radioDbm(qdbm), n: d.machines, k: d.failed }), d.failed ? 'err' : 'ok');
+            loadRadio();
+        } catch (e) {
+            formStatus(st, t('radio.failed', { why: e.message }), 'err');
+        }
+        $('radioSave').disabled = false;
+    });
+    $('radioTest').addEventListener('click', async () => {
+        const rxId = $('radioRx').value;
+        if (!rxId || uploading) return;
+        const st = $('radioTestStatus');
+        const body = $('radioTable').querySelector('tbody');
+        body.innerHTML = '';
+        $('radioTable').hidden = false;
+        $('radioTest').disabled = true;
+        $('radioSave').disabled = true;
+        uploading = true; // keep the dashboard from starting a transfer meanwhile
+        try {
+            for (const [qdbm, dbm] of RADIO_LEVELS) {
+                formStatus(st, t('radio.testing', { dbm }), 'ok');
+                let d;
+                try {
+                    const res = await fetch('/radio/test?rx=' + encodeURIComponent(rxId), { method: 'POST',
+                        headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ qdbm, seconds: 30 }) });
+                    if (!res.ok) throw new Error(await errorText(res));
+                    d = await res.json();
+                } catch (e) {
+                    formStatus(st, t('radio.testLost', { dbm }), 'err');
+                    return;
+                }
+                const result = d.brownouts > 0 ? 'radio.brownout' : d.rebooted ? 'radio.rebooted' : !d.answered ? 'radio.noAnswer' : !d.link_ok ? 'radio.lost' : 'radio.ok';
+                body.insertAdjacentHTML('beforeend', `<tr><td>${esc(dbm)} dBm</td>` +
+                    `<td>${esc(fmtBytes(d.up_kbps * 1024))}/s / ${esc(fmtBytes(d.down_kbps * 1024))}/s</td>` +
+                    `<td>${esc(String(d.rssi_rx))} / ${esc(String(d.rssi_tx))} dBm</td><td>${esc(t(result))}</td></tr>`);
+                if (result !== 'radio.ok') {
+                    formStatus(st, t('radio.testStopped', { dbm }), 'err');
+                    return;
+                }
+            }
+            formStatus(st, t('radio.testDone'), 'ok');
+        } finally {
+            uploading = false;
+            $('radioSave').disabled = false;
+            renderPerfSelect();
+            loadRadio();
+        }
+    });
+
     // ─── Speed test: each leg separately, then a real upload of test data ──
     function renderPerfSelect() {
         const sel = $('perfRx');
@@ -1635,6 +1715,11 @@ document.addEventListener('DOMContentLoaded', () => {
             .map(r => `<option value="${esc(r.id)}">${esc(r.name || r.id)}</option>`).join('');
         if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
         $('perfBtn').disabled = !sel.options.length || uploading;
+        const rsel = $('radioRx');
+        const rkeep = rsel.value || selectedRx;
+        rsel.innerHTML = sel.innerHTML;
+        if ([...rsel.options].some(o => o.value === rkeep)) rsel.value = rkeep;
+        $('radioTest').disabled = !rsel.options.length || uploading;
     }
     function perfRow(leg, d) {
         const kbps = d.bytes / 1024 / (d.ms / 1000);

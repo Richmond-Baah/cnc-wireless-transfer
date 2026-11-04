@@ -6,6 +6,7 @@
 #include "web_server.h"
 #include "file_transfer.h"
 #include "rx_registry.h"
+#include "radio_power.h"
 #include "led.h"
 #include "auth.h"
 #include "boot_button.h"
@@ -37,6 +38,7 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    radio_boot_check();
 
     // 2. Initialize LEDs
     led_init();

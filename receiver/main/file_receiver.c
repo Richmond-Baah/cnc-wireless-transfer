@@ -10,6 +10,7 @@
 #include "storage_manager.h"
 #include "sd_card.h"
 #include "pairing.h"
+#include "radio_power.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -796,6 +797,11 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddBoolToObject(obj, "busy", usb_msc_ms_since_host_read() < 10000);
     cJSON_AddNumberToObject(obj, "reattach_ms", s_reattach_ms);
     cJSON_AddNumberToObject(obj, "host_ms", usb_msc_host_mount_ms());
+    cJSON_AddNumberToObject(obj, "rssi", radio_sta_rssi());
+    cJSON_AddNumberToObject(obj, "qdbm", radio_power_actual());
+    cJSON_AddNumberToObject(obj, "brownouts", radio_brownouts());
+    cJSON_AddStringToObject(obj, "reset_reason", radio_reset_reason());
+    cJSON_AddNumberToObject(obj, "uptime_s", (double)(esp_timer_get_time() / 1000000));
 }
 
 // ─── Speed test (Settings > System on the transmitter) ──────────────────────
@@ -919,6 +925,57 @@ static esp_err_t perf_sd_handler(httpd_req_t *req) {
              (unsigned long long)done, (long long)(us / 1000), RX_KBPS(done, us), PERF_SD_PIECE,
              PERF_SD_FSYNC_EVERY);
     perf_reply(req, done, us);
+    return ESP_OK;
+}
+
+// POST /radio {"qdbm":n,"save":true} sets the Wi-Fi TX power (save = kept over
+// restarts); {"restore":true} goes back to the saved level; {} just reports.
+// Reply: rssi, qdbm, brownouts, reset_reason, uptime_s.
+static esp_err_t radio_post_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    char body[64] = {0};
+    int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len : 0;
+    if (len > 0 && httpd_req_recv(req, body, len) != len) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+        return ESP_OK;
+    }
+    cJSON *json = cJSON_Parse(body);
+    cJSON *q = json ? cJSON_GetObjectItem(json, "qdbm") : NULL;
+    bool bad = false;
+    if (cJSON_IsNumber(q)) {
+        if (radio_power_valid(q->valueint)) {
+            radio_power_apply(q->valueint);
+            if (cJSON_IsTrue(cJSON_GetObjectItem(json, "save"))) radio_power_save(q->valueint);
+        } else {
+            bad = true;
+        }
+    } else if (json && cJSON_IsTrue(cJSON_GetObjectItem(json, "restore"))) {
+        radio_power_apply(radio_power_saved());
+    }
+    cJSON_Delete(json);
+    if (bad) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unsupported TX power level");
+        return ESP_OK;
+    }
+    char out[128];
+    snprintf(out, sizeof(out), "{\"rssi\":%d,\"qdbm\":%d,\"brownouts\":%lu,\"reset_reason\":\"%s\",\"uptime_s\":%lld}",
+             radio_sta_rssi(), radio_power_actual(), (unsigned long)radio_brownouts(), radio_reset_reason(),
+             (long long)(esp_timer_get_time() / 1000000));
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, out);
+    return ESP_OK;
+}
+
+// GET /perf/source: sends test data until the caller closes (radio test, RX
+// transmitting; capped at 100 MB).
+static esp_err_t perf_source_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    memset(chunk_buf, 0x5A, sizeof(chunk_buf));
+    httpd_resp_set_type(req, "application/octet-stream");
+    for (uint32_t sent = 0; sent < 100u * 1024 * 1024; sent += sizeof(chunk_buf)) {
+        if (httpd_resp_send_chunk(req, chunk_buf, sizeof(chunk_buf)) != ESP_OK) return ESP_FAIL;
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
 
@@ -1326,7 +1383,7 @@ void file_receiver_init(void) {
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
     config.stack_size = 10240;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 18;
 
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_uri_t uri_prepare = {.uri = "/prepare", .method = HTTP_POST, .handler = prepare_post_handler};
@@ -1344,6 +1401,8 @@ void file_receiver_init(void) {
         httpd_uri_t uri_delete = {.uri = "/delete", .method = HTTP_POST, .handler = delete_post_handler};
         httpd_uri_t uri_perf_sink = {.uri = "/perf/sink", .method = HTTP_POST, .handler = perf_sink_handler};
         httpd_uri_t uri_perf_sd = {.uri = "/perf/sd", .method = HTTP_POST, .handler = perf_sd_handler};
+        httpd_uri_t uri_perf_source = {.uri = "/perf/source", .method = HTTP_GET, .handler = perf_source_handler};
+        httpd_uri_t uri_radio = {.uri = "/radio", .method = HTTP_POST, .handler = radio_post_handler};
 
         httpd_register_uri_handler(server, &uri_prepare);
         httpd_register_uri_handler(server, &uri_chunk);
@@ -1360,6 +1419,8 @@ void file_receiver_init(void) {
         httpd_register_uri_handler(server, &uri_delete);
         httpd_register_uri_handler(server, &uri_perf_sink);
         httpd_register_uri_handler(server, &uri_perf_sd);
+        httpd_register_uri_handler(server, &uri_perf_source);
+        httpd_register_uri_handler(server, &uri_radio);
 
         ESP_LOGI(TAG, "File receiver HTTP server started on port %d", config.server_port);
     } else {

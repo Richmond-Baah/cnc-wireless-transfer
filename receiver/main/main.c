@@ -4,6 +4,7 @@
 #include "file_receiver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "radio_power.h"
 #include "led.h"
 #include "nvs_flash.h"
 #include "state_machine.h"
@@ -44,6 +45,7 @@ void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    radio_boot_check();
     ESP_LOGI(TAG, "Step 1: DONE");
 
     ESP_LOGI(TAG, "Step 2: State machine...");
