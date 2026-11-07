@@ -28,6 +28,7 @@
 #include "web_server.h"
 #include "wifi_manager.h"
 #include <stddef.h>
+#include "lwip/sockets.h"
 
 #ifndef CONFIG_CNC_DEFAULT_WIFI_SSID
 #define CONFIG_CNC_DEFAULT_WIFI_SSID "CNC_WIRELESS"
@@ -1619,17 +1620,36 @@ static void set_cache_policy(httpd_req_t *req, const route_t *rt) {
   }
 }
 
+static void httpd_wake(void *arg) {}
+
+// Headers and body leave at once instead of waiting for the peer's delayed ACK
+static esp_err_t httpd_sock_open(httpd_handle_t hd, int fd) {
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  return ESP_OK;
+}
+
 static void worker_task(void *arg) {
   QueueHandle_t q = (QueueHandle_t)arg;
   job_t j;
   for (;;) {
     if (xQueueReceive(q, &j, portMAX_DELAY) != pdTRUE) continue;
     set_cache_policy(j.req, j.rt);
-    j.rt->fn(j.req);
+    esp_err_t ret = j.rt->fn(j.req);
 #if CONFIG_CNC_HTTP_REQ_LOG
     log_request(j.req, j.t0_us, " (worker)");
 #endif
+    int fd = httpd_req_to_sockfd(j.req);
     httpd_req_async_handler_complete(j.req);
+    // select() left this socket out while the job ran and complete() does not
+    // wake it: without this the client's next request waits for unrelated
+    // traffic. A failed handler sent no reply, so close or the client hangs.
+    if (ret != ESP_OK && fd >= 0) {
+      ESP_LOGW(TAG, "Worker handler failed, closing socket %d", fd);
+      httpd_sess_trigger_close(s_server, fd);
+    } else {
+      httpd_queue_work(s_server, httpd_wake, NULL);
+    }
   }
 }
 
@@ -1677,6 +1697,7 @@ void web_server_start(void) {
   // Browsers open ~6 keep-alive sockets each; heartbeats close theirs at once.
   // 13 + 3 internal + 2 receiver clients fit CONFIG_LWIP_MAX_SOCKETS (24).
   config.max_open_sockets = 13;
+  config.open_fn = httpd_sock_open;
   config.lru_purge_enable = true; // reclaim idle keep-alive sockets (skips async requests in progress)
   // Per send/recv call; body reads allow BODY_RECV_TIMEOUTS of these, so a
   // stalled client frees httpd within ~15 s instead of holding it

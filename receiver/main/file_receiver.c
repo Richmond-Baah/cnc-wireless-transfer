@@ -23,6 +23,7 @@
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 #include <sys/stat.h>
+#include "lwip/sockets.h"
 static const char *TAG = "FILE_RCV";
 #define STORAGE_PATH storage_manager_get_base_path()
 
@@ -1392,6 +1393,14 @@ static esp_err_t unpair_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Response headers and body leave at once instead of waiting for the peer's
+// delayed ACK (up to 250 ms per chunk).
+static esp_err_t httpd_sock_open(httpd_handle_t hd, int fd) {
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    return ESP_OK;
+}
+
 void file_receiver_init(void) {
     ESP_LOGI(TAG, "Cleaning up any orphan temp files on storage...");
     cleanup_orphan_temp_files();
@@ -1400,6 +1409,7 @@ void file_receiver_init(void) {
 
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.open_fn = httpd_sock_open;
     config.max_open_sockets = 4;
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
