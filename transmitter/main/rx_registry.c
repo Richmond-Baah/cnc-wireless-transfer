@@ -42,6 +42,7 @@ typedef struct {
   int host_ms;
   int rssi;             // at the receiver, dBm (0 = unknown)
   int brownouts;        // receiver's count since it was flashed
+  double uptime_s;      // last heartbeat, to spot receiver restarts
   bool rd_seen;         // receiver has sent a host read summary
   int rd_n, rd_meta, rd_data, rd_other; // sectors in its last 10 s, rd_n = reads
   char rd_file[33];
@@ -346,6 +347,14 @@ bool rx_registry_heartbeat(const cJSON *hb) {
     if (e->last_seen_us == 0 || !is_online(e->last_seen_us)) {
       ESP_LOGI(TAG, "%s (%s) online at %s", e->id, e->name, ip);
     }
+    // The receiver's console is UART only, so its restarts are logged here
+    double uptime = json_num(hb, "uptime_s", -1);
+    const char *why = json_str(hb, "reset_reason");
+    if (e->last_seen_us == 0 || (uptime >= 0 && uptime < e->uptime_s)) {
+      ESP_LOGW(TAG, "%s restart check: uptime %.0f s (was %.0f s), last reset: %s, brownouts %d", e->id, uptime,
+               e->uptime_s, why ? why : "?", (int)json_num(hb, "brownouts", -1));
+    }
+    if (uptime >= 0) e->uptime_s = uptime;
     strlcpy(e->ip, ip, sizeof(e->ip));
     apply_status_locked(e, hb);
     e->last_seen_us = now;
