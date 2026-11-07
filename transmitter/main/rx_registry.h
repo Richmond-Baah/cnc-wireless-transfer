@@ -34,6 +34,9 @@ typedef struct {
 int rx_http(const rx_target_t *t, esp_http_client_method_t method, const char *path,
             const char *body, bool force, int timeout_ms, char *resp, size_t resp_len,
             bool *truncated);
+// POST raw bytes with X-Offset (firmware chunks).
+int rx_http_chunk(const rx_target_t *t, const char *path, size_t offset, const void *data, int len,
+                  int timeout_ms, char *resp, size_t resp_len);
 
 void rx_registry_init(void);
 

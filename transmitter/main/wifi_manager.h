@@ -7,7 +7,7 @@
 #define MDNS_HOSTNAME "filexfer"   // http://filexfer.local
 #define MDNS_ALIAS "cnc-transfer"  // old name, still answered
 
-void wifi_init(void);
+esp_err_t wifi_init(void); // ESP_OK once the AP is up
 
 // STA (router) link: state is disabled|connecting|connected|failed; reason is
 // set after a disconnect; ip is set while connected.

@@ -239,7 +239,7 @@ static void mdns_start(void) {
   ESP_LOGI(TAG, "mDNS: http://" MDNS_HOSTNAME ".local (also " MDNS_ALIAS ".local)");
 }
 
-void wifi_init(void) {
+esp_err_t wifi_init(void) {
   ESP_LOGI(TAG, "=== WiFi Init Starting ===");
 
   esp_err_t err;
@@ -247,14 +247,14 @@ void wifi_init(void) {
   err = esp_netif_init();
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_netif_init failed: %s", esp_err_to_name(err));
-    return;
+    return err;
   }
   ESP_LOGI(TAG, "netif init OK");
 
   err = esp_event_loop_create_default();
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
     ESP_LOGE(TAG, "event loop create failed: %s", esp_err_to_name(err));
-    return;
+    return err;
   }
   ESP_LOGI(TAG, "event loop OK");
 
@@ -330,7 +330,7 @@ void wifi_init(void) {
   err = esp_wifi_init(&cfg);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(err));
-    return;
+    return err;
   }
   ESP_LOGI(TAG, "WiFi driver init OK");
 
@@ -434,4 +434,5 @@ void wifi_init(void) {
              ap_config.ap.channel, ap_config.ap.beacon_interval);
     mdns_start();
   }
+  return err;
 }

@@ -1,4 +1,8 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     ,        24K,
-app0,     app,  factory, ,        1280K,
-storage,  data, fat,     ,        2752K,
+# Name,   Type, SubType,  Offset,   Size, Flags
+# 4 MB flash (ESP32-S3). nvs offset/size unchanged (pairing survives a reflash);
+# otadata after the apps because nvs ends at 0xF000. SD card is the only storage.
+nvs,      data, nvs,      0x9000,   0x6000,
+ota_0,    app,  ota_0,    0x10000,  0x1E0000,
+ota_1,    app,  ota_1,    0x1F0000, 0x1E0000,
+otadata,  data, ota,      0x3D0000, 0x2000,
+coredump, data, coredump, 0x3E0000, 0x10000,

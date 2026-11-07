@@ -502,3 +502,6 @@ fieldset { border: 0; min-width: 0; }
 .swatch-custom { position: relative; overflow: hidden; background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); }
 .swatch-custom input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; }
 .swatch-custom:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fw-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.fw-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.fw-name { flex: 1 1 160px; overflow-wrap: anywhere; }

@@ -12,6 +12,8 @@
 #include "auth.h"
 #include "radio_power.h"
 #include "ui_prefs.h"
+#include "coredump_http.h"
+#include "fw_update.h"
 #include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -60,6 +62,14 @@ static void schedule_restart(void) {
   }
 }
 static uint32_t s_restart_wait_ver; // non-zero: wait for receivers to fetch this config version
+
+// Receiver being updated (POST /rxfw/*): one at a time, idle 60 s = over
+static char s_rxfw_id[RX_ID_LEN];
+static int64_t s_rxfw_last_us;
+static bool rxfw_active(const char *except_id) {
+  if (!s_rxfw_id[0] || esp_timer_get_time() - s_rxfw_last_us > 60LL * 1000 * 1000) return false;
+  return !except_id || strcmp(except_id, s_rxfw_id) != 0;
+}
 
 // ─── Auth Helper
 // ────────────────────────────────────────────────────────────────
@@ -313,6 +323,11 @@ static esp_err_t upload_begin_handler(httpd_req_t *req) {
     return ESP_OK;
   }
 
+  if (fw_update_active() || rxfw_active(NULL)) {
+    cJSON_Delete(json);
+    send_status_text(req, 409, "Firmware update in progress");
+    return ESP_OK;
+  }
   bool force = force_requested(req);
   char rx_id[RX_ID_LEN];
   if (!get_rx_id(req, rx_id, sizeof(rx_id))) {
@@ -1466,6 +1481,247 @@ static esp_err_t radio_test_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// GET /coredump: the transmitter's last crash report.
+// GET /receiver_coredump?rx=<id>: a receiver's, streamed through from it.
+static esp_err_t coredump_get_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  return coredump_http_send(req, "transmitter-coredump.bin");
+}
+
+static esp_err_t receiver_coredump_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char id[RX_ID_LEN];
+  rx_target_t rx;
+  bool known = false;
+  if (!get_rx_id(req, id, sizeof(id)) || !rx_registry_target(id, &rx, &known)) {
+    send_status_text(req, known ? 503 : 404, known ? "Machine is offline" : "Unknown machine");
+    return ESP_OK;
+  }
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s/coredump", rx.ip);
+  esp_http_client_config_t cfg = {.url = url, .timeout_ms = 5000};
+  esp_http_client_handle_t c = esp_http_client_init(&cfg);
+  if (c == NULL) {
+    send_status_text(req, 500, "HTTP client init failed");
+    return ESP_OK;
+  }
+  esp_http_client_set_header(c, "X-Auth-Key", rx.key);
+  int status = -1;
+  if (esp_http_client_open(c, 0) == ESP_OK && esp_http_client_fetch_headers(c) >= 0) {
+    status = esp_http_client_get_status_code(c);
+  }
+  if (status != 200) {
+    esp_http_client_cleanup(c);
+    send_status_text(req, status == 404 ? 404 : 502,
+                     status == 404 ? "No crash report saved" : "Machine did not answer");
+    return ESP_OK;
+  }
+  char disp[80];
+  snprintf(disp, sizeof(disp), "attachment; filename=\"%s-coredump.bin\"", id);
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Content-Disposition", disp);
+  int n;
+  while ((n = esp_http_client_read(c, s_rx_body, sizeof(s_rx_body))) > 0) {
+    if (httpd_resp_send_chunk(req, s_rx_body, n) != ESP_OK) break;
+  }
+  httpd_resp_send_chunk(req, NULL, 0);
+  esp_http_client_cleanup(c);
+  return ESP_OK;
+}
+
+// ─── Firmware update (this transmitter) ─────────────────────────────────────
+// POST /fw/begin {"size":n}     -> {chunk_size}
+// POST /fw/chunk X-Offset, raw body (<= 32 KB) -> {written}
+// POST /fw/finish               -> {version}, then restart into the new slot
+// POST /fw/cancel
+// Upload worker only (shares s_chunk_buf with file uploads, never at once).
+static void send_json_or_text(httpd_req_t *req, int code, const char *json, const char *msg) {
+  if (code != 200) {
+    send_status_text(req, code, msg);
+    return;
+  }
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, json);
+}
+
+static esp_err_t fw_begin_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char body[64] = {0};
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body) ||
+      !read_full_body(req, body, sizeof(body) - 1)) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  cJSON *json = cJSON_Parse(body);
+  cJSON *j_size = json ? cJSON_GetObjectItem(json, "size") : NULL;
+  double size = cJSON_IsNumber(j_size) ? j_size->valuedouble : -1;
+  cJSON_Delete(json);
+  char msg[96] = "";
+  char active[RX_ID_LEN];
+  int code;
+  if (size <= 0 || size > 0x7FFFFFFF) {
+    code = 400;
+    snprintf(msg, sizeof(msg), "Missing size");
+  } else if (file_transfer_active_rx(active, sizeof(active))) {
+    code = 409;
+    snprintf(msg, sizeof(msg), "A file transfer is running");
+  } else if (rxfw_active(NULL)) {
+    code = 409;
+    snprintf(msg, sizeof(msg), "A machine is being updated");
+  } else {
+    code = fw_update_begin((size_t)size, msg, sizeof(msg));
+  }
+  char resp[48];
+  snprintf(resp, sizeof(resp), "{\"chunk_size\":%d}", UPLOAD_CHUNK_MAX);
+  send_json_or_text(req, code, resp, msg);
+  return ESP_OK;
+}
+
+static esp_err_t fw_chunk_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char off_hdr[16] = {0};
+  char *end = NULL;
+  long offset = -1;
+  if (httpd_req_get_hdr_value_str(req, "X-Offset", off_hdr, sizeof(off_hdr)) == ESP_OK) {
+    offset = strtol(off_hdr, &end, 10);
+  }
+  if (offset < 0 || end == off_hdr || *end != '\0' || req->content_len <= 0 ||
+      req->content_len > UPLOAD_CHUNK_MAX || !read_full_body(req, s_chunk_buf, UPLOAD_CHUNK_MAX)) {
+    send_status_text(req, 400, "Missing X-Offset or bad chunk");
+    return ESP_OK;
+  }
+  char msg[96] = "";
+  size_t written = 0;
+  int code = fw_update_write((size_t)offset, (const uint8_t *)s_chunk_buf, req->content_len, &written,
+                             msg, sizeof(msg));
+  char resp[40];
+  snprintf(resp, sizeof(resp), "{\"written\":%u}", (unsigned)written);
+  send_json_or_text(req, code, resp, msg);
+  return ESP_OK;
+}
+
+static esp_err_t fw_finish_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char msg[96] = "";
+  char ver[32] = "";
+  int code = fw_update_finish(ver, sizeof(ver), msg, sizeof(msg));
+  char resp[64];
+  snprintf(resp, sizeof(resp), "{\"version\":\"%s\"}", ver);
+  send_json_or_text(req, code, resp, msg);
+  if (code == 200) {
+    ESP_LOGW(TAG, "Firmware %s installed; restarting", ver);
+    schedule_restart();
+  }
+  return ESP_OK;
+}
+
+static esp_err_t fw_cancel_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  fw_update_abort();
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, "{\"status\":\"cancelled\"}");
+  return ESP_OK;
+}
+
+// ─── Firmware update (a receiver) ───────────────────────────────────────────
+// POST /rxfw/begin|chunk|finish|cancel ?rx=<id>: same protocol as /fw/*, each
+// request relayed to that receiver's /fw/* with its key. Nothing is stored
+// here; chunks are at most the receiver's chunk_size (16 KB).
+static char s_rxfw_buf[16 * 1024]; // rx worker only
+
+static esp_err_t rxfw_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  const char *op = req->uri + strlen("/rxfw/");
+  char id[RX_ID_LEN];
+  rx_target_t rx;
+  bool known = false;
+  if (!get_rx_id(req, id, sizeof(id)) || !rx_registry_target(id, &rx, &known)) {
+    send_status_text(req, known ? 503 : 404, known ? "Machine is offline" : "Unknown machine");
+    return ESP_OK;
+  }
+  bool begin = strncmp(op, "begin", 5) == 0;
+  bool chunk = strncmp(op, "chunk", 5) == 0;
+  char active[RX_ID_LEN];
+  if (begin && (file_transfer_active_rx(active, sizeof(active)) || fw_update_active() || rxfw_active(id))) {
+    send_status_text(req, 409, "Another transfer or update is running");
+    return ESP_OK;
+  }
+  if (!begin && !rxfw_active(NULL)) {
+    if (strncmp(op, "cancel", 6) != 0) {
+      send_status_text(req, 410, "No update running for this machine");
+      return ESP_OK;
+    }
+  } else if (!begin && strcmp(id, s_rxfw_id) != 0) {
+    send_status_text(req, 409, "Another machine is being updated");
+    return ESP_OK;
+  }
+  int len = req->content_len;
+  if (len < 0 || len > (int)sizeof(s_rxfw_buf) || !read_full_body(req, s_rxfw_buf, sizeof(s_rxfw_buf))) {
+    send_status_text(req, 400, "Invalid request body");
+    return ESP_OK;
+  }
+  char path[16];
+  snprintf(path, sizeof(path), "/fw/%.8s", op);
+  int code;
+  if (chunk) {
+    char off_hdr[16] = {0};
+    char *end = NULL;
+    long offset = -1;
+    if (httpd_req_get_hdr_value_str(req, "X-Offset", off_hdr, sizeof(off_hdr)) == ESP_OK) {
+      offset = strtol(off_hdr, &end, 10);
+    }
+    if (offset < 0 || end == off_hdr || *end != '\0') {
+      send_status_text(req, 400, "Missing X-Offset");
+      return ESP_OK;
+    }
+    code = rx_http_chunk(&rx, path, (size_t)offset, s_rxfw_buf, len, 20000, s_rx_resp, sizeof(s_rx_resp));
+  } else {
+    s_rxfw_buf[len] = '\0';
+    // begin erases nothing up front (sequential writes); finish verifies the image
+    code = rx_http(&rx, HTTP_METHOD_POST, path, len ? s_rxfw_buf : "{}", false, 20000, s_rx_resp,
+                   sizeof(s_rx_resp), NULL);
+  }
+  if (begin && code == 200) {
+    strlcpy(s_rxfw_id, id, sizeof(s_rxfw_id));
+    ESP_LOGW(TAG, "Updating firmware of %s", id);
+  }
+  s_rxfw_last_us = esp_timer_get_time();
+  if (code != 200 || strncmp(op, "finish", 6) == 0 || strncmp(op, "cancel", 6) == 0) {
+    s_rxfw_id[0] = '\0'; // over; the browser stops on any error
+    ESP_LOGW(TAG, "Firmware update of %s: %s -> %d", id, op, code);
+  }
+  if (code == 423) {
+    send_status_text(req, 423, "The machine is reading its drive. Update it when it is idle.");
+  } else if (code == 200) {
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, s_rx_resp[0] ? s_rx_resp : "{}");
+  } else {
+    send_status_text(req, code < 0 ? 502 : code, s_rx_resp[0] ? s_rx_resp : "Machine did not answer");
+  }
+  return ESP_OK;
+}
+
 // ─── Debug endpoint — shows connected stations and receiver connectivity
 static esp_err_t debug_get_handler(httpd_req_t *req) {
   char resp[1024];
@@ -1573,6 +1829,16 @@ static const route_t s_routes[] = {
     {"/api/ui", HTTP_GET, api_ui_get_handler, RT_SYNC},
     {"/api/ui.js", HTTP_GET, api_ui_get_handler, RT_SYNC},
     {"/api/ui", HTTP_POST, api_ui_post_handler, RT_SYNC},
+    {"/coredump", HTTP_GET, coredump_get_handler, RT_RX},
+    {"/fw/begin", HTTP_POST, fw_begin_handler, RT_UPLOAD},
+    {"/fw/chunk", HTTP_POST, fw_chunk_handler, RT_UPLOAD},
+    {"/fw/finish", HTTP_POST, fw_finish_handler, RT_UPLOAD},
+    {"/fw/cancel", HTTP_POST, fw_cancel_handler, RT_UPLOAD},
+    {"/rxfw/begin", HTTP_POST, rxfw_handler, RT_RX},
+    {"/rxfw/chunk", HTTP_POST, rxfw_handler, RT_RX},
+    {"/rxfw/finish", HTTP_POST, rxfw_handler, RT_RX},
+    {"/rxfw/cancel", HTTP_POST, rxfw_handler, RT_RX},
+    {"/receiver_coredump", HTTP_GET, receiver_coredump_handler, RT_RX},
     {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
     // Receivers
     {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler, RT_SYNC},
@@ -1689,7 +1955,7 @@ static void start_workers(void) {
   xTaskCreate(worker_task, "http_rx", WORKER_STACK, s_queue[RT_RX], 5, NULL);
 }
 
-void web_server_start(void) {
+esp_err_t web_server_start(void) {
   auth_init();
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = NUM_ROUTES;
@@ -1710,7 +1976,7 @@ void web_server_start(void) {
   start_workers();
   if (httpd_start(&s_server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Error starting Web server.");
-    return;
+    return ESP_FAIL;
   }
   for (size_t i = 0; i < NUM_ROUTES; i++) {
     httpd_uri_t u = {.uri = s_routes[i].uri, .method = s_routes[i].method, .handler = dispatch,
@@ -1721,4 +1987,5 @@ void web_server_start(void) {
   }
   ESP_LOGI(TAG, "Web server started on port %d (%u routes), UI %s (%u bytes gz)", config.server_port,
            (unsigned)NUM_ROUTES, s_ui_path, (unsigned)(ui_gz_end - ui_gz_start));
+  return ESP_OK;
 }

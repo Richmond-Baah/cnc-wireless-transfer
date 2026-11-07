@@ -7,3 +7,9 @@ sdkconfig.old
 .DS_Store
 Thumbs.db
 __pycache__/
+
+# Signing keys never go in the repo (FILEXFER_SIGNING_KEY points outside it)
+*.pem
+*.key
+*signing_key*
+*signing-key*
