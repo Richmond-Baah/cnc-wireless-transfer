@@ -227,9 +227,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Signal bars from the RSSI the machine reports in its heartbeat
     function rssiBars(rssi) {
         if (!rssi) return '';
-        const on = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : rssi >= -85 ? 1 : 0;
+        const on = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
+        const level = on >= 3 ? 'good' : on === 2 ? 'fair' : 'weak';
         const label = esc(t('mc.signal', { rssi }));
-        return `<span class="rssi" role="img" aria-label="${label}" title="${label}">` +
+        return `<span class="rssi ${level}" role="img" aria-label="${label}" title="${label}">` +
             [1, 2, 3, 4].map(i => `<i${i <= on ? ' class="on"' : ''}></i>`).join('') + '</span>';
     }
 
@@ -1430,6 +1431,64 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     window.addEventListener('hashchange', route);
     $('configBtn').addEventListener('click', () => { location.hash = 'settings/network'; });
+
+    // ─── Accent colour (stored on the transmitter, shared by every browser) ─
+    const ACCENT_DEFAULT = '#C2410C';
+    let accentSaved = window.FX_ACCENT;
+    function markAccent() {
+        const cur = window.FX_ACCENT || ACCENT_DEFAULT;
+        let preset = false;
+        document.querySelectorAll('[data-accent]').forEach(b => {
+            const on = b.dataset.accent === cur;
+            preset = preset || on;
+            b.setAttribute('aria-pressed', String(on));
+        });
+        $('accentCustom').value = cur.toLowerCase();
+        $('accentCustom').parentElement.setAttribute('aria-pressed', String(!preset));
+    }
+    async function saveAccent(hex) {
+        applyAccent(hex); // live preview
+        markAccent();
+        if (window.FX_ACCENT === accentSaved) return; // unchanged: nothing to store
+        try {
+            const res = await fetch('/api/ui', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ accent: window.FX_ACCENT })
+            });
+            if (!res.ok) throw new Error(await errorText(res));
+            accentSaved = window.FX_ACCENT;
+            formStatus($('accentStatus'), '');
+        } catch (e) {
+            applyAccent(accentSaved);
+            markAccent();
+            formStatus($('accentStatus'), t('app.accent.failed', { why: e.message === 'Failed to fetch' ? t('msg.fail.network') : e.message }), 'err');
+        }
+    }
+    $('accentSwatches').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-accent]');
+        if (b) saveAccent(b.dataset.accent);
+    });
+    // Custom picker: preview on input; save on change (debounced 400 ms); picker
+    // closed without a change -> back to the saved colour
+    let accentTimer = null, accentPreview = false;
+    $('accentCustom').addEventListener('input', () => {
+        accentPreview = true;
+        applyAccent($('accentCustom').value);
+    });
+    $('accentCustom').addEventListener('change', () => {
+        accentPreview = false;
+        clearTimeout(accentTimer);
+        accentTimer = setTimeout(() => saveAccent($('accentCustom').value), 400);
+    });
+    $('accentCustom').addEventListener('blur', () => {
+        if (!accentPreview) return;
+        accentPreview = false;
+        applyAccent(accentSaved);
+        markAccent();
+    });
+    $('accentReset').addEventListener('click', () => saveAccent(ACCENT_DEFAULT));
+    markAccent();
 
     async function loadSettings() {
         loadRadio();

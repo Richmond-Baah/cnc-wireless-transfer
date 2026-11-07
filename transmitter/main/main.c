@@ -9,12 +9,13 @@
 #include "radio_power.h"
 #include "led.h"
 #include "auth.h"
+#include "ui_prefs.h"
 #include "boot_button.h"
 
 static const char *TAG = "MAIN";
 
-// BOOT (pinhole) held 10 s: admin login back to factory default only;
-// network settings and paired machines stay as they are.
+// BOOT (pinhole) held 10 s: admin login and UI accent colour back to factory
+// defaults; network settings and paired machines stay as they are.
 #define BOOT_HOLD_MS 10000
 
 static void boot_pressed(bool pressed) {
@@ -24,6 +25,7 @@ static void boot_pressed(bool pressed) {
 static void boot_fired(void) {
   ESP_LOGW(TAG, "BOOT held %d s: resetting admin login", BOOT_HOLD_MS / 1000);
   auth_reset_defaults();
+  ui_accent_reset();
   led_set_button(LED_BUTTON_DONE);
 }
 
