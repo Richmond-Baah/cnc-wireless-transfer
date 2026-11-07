@@ -20,10 +20,12 @@
     --err: #A61B1B;
     --err-bg: #FBE4E2;
     --danger: #A61B1B;
-    --bar: #15181C;
-    --bar-ink: #E8EAEC;
-    --bar-muted: #A3AAB2;
-    --bar-line: rgba(255, 255, 255, 0.16);
+    --bar: var(--surface);
+    --bar-ink: var(--ink);
+    --bar-muted: var(--muted);
+    --bar-line: var(--line);
+    --bar-hover: rgba(21, 24, 28, 0.06);
+    --bar-pressed: rgba(21, 24, 28, 0.10);
     --shadow: 0 1px 2px rgba(21, 24, 28, 0.06);
     --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -49,6 +51,11 @@
     --danger: #B3261E;
     --brand: #EA580C;
     --bar: #0A0C0E;
+    --bar-ink: #E8EAEC;
+    --bar-muted: #A3AAB2;
+    --bar-line: rgba(255, 255, 255, 0.16);
+    --bar-hover: rgba(255, 255, 255, 0.08);
+    --bar-pressed: rgba(255, 255, 255, 0.12);
     --shadow: none;
 }
 
@@ -70,6 +77,11 @@
         --danger: #B3261E;
         --brand: #EA580C;
         --bar: #0A0C0E;
+        --bar-ink: #E8EAEC;
+        --bar-muted: #A3AAB2;
+        --bar-line: rgba(255, 255, 255, 0.16);
+        --bar-hover: rgba(255, 255, 255, 0.08);
+        --bar-pressed: rgba(255, 255, 255, 0.12);
         --shadow: none;
     }
 }
@@ -127,14 +139,14 @@ svg.i { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor;
     color: var(--bar-muted); cursor: pointer;
 }
 .icon-btn:hover { color: var(--bar-ink); }
-.icon-btn[aria-pressed="true"] { background: rgba(255, 255, 255, 0.12); color: var(--bar-ink); }
+.icon-btn[aria-pressed="true"] { background: var(--bar-pressed); color: var(--bar-ink); }
 .bar-btn {
     display: inline-flex; align-items: center; gap: 8px; min-height: var(--tap);
     padding: 0 12px; border: 1px solid var(--bar-line); border-radius: var(--r-sm);
     background: transparent; color: var(--bar-ink); font: inherit; font-size: 0.9375rem;
     cursor: pointer;
 }
-.bar-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.bar-btn:hover { background: var(--bar-hover); }
 @media (max-width: 560px) {
     .bar-btn .lbl { display: none; }
     .bar-btn { padding: 0; width: var(--tap); justify-content: center; }
