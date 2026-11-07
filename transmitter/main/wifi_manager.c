@@ -125,14 +125,18 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else {
       snprintf(reason, sizeof(reason), "disconnected (reason %d)", event->reason);
     }
-    // A link that worked before (router reboot) keeps retrying; a new one that
-    // never connected (bad SSID/password) drops to one try per minute so the
-    // AP stays usable between attempts.
-    if (s_sta_was_connected || ++s_sta_retries < STA_MAX_RETRIES) {
+    // A few quick tries, then one per minute: back-to-back scans keep the radio
+    // off the AP channel, so AP clients lose beacons and drop. A link that
+    // worked before stays "connecting" because its settings are not at fault.
+    if (++s_sta_retries < STA_MAX_RETRIES) {
       sta_set("connecting", reason, NULL);
       ESP_LOGW(TAG, "STA disconnected: %s, retrying (%d/%d)", reason,
                s_sta_retries, STA_MAX_RETRIES);
       esp_wifi_connect();
+    } else if (s_sta_was_connected) {
+      sta_set("connecting", reason, NULL);
+      ESP_LOGW(TAG, "STA lost router: %s. Retrying in %d s; AP stays up.", reason, STA_SLOW_RETRY_S);
+      esp_timer_start_once(s_sta_retry_timer, STA_SLOW_RETRY_S * 1000000ULL);
     } else {
       sta_set("failed", reason, NULL);
       ESP_LOGE(TAG, "STA connect FAILED: %s. Retrying in %d s; AP 192.168.4.1 stays up. "

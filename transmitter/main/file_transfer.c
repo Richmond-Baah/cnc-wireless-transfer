@@ -67,7 +67,7 @@ static struct {
 
 // Default relay for uploads that don't send X-Relay. Pick from the speed
 // test's "Full transfer" rows (buffered vs stream).
-#define RELAY_STREAM_DEFAULT false
+#define RELAY_STREAM_DEFAULT true
 
 #define KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
 #define PROGRESS_LOG_BYTES (1024 * 1024)

@@ -1801,7 +1801,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const name = 'FXSPEED.BIN';
         const t0 = performance.now();
         const begin = await perfJson(await fetch('/upload_begin', { method: 'POST',
-            headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId, 'X-Relay': relay }),
+            headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId, 'X-Relay': relay, 'X-Force': '1' }),
             body: JSON.stringify({ name, size, md5: spark.end() }) }));
         const times = [];
         for (let i = 0, off = 0; off < size; i++, off += CHUNK_SIZE) {
@@ -1812,7 +1812,7 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('perf chunk ms (' + relay + ')', times.map(Math.round).join(' '));
         await perfJson(await fetch('/upload_finish', { method: 'POST', headers: authHeaders({ 'X-Session': begin.session }) }));
         const ms = performance.now() - t0;
-        await fetch('/receiver_delete', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId }),
+        await fetch('/receiver_delete', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId, 'X-Force': '1' }),
             body: JSON.stringify({ files: [name] }) }).catch(() => {});
         const chunks = { min: Math.round(Math.min(...times)), max: Math.round(Math.max(...times)),
             avg: Math.round(times.reduce((a, b) => a + b, 0) / times.length) };

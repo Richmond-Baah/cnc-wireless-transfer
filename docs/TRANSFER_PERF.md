@@ -36,7 +36,7 @@ Flash **013e997** (speed test, original data path) for "before" and **45ee39c** 
 | Commit | Change | Why |
 |---|---|---|
 | 4032953 | RX reads the whole 32 KB chunk, then one `fwrite` + one MD5; no `fsync` per chunk; a short body writes nothing and can be retried | was one `fwrite` per TCP read (1.4-16 KB) plus `fsync` (FAT + dir update) every 16 reads |
-| 4032953 | TX `X-Relay: stream`: chunk pieces go to the RX as they arrive from the browser | overlaps the two legs. Buffered is still the default (`RELAY_STREAM_DEFAULT`, file_transfer.c) until the speed test shows which is faster |
+| 4032953 | TX `X-Relay: stream`: chunk pieces go to the RX as they arrive from the browser | overlaps the two legs. Default since 2026-11-07 (`RELAY_STREAM_DEFAULT`, file_transfer.c): 2 MB speed test, one run via router, stream 286 KB/s vs buffered 231 KB/s |
 | bad0752 | TCP window and send buffer 5760 → 32768 on both boards; Wi-Fi RX buffers and BA windows ↑; TX CPU 160 → 240 MHz | a 5.7 KB window caps each TCP leg at about window / RTT |
 
 - **Step 4, receive the whole file first:** not possible. The TX has 2 MB of flash for the app and no filesystem for data, so it cannot hold a 50-900 MB file. Streaming vs store-and-forward is therefore compared per 32 KB chunk.
