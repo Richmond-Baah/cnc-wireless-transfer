@@ -1785,7 +1785,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function perfRow(leg, d) {
         const kbps = d.bytes / 1024 / (d.ms / 1000);
         $('perfTable').querySelector('tbody').insertAdjacentHTML('beforeend',
-            `<tr><td>${esc(leg)}</td><td>${esc(fmtBytes(kbps * 1024))}/s</td><td>${esc(fmtDuration(d.ms / 1000))}</td></tr>`);
+            `<tr><td>${esc(leg)}</td><td>${esc(fmtBytes(kbps * 1024))}/s</td><td>${esc(fmtDuration(d.ms / 1000))}${d.chunks ? '<br><span class="small muted">' + esc(t('perf.chunks', d.chunks)) + '</span>' : ''}</td></tr>`);
         $('perfTable').hidden = false;
     }
     async function perfJson(res) {
@@ -1803,14 +1803,20 @@ document.addEventListener('DOMContentLoaded', () => {
         const begin = await perfJson(await fetch('/upload_begin', { method: 'POST',
             headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId, 'X-Relay': relay }),
             body: JSON.stringify({ name, size, md5: spark.end() }) }));
+        const times = [];
         for (let i = 0, off = 0; off < size; i++, off += CHUNK_SIZE) {
+            const tc = performance.now();
             await sendChunk(begin.session, i, new Blob([block.subarray(0, Math.min(CHUNK_SIZE, size - off))]));
+            times.push(performance.now() - tc);
         }
+        console.log('perf chunk ms (' + relay + ')', times.map(Math.round).join(' '));
         await perfJson(await fetch('/upload_finish', { method: 'POST', headers: authHeaders({ 'X-Session': begin.session }) }));
         const ms = performance.now() - t0;
         await fetch('/receiver_delete', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json', 'X-Rx-Id': rxId }),
             body: JSON.stringify({ files: [name] }) }).catch(() => {});
-        return { bytes: size, ms };
+        const chunks = { min: Math.round(Math.min(...times)), max: Math.round(Math.max(...times)),
+            avg: Math.round(times.reduce((a, b) => a + b, 0) / times.length) };
+        return { bytes: size, ms, chunks };
     }
     $('perfBtn').addEventListener('click', async () => {
         const rxId = $('perfRx').value, size = Number($('perfSize').value);
@@ -1834,7 +1840,8 @@ document.addEventListener('DOMContentLoaded', () => {
             ['perf.sd', async () => perfJson(await fetch('/perf/sd?rx=' + encodeURIComponent(rxId), { method: 'POST',
                 headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ size }) }))],
             ['perf.full', async () => perfFull(rxId, size, 'buffered')],
-            ['perf.fullStream', async () => perfFull(rxId, size, 'stream')]
+            ['perf.fullStream', async () => perfFull(rxId, size, 'stream')],
+            ['perf.fullNoReuse', async () => perfFull(rxId, size, 'noreuse')]
         ];
         uploading = true; // keep the dashboard from starting a transfer meanwhile
         try {

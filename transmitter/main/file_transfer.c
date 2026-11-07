@@ -61,6 +61,7 @@ static struct {
   int64_t recv_total_us;   // browser -> TX (reading the chunk body)
   uint64_t next_log;       // acked bytes at which the next progress line is logged
   bool stream;             // X-Relay: stream (pieces forwarded as they arrive)
+  bool no_reuse;           // X-Relay: noreuse (control: new TCP connection per chunk)
   int relay_fd;            // stream mode: keep-alive socket to the receiver, -1 = none
 } s_up = {.relay_fd = -1};
 
@@ -75,9 +76,46 @@ static struct {
 static char *s_ka_resp;
 static size_t s_ka_cap, s_ka_len;
 
+// Timing of the chunk in flight
+#define CHUNK_LOG_ALL 64      // log every chunk of the first 2 MB, then only slow ones
+#define CHUNK_LOG_SLOW_MS 500
+static struct {
+  int64_t headers_sent_us; // headers written; the body follows
+  int64_t first_resp_us;   // first response header from the receiver
+  int got, recv_ms, write_ms, md5_ms, timeouts; // X-Rx-Timing; got = -1 if absent
+} s_ct;
+
+static void parse_rx_timing(const char *v) {
+  if (sscanf(v, "%d,%d,%d,%d,%d", &s_ct.got, &s_ct.recv_ms, &s_ct.write_ms, &s_ct.md5_ms, &s_ct.timeouts) != 5) {
+    s_ct.got = -1;
+  }
+}
+
+static void chunk_timing_reset(void) {
+  memset(&s_ct, 0, sizeof(s_ct));
+  s_ct.got = -1;
+}
+
+static void chunk_timing_log(const char *how, int index, int len, int64_t recv_us, int64_t fwd_us) {
+  int fwd_ms = (int)(fwd_us / 1000), recv_ms = (int)(recv_us / 1000);
+  if (index >= CHUNK_LOG_ALL && fwd_ms + recv_ms <= CHUNK_LOG_SLOW_MS) return;
+  ESP_LOGI(TAG, "CHUNK %d %s: sent %d B | browser->TX %d ms | TX->RX %d ms | RX got %d, recv %d, write %d, md5 %d ms, "
+                "%d timeouts | connects %d",
+           index, how, len, recv_ms, fwd_ms, s_ct.got, s_ct.recv_ms, s_ct.write_ms, s_ct.md5_ms, s_ct.timeouts,
+           s_up.connects);
+  if (s_ct.got >= 0 && s_ct.got != len) {
+    ESP_LOGW(TAG, "CHUNK %d: sent %d B but receiver read %d B", index, len, s_ct.got);
+  }
+}
+
 static esp_err_t chunk_client_event(esp_http_client_event_t *evt) {
   if (evt->event_id == HTTP_EVENT_ON_CONNECTED && evt->user_data) {
     (*(int *)evt->user_data)++;
+  } else if (evt->event_id == HTTP_EVENT_HEADERS_SENT) {
+    s_ct.headers_sent_us = esp_timer_get_time();
+  } else if (evt->event_id == HTTP_EVENT_ON_HEADER) {
+    if (!s_ct.first_resp_us) s_ct.first_resp_us = esp_timer_get_time();
+    if (strcasecmp(evt->header_key, "X-Rx-Timing") == 0) parse_rx_timing(evt->header_value);
   } else if (evt->event_id == HTTP_EVENT_ON_DATA && s_ka_resp && s_ka_len + 1 < s_ka_cap) {
     size_t n = evt->data_len < (int)(s_ka_cap - 1 - s_ka_len) ? evt->data_len : s_ka_cap - 1 - s_ka_len;
     memcpy(s_ka_resp + s_ka_len, evt->data, n);
@@ -242,6 +280,7 @@ static int begin_locked(const char *rx_id, const char *name, size_t size, const 
   }
 
   s_up.stream = relay ? strcmp(relay, "stream") == 0 : RELAY_STREAM_DEFAULT;
+  s_up.no_reuse = relay && strcmp(relay, "noreuse") == 0;
   snprintf(s_up.id, sizeof(s_up.id), "%08lx%08lx",
            (unsigned long)esp_random(), (unsigned long)esp_random());
   strlcpy(s_up.name, name, sizeof(s_up.name));
@@ -293,9 +332,19 @@ static int chunk_locked(const char *session, int index, const char *data, int le
   esp_http_client_set_header(s_up.chunk_client, "X-Chunk-Index", idx);
   esp_http_client_set_post_field(s_up.chunk_client, data, len);
 
+  chunk_timing_reset();
+  int connects_before = s_up.connects;
   int64_t t0 = esp_timer_get_time();
   esp_err_t err = esp_http_client_perform(s_up.chunk_client);
   int64_t rtt = esp_timer_get_time() - t0;
+  if (s_up.connects != connects_before && index > 0) {
+    ESP_LOGW(TAG, "Chunk %d: new TCP connection to the receiver (%d so far)", index, s_up.connects);
+  }
+  if (index < CHUNK_LOG_ALL || rtt > CHUNK_LOG_SLOW_MS * 1000) {
+    ESP_LOGI(TAG, "CHUNK %d TX->RX: send start, headers sent +%lld ms, response +%lld ms, done +%lld ms", index,
+             s_ct.headers_sent_us ? (long long)((s_ct.headers_sent_us - t0) / 1000) : -1LL,
+             s_ct.first_resp_us ? (long long)((s_ct.first_resp_us - t0) / 1000) : -1LL, (long long)(rtt / 1000));
+  }
   s_up.chunk_total_us += rtt;
   if (rtt > s_up.chunk_max_us) s_up.chunk_max_us = rtt;
   s_up.chunks++;
@@ -313,6 +362,9 @@ static int chunk_locked(const char *session, int index, const char *data, int le
     esp_http_client_close(s_up.chunk_client); // browser retry reconnects
     return status == 409 ? 409 : 502;
   }
+
+  chunk_timing_log("buffered", index, len, recv_us, rtt);
+  if (s_up.no_reuse) esp_http_client_close(s_up.chunk_client);
 
   if (index == s_up.next_index) {
     s_up.next_index++;
@@ -380,6 +432,7 @@ static int relay_response(int fd, bool *keep) {
   for (char *p = h; p < end; p = strstr(p, "\r\n") + 2) {
     if (strncasecmp(p, "Content-Length:", 15) == 0) body = atoi(p + 15);
     if (strncasecmp(p, "Connection: close", 17) == 0) *keep = false;
+    if (strncasecmp(p, "X-Rx-Timing:", 12) == 0) parse_rx_timing(p + 12);
   }
   body -= n - (int)(end + 4 - h); // body bytes already read with the header
   char sink[64];
@@ -434,6 +487,7 @@ static int chunk_stream_locked(const char *session, int index, int len, ft_read_
     done += n;
   }
   bool keep = true;
+  chunk_timing_reset();
   int status = ok ? relay_response(s_up.relay_fd, &keep) : -1;
   if (status != 200 || !keep) relay_close();
   int64_t fwd_us = esp_timer_get_time() - t0 - recv_us;
@@ -450,6 +504,7 @@ static int chunk_stream_locked(const char *session, int index, int len, ft_read_
     ESP_LOGW(TAG, "%s", msg);
     return status == 409 ? 409 : 502;
   }
+  chunk_timing_log("stream", index, len, recv_us, fwd_us);
   if (index == s_up.next_index) {
     s_up.next_index++;
     s_up.acked += len;

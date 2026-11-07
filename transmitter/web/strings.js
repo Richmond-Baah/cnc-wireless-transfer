@@ -348,6 +348,8 @@ window.STRINGS = {
     'perf.sd': 'Machine SD card write',
     'perf.full': 'Full transfer (buffered relay)',
     'perf.fullStream': 'Full transfer (streaming relay)',
+    'perf.fullNoReuse': 'Full transfer (new connection per chunk)',
+    'perf.chunks': 'per chunk: {min} / {avg} / {max} ms (min / avg / max)',
     'perf.running': 'Running: {leg}…',
     'perf.done': 'Done. Results are also in the transmitter log (PERF lines).',
     'perf.failed': '{leg} failed: {why}'

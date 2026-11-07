@@ -254,6 +254,8 @@ static bool read_full_body(httpd_req_t *req, char *buf, size_t cap) {
   while (got < req->content_len) {
     int r = httpd_req_recv(req, buf + got, req->content_len - got);
     if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+      ESP_LOGW(TAG, "%s: recv timeout #%d at %u of %u bytes", req->uri, timeouts + 1, (unsigned)got,
+               (unsigned)req->content_len);
       if (++timeouts >= BODY_RECV_TIMEOUTS) {
         return false;
       }
@@ -358,7 +360,10 @@ static int relay_read(void *ctx, char *buf, int len) {
   httpd_req_t *req = (httpd_req_t *)ctx;
   for (int timeouts = 0;;) {
     int r = httpd_req_recv(req, buf, len);
-    if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < BODY_RECV_TIMEOUTS) continue;
+    if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+      ESP_LOGW(TAG, "%s: recv timeout #%d (stream relay)", req->uri, timeouts + 1);
+      if (++timeouts < BODY_RECV_TIMEOUTS) continue;
+    }
     return r;
   }
 }

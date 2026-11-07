@@ -56,6 +56,8 @@ static struct {
     uint64_t next_log;    // bytes at which the next progress line is logged
 } s_tm;
 static int s_reattach_ms = -1; // last transfer: /finalize reply -> drive back on USB (-1 = not yet)
+#define CHUNK_LOG_ALL 64       // log every chunk of the first 2 MB, then only slow ones
+#define CHUNK_LOG_SLOW_MS 500
 #define RX_KBPS(bytes, us) ((us) > 0 ? (double)(bytes) / 1024.0 / ((double)(us) / 1e6) : 0.0)
 #define TM_START() int64_t _tm0 = esp_timer_get_time()
 #define TM_ADD(field) (s_tm.field += esp_timer_get_time() - _tm0, _tm0 = esp_timer_get_time())
@@ -590,10 +592,15 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         return ESP_OK;
     }
     TM_START();
-    int got = 0;
+    int64_t t_recv = _tm0;
+    int got = 0, recv_timeouts = 0;
     while (got < len) {
         int read_len = httpd_req_recv(req, chunk_buf + got, len - got);
-        if (read_len == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (read_len == HTTPD_SOCK_ERR_TIMEOUT) {
+            recv_timeouts++;
+            ESP_LOGW(TAG, "Chunk %ld: recv timeout #%d at %d of %d bytes", chunk_index, recv_timeouts, got, len);
+            continue;
+        }
         if (read_len <= 0) {
             ESP_LOGW(TAG, "Chunk %ld: body ended after %d of %d bytes; not written, retry expected",
                      chunk_index, got, len);
@@ -602,6 +609,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         got += read_len;
     }
     TM_ADD(recv);
+    int64_t t_write = _tm0;
 
     size_t written = fwrite(chunk_buf, 1, len, active_file);
     if ((int)written != len) {
@@ -611,6 +619,7 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     TM_ADD(write);
+    int64_t t_md5 = _tm0;
 
     mbedtls_md5_update(&active_md5_ctx, (const unsigned char *)chunk_buf, len);
     TM_ADD(md5);
@@ -622,6 +631,18 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
         ESP_LOGI(TAG, "RX %llu KB: recv %.0f KB/s, SD write %.0f KB/s, md5 %.0f KB/s",
                  (unsigned long long)(s_tm.bytes / 1024), RX_KBPS(s_tm.bytes, s_tm.recv),
                  RX_KBPS(s_tm.bytes, s_tm.write), RX_KBPS(s_tm.bytes, s_tm.md5));
+    }
+
+    // Per-chunk timing, also returned to the TX because the RX console is UART only.
+    // "got,recv_ms,write_ms,md5_ms,recv_timeouts"
+    int recv_ms = (int)((t_write - t_recv) / 1000), write_ms = (int)((t_md5 - t_write) / 1000);
+    int md5_ms = (int)((_tm0 - t_md5) / 1000);
+    char timing[48];
+    snprintf(timing, sizeof(timing), "%d,%d,%d,%d,%d", got, recv_ms, write_ms, md5_ms, recv_timeouts);
+    httpd_resp_set_hdr(req, "X-Rx-Timing", timing);
+    if (chunk_index < CHUNK_LOG_ALL || recv_ms + write_ms + md5_ms > CHUNK_LOG_SLOW_MS) {
+        ESP_LOGI(TAG, "CHUNK %ld: recv complete %d of %d B in %d ms (%d timeouts), write %d ms, md5 %d ms",
+                 chunk_index, got, len, recv_ms, recv_timeouts, write_ms, md5_ms);
     }
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
