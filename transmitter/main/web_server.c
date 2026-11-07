@@ -14,6 +14,7 @@
 #include "ui_prefs.h"
 #include "coredump_http.h"
 #include "fw_update.h"
+#include "stack_audit.h"
 #include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -891,6 +892,24 @@ static esp_err_t rx_heartbeat_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+#ifdef FILEXFER_STACK_AUDIT
+// POST /rx/stacks (debug builds): a receiver's stack report, for this log.
+static esp_err_t rx_stacks_handler(httpd_req_t *req) {
+  static char body[1024]; // httpd task only
+  if (req->content_len <= 0 || req->content_len >= (int)sizeof(body) ||
+      !read_full_body(req, body, sizeof(body) - 1)) {
+    send_status_text(req, 400, "Invalid report");
+    return ESP_OK;
+  }
+  body[req->content_len] = '\0';
+  stack_audit_log_report("rx", body);
+  httpd_resp_set_hdr(req, "Connection", "close");
+  httpd_resp_sendstr(req, "{}");
+  httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+  return ESP_OK;
+}
+#endif
+
 // GET /rx/config (receiver auth: X-Rx-Id + X-Auth-Key): AP credentials.
 static esp_err_t rx_config_handler(httpd_req_t *req) {
   char id[RX_ID_LEN] = {0};
@@ -1306,8 +1325,9 @@ static esp_err_t radio_get_handler(httpd_req_t *req) {
     return ESP_OK;
   }
   char out[128];
-  snprintf(out, sizeof(out), "{\"saved\":%d,\"actual\":%d,\"brownouts\":%lu,\"reset_reason\":\"%s\"}", radio_power_saved(),
-           radio_power_actual(), (unsigned long)radio_brownouts(), radio_reset_reason());
+  snprintf(out, sizeof(out), "{\"saved\":%d,\"actual\":%d,\"brownouts\":%lu,\"reset_reason\":\"%s\",\"coredump\":%s}",
+           radio_power_saved(), radio_power_actual(), (unsigned long)radio_brownouts(), radio_reset_reason(),
+           coredump_http_present() ? "true" : "false");
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_sendstr(req, out);
   return ESP_OK;
@@ -1489,6 +1509,49 @@ static esp_err_t coredump_get_handler(httpd_req_t *req) {
     return ESP_OK;
   }
   return coredump_http_send(req, "transmitter-coredump.bin");
+}
+
+// POST /coredump/clear: erases this transmitter's crash report.
+static esp_err_t coredump_clear_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char active[RX_ID_LEN];
+  if (file_transfer_active_rx(active, sizeof(active))) { // the flash erase would stall it
+    send_status_text(req, 409, "A file transfer is running");
+    return ESP_OK;
+  }
+  if (coredump_http_clear() != ESP_OK) {
+    send_status_text(req, 500, "Couldn't erase the crash report");
+    return ESP_OK;
+  }
+  httpd_resp_set_type(req, "application/json; charset=utf-8");
+  httpd_resp_sendstr(req, "{}");
+  return ESP_OK;
+}
+
+// POST /receiver_coredump/clear?rx=<id>: the receiver erases its crash report.
+static esp_err_t receiver_coredump_clear_handler(httpd_req_t *req) {
+  if (!is_authorized(req)) {
+    send_status_text(req, 401, "Unauthorized");
+    return ESP_OK;
+  }
+  char id[RX_ID_LEN];
+  rx_target_t rx;
+  bool known = false;
+  if (!get_rx_id(req, id, sizeof(id)) || !rx_registry_target(id, &rx, &known)) {
+    send_status_text(req, known ? 503 : 404, known ? "Machine is offline" : "Unknown machine");
+    return ESP_OK;
+  }
+  int status = rx_http(&rx, HTTP_METHOD_POST, "/coredump/clear", "{}", false, 5000, s_rx_resp, sizeof(s_rx_resp), NULL);
+  if (status == 200) {
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, "{}");
+  } else {
+    send_status_text(req, status < 0 ? 502 : status, s_rx_resp[0] ? s_rx_resp : "Machine did not answer");
+  }
+  return ESP_OK;
 }
 
 static esp_err_t receiver_coredump_handler(httpd_req_t *req) {
@@ -1830,6 +1893,8 @@ static const route_t s_routes[] = {
     {"/api/ui.js", HTTP_GET, api_ui_get_handler, RT_SYNC},
     {"/api/ui", HTTP_POST, api_ui_post_handler, RT_SYNC},
     {"/coredump", HTTP_GET, coredump_get_handler, RT_RX},
+    {"/coredump/clear", HTTP_POST, coredump_clear_handler, RT_RX},
+    {"/receiver_coredump/clear", HTTP_POST, receiver_coredump_clear_handler, RT_RX},
     {"/fw/begin", HTTP_POST, fw_begin_handler, RT_UPLOAD},
     {"/fw/chunk", HTTP_POST, fw_chunk_handler, RT_UPLOAD},
     {"/fw/finish", HTTP_POST, fw_finish_handler, RT_UPLOAD},
@@ -1843,6 +1908,9 @@ static const route_t s_routes[] = {
     // Receivers
     {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler, RT_SYNC},
     {"/rx/config", HTTP_GET, rx_config_handler, RT_SYNC},
+#ifdef FILEXFER_STACK_AUDIT
+    {"/rx/stacks", HTTP_POST, rx_stacks_handler, RT_SYNC},
+#endif
 };
 #define NUM_ROUTES (sizeof(s_routes) / sizeof(s_routes[0]))
 

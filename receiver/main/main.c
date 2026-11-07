@@ -5,7 +5,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "radio_power.h"
+#include "coredump_http.h"
 #include "fw_update.h"
+#include "stack_audit.h"
 #include "led.h"
 #include "nvs_flash.h"
 #include "state_machine.h"
@@ -24,20 +26,9 @@
 static const char *TAG = "MAIN";
 
 
-static void usb_debug_task(void *param) {
-    (void)param;
-    uint32_t count = 0;
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        count++;
-        ESP_LOGI(TAG, "DEBUG #%lu: Heap=%u, USB=%s", 
-                 count, (unsigned)esp_get_free_heap_size(),
-                 usb_msc_is_host_mounted() ? "MOUNTED" : "NOT_MOUNTED");
-    }
-}
-
 void app_main(void) {
     ESP_LOGI(TAG, "========== BOOT START ==========");
+    coredump_http_present(); // checked once, on this roomy stack
     
     ESP_LOGI(TAG, "Step 1: NVS init...");
     esp_err_t ret = nvs_flash_init();
@@ -86,12 +77,11 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "Step 7b: Heartbeat + BOOT-button tasks...");
     pairing_start_tasks();
+#ifdef FILEXFER_STACK_AUDIT
+    stack_audit_start("rx", pairing_stack_report);
+#endif
     espnow_pair_start(); // "Add machine" radio pairing while unpaired
     ESP_LOGI(TAG, "Step 7b: DONE");
-
-    ESP_LOGI(TAG, "Step 8: Creating debug task...");
-    xTaskCreate(usb_debug_task, "usb_debug", 2048, NULL, 3, NULL);
-    ESP_LOGI(TAG, "Step 8: DONE");
 
     ESP_LOGI(TAG, "Step 8b: Preparing storage for USB MSC...");
     storage_manager_prepare_for_usb();

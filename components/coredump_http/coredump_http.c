@@ -6,6 +6,24 @@
 
 static const char *TAG = "COREDUMP";
 
+static int s_present = -1; // -1 = not checked yet
+
+bool coredump_http_present(void) {
+  if (s_present < 0) s_present = esp_core_dump_image_check() == ESP_OK;
+  return s_present == 1;
+}
+
+esp_err_t coredump_http_clear(void) {
+  esp_err_t err = esp_core_dump_image_erase();
+  if (err == ESP_OK) {
+    s_present = 0;
+    ESP_LOGI(TAG, "Core dump erased");
+  } else {
+    ESP_LOGE(TAG, "Core dump erase failed: %s", esp_err_to_name(err));
+  }
+  return err;
+}
+
 esp_err_t coredump_http_send(httpd_req_t *req, const char *filename) {
   size_t addr = 0, size = 0;
   if (esp_core_dump_image_check() != ESP_OK || esp_core_dump_image_get(&addr, &size) != ESP_OK ||

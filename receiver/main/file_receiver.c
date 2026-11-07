@@ -868,6 +868,7 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddNumberToObject(obj, "qdbm", radio_power_actual());
     cJSON_AddNumberToObject(obj, "brownouts", radio_brownouts());
     cJSON_AddStringToObject(obj, "reset_reason", radio_reset_reason());
+    cJSON_AddBoolToObject(obj, "coredump", coredump_http_present());
     cJSON_AddNumberToObject(obj, "uptime_s", (double)(esp_timer_get_time() / 1000000));
 }
 
@@ -1180,6 +1181,30 @@ static esp_err_t coredump_get_handler(httpd_req_t *req) {
         return ESP_OK;
     }
     return coredump_http_send(req, "receiver-coredump.bin");
+}
+
+// POST /coredump/clear: erases the saved crash report.
+static esp_err_t coredump_clear_handler(httpd_req_t *req) {
+    if (reject_unauthorized(req)) return ESP_OK;
+    drain_request_body(req);
+    if (!pairing_is_paired()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "Not paired");
+        return ESP_OK;
+    }
+    if (state_machine_get() == STATE_RECEIVING) { // the flash erase would stall it
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "A file transfer is running");
+        return ESP_OK;
+    }
+    if (coredump_http_clear() != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "Couldn't erase the crash report");
+        return ESP_OK;
+    }
+    pairing_heartbeat_now(); // the transmitter's flag follows at once
+    httpd_resp_sendstr(req, "{}");
+    return ESP_OK;
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req) {
@@ -1616,6 +1641,7 @@ void file_receiver_init(void) {
         httpd_uri_t uri_perf_source = {.uri = "/perf/source", .method = HTTP_GET, .handler = perf_source_handler};
         httpd_uri_t uri_radio = {.uri = "/radio", .method = HTTP_POST, .handler = radio_post_handler};
         httpd_uri_t uri_coredump = {.uri = "/coredump", .method = HTTP_GET, .handler = coredump_get_handler};
+        httpd_uri_t uri_coredump_clear = {.uri = "/coredump/clear", .method = HTTP_POST, .handler = coredump_clear_handler};
         httpd_uri_t uri_fw_begin = {.uri = "/fw/begin", .method = HTTP_POST, .handler = fw_begin_handler};
         httpd_uri_t uri_fw_chunk = {.uri = "/fw/chunk", .method = HTTP_POST, .handler = fw_chunk_handler};
         httpd_uri_t uri_fw_finish = {.uri = "/fw/finish", .method = HTTP_POST, .handler = fw_finish_handler};
@@ -1639,6 +1665,7 @@ void file_receiver_init(void) {
         httpd_register_uri_handler(server, &uri_perf_source);
         httpd_register_uri_handler(server, &uri_radio);
         httpd_register_uri_handler(server, &uri_coredump);
+        httpd_register_uri_handler(server, &uri_coredump_clear);
         httpd_register_uri_handler(server, &uri_fw_begin);
         httpd_register_uri_handler(server, &uri_fw_chunk);
         httpd_register_uri_handler(server, &uri_fw_finish);

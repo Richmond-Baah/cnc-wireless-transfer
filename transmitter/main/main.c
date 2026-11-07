@@ -12,6 +12,8 @@
 #include "ui_prefs.h"
 #include "boot_button.h"
 #include "fw_update.h"
+#include "coredump_http.h"
+#include "stack_audit.h"
 
 static const char *TAG = "MAIN";
 
@@ -32,6 +34,7 @@ static void boot_fired(void) {
 
 void app_main(void)
 {
+    coredump_http_present(); // checked once, on this roomy stack
     ESP_LOGI(TAG, "Starting CNC Transmitter Firmware");
 
     // 1. Initialize NVS (used for Wi-Fi credentials and app state)
@@ -61,6 +64,9 @@ void app_main(void)
     // otherwise (or after a crash before this) the bootloader rolls back.
     fw_update_confirm_boot(wifi_err == ESP_OK && web_err == ESP_OK);
     boot_button_start(BOOT_HOLD_MS, boot_pressed, boot_fired);
+#ifdef FILEXFER_STACK_AUDIT
+    stack_audit_start("tx", NULL);
+#endif
 
     ESP_LOGI(TAG, "Transmitter Init Complete. Free Heap: %u", (unsigned)esp_get_free_heap_size());
 }

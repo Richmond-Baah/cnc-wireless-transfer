@@ -35,5 +35,8 @@ void pairing_start_tasks(void);
 
 // Sends the next heartbeat now instead of at the 10 s tick (state just changed).
 void pairing_heartbeat_now(void);
+#ifdef FILEXFER_STACK_AUDIT
+void pairing_stack_report(const char *text); // sent to the transmitter's log
+#endif
 
 #endif // PAIRING_H

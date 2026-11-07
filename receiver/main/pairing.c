@@ -230,6 +230,13 @@ void pairing_heartbeat_now(void) {
   if (s_heartbeat_task) xTaskNotifyGive(s_heartbeat_task);
 }
 
+#ifdef FILEXFER_STACK_AUDIT
+void pairing_stack_report(const char *text) {
+  char resp[16];
+  tx_request(HTTP_METHOD_POST, "/rx/stacks", text, resp, sizeof(resp));
+}
+#endif
+
 static void heartbeat_task(void *arg) {
   (void)arg;
   char resp[160];

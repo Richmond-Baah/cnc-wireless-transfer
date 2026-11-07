@@ -51,6 +51,7 @@ typedef struct {
   rx_reset_t rst;       // brownouts: receiver's count since it was flashed
   double uptime_s;      // last heartbeat, to spot receiver restarts
   bool uptime_known;    // uptime_s came from a heartbeat since this boot
+  bool coredump;        // receiver has a crash report saved
   bool rd_seen;         // receiver has sent a host read summary
   int rd_n, rd_meta, rd_data, rd_other; // sectors in its last 10 s, rd_n = reads
   char rd_file[33];
@@ -348,6 +349,8 @@ static void apply_status_locked(rx_entry_t *e, const cJSON *o) {
   if (cJSON_IsBool(v)) e->card_error = cJSON_IsTrue(v);
   v = cJSON_GetObjectItemCaseSensitive(o, "busy");
   if (cJSON_IsBool(v)) e->busy = cJSON_IsTrue(v);
+  v = cJSON_GetObjectItemCaseSensitive(o, "coredump");
+  if (cJSON_IsBool(v)) e->coredump = cJSON_IsTrue(v);
 }
 
 static bool id_is_valid(const char *id) {
@@ -547,6 +550,7 @@ static void add_entry_fields_locked(const rx_entry_t *e, cJSON *o) {
   cJSON_AddNumberToObject(o, "rssi", e->rssi);
   cJSON_AddNumberToObject(o, "brownouts", e->rst.brownouts);
   cJSON_AddStringToObject(o, "rst_reason", e->rst.reason);
+  cJSON_AddBoolToObject(o, "coredump", e->coredump);
   // Seconds since the receiver started: from its uptime, else the saved time
   double rst_ago = -1;
   time_t now_s = time(NULL);

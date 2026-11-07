@@ -132,6 +132,7 @@
                             <p id="txSub" class="muted small"></p>
                             <p id="txReads" class="muted small" hidden></p>
                             <p id="txRestart" class="muted small" hidden></p>
+                            <p id="txCrash" class="muted small" hidden></p>
                         </div>
                         <span id="txPill" class="pill" hidden></span>
                     </div>
@@ -396,7 +397,9 @@
                         <div class="confirm-actions">
                             <select id="crashDevice"></select>
                             <button type="button" id="crashBtn" class="btn" data-t="sys.crashBtn"></button>
+                            <button type="button" id="crashClear" class="btn" data-t="sys.crashClear" hidden></button>
                         </div>
+                        <p id="crashInfo" class="small muted"></p>
                         <p id="crashStatus" class="form-status small" hidden></p>
                     </div>
                 </section>

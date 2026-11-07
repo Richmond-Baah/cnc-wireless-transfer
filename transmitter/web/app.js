@@ -588,6 +588,7 @@ document.addEventListener('DOMContentLoaded', () => {
             $('txSub').textContent = t('tx.noMachine.why');
             $('txReads').hidden = true;
             $('txRestart').hidden = true;
+            $('txCrash').hidden = true;
             pill.hidden = true;
         } else {
             $('txName').textContent = v.name;
@@ -604,6 +605,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const restart = restartText(v);
             $('txRestart').hidden = !restart;
             $('txRestart').textContent = restart;
+            $('txCrash').hidden = !v.coredump;
+            $('txCrash').textContent = t('tx.crash');
             const [pcls, ptxt] = pillFor(v);
             pill.className = pcls;
             pill.textContent = ptxt;
@@ -1694,19 +1697,58 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Crash report (core dump) download: transmitter or a machine
+    let txCrash = false;       // this transmitter has a crash report (GET /radio)
+    const crashSaved = (id) => id ? !!(receivers.find(r => r.id === id) || {}).coredump : txCrash;
+    const crashName = (id) => id ? ((r) => r ? r.name || r.id : id)(receivers.find(r => r.id === id)) : t('sys.crashTx');
+    function crashLabel(id) {
+        return crashSaved(id) ? t('sys.crashOption', { name: crashName(id) }) : crashName(id);
+    }
+    function renderCrashInfo() {
+        const id = $('crashDevice').value;
+        $('crashInfo').textContent = t(crashSaved(id) ? 'sys.crashSaved' : 'sys.crashNone', { name: crashName(id) });
+    }
     function renderCrashSelect() {
         const sel = $('crashDevice');
         const keep = sel.value;
-        sel.innerHTML = `<option value="">${esc(t('sys.crashTx'))}</option>` +
-            receivers.map(r => `<option value="${esc(r.id)}">${esc(r.name || r.id)}</option>`).join('');
+        sel.innerHTML = `<option value="">${esc(crashLabel(''))}</option>` +
+            receivers.map(r => `<option value="${esc(r.id)}">${esc(crashLabel(r.id))}</option>`).join('');
         sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
+        renderCrashInfo();
     }
+    $('crashDevice').addEventListener('change', () => {
+        $('crashClear').hidden = true; // offered only for the report just downloaded
+        formStatus($('crashStatus'), '');
+        renderCrashInfo();
+    });
+    $('crashClear').addEventListener('click', async () => {
+        const id = $('crashDevice').value;
+        const name = crashName(id);
+        const st = $('crashStatus');
+        $('crashClear').disabled = true;
+        try {
+            const res = await fetch(id ? '/receiver_coredump/clear?rx=' + encodeURIComponent(id) : '/coredump/clear',
+                { method: 'POST', headers: authHeaders() });
+            if (res.ok) {
+                if (id) receivers.find(r => r.id === id).coredump = false;
+                else txCrash = false;
+                $('crashClear').hidden = true;
+                renderCrashSelect();
+                formStatus(st, t('sys.crashCleared', { name }), 'ok');
+            } else {
+                formStatus(st, t('sys.crashClearFailed', { why: await errorText(res) }), 'err');
+            }
+        } catch (e) {
+            formStatus(st, t('sys.crashClearFailed', { why: t('msg.fail.network') }), 'err');
+        }
+        $('crashClear').disabled = false;
+    });
     $('crashBtn').addEventListener('click', async () => {
         const sel = $('crashDevice');
         const id = sel.value;
-        const name = sel.options[sel.selectedIndex].text;
+        const name = crashName(id);
         const st = $('crashStatus');
         $('crashBtn').disabled = true;
+        $('crashClear').hidden = true;
         try {
             const res = await fetch(id ? '/receiver_coredump?rx=' + encodeURIComponent(id) : '/coredump',
                 { headers: authHeaders() });
@@ -1717,6 +1759,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 a.click();
                 URL.revokeObjectURL(a.href);
                 formStatus(st, t('sys.crashDone', { name }), 'ok');
+                $('crashClear').hidden = false;
             } else {
                 const why = await errorText(res);
                 const none = res.status === 404 && why.startsWith('No crash');
@@ -1948,6 +1991,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const d = await res.json();
             $('radioLevel').value = String(d.saved);
             $('radioInfo').textContent = t('radio.info', { dbm: radioDbm(d.saved), reason: d.reset_reason, n: d.brownouts });
+            txCrash = !!d.coredump;
+            renderCrashSelect();
         } catch (e) { /* shown again on the next visit */ }
     }
     $('radioSave').addEventListener('click', async () => {

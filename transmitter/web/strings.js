@@ -73,6 +73,7 @@ window.STRINGS = {
     'tx.agoS': '{n} s ago',
     'tx.agoMin': '{n} min ago',
     'tx.agoH': '{n} h ago',
+    'tx.crash': 'Crash report saved. Get it in Settings › System.',
     'tx.noMachine': 'No machine selected',
     'tx.noMachine.why': 'Choose a machine on the left, or add one.',
 
@@ -388,6 +389,11 @@ window.STRINGS = {
     'sys.crashTx': 'Transmitter',
     'sys.crashBtn': 'Download',
     'sys.crashNone': 'No crash report saved on {name}.',
+    'sys.crashSaved': 'Crash report saved on {name}.',
+    'sys.crashOption': '{name} · crash report saved',
+    'sys.crashClear': 'Clear from device',
+    'sys.crashCleared': 'Crash report cleared from {name}.',
+    'sys.crashClearFailed': 'Couldn\'t clear the crash report: {why}',
     'sys.crashDone': 'Crash report from {name} downloaded.',
     'sys.crashFailed': 'Couldn\'t get the crash report: {why}'
 };
