@@ -24,6 +24,13 @@ static const char *TAG = "RX_REG";
 #define EPOCH_VALID 1700000000LL // clock below this = never set
 #define EPOCH_SAVE_US (30LL * 60 * 1000 * 1000)
 
+// Receiver's last restart, in NVS under the receiver's id
+typedef struct {
+  char reason[12]; // radio_reset_reason() on the receiver
+  int32_t brownouts;
+  int64_t epoch;   // when it started, 0 = transmitter clock unknown
+} rx_reset_t;
+
 typedef struct {
   // persisted
   char id[RX_ID_LEN];
@@ -41,8 +48,9 @@ typedef struct {
   int reattach_ms;      // last transfer, reported by the receiver (-1 = not yet)
   int host_ms;
   int rssi;             // at the receiver, dBm (0 = unknown)
-  int brownouts;        // receiver's count since it was flashed
+  rx_reset_t rst;       // brownouts: receiver's count since it was flashed
   double uptime_s;      // last heartbeat, to spot receiver restarts
+  bool uptime_known;    // uptime_s came from a heartbeat since this boot
   bool rd_seen;         // receiver has sent a host read summary
   int rd_n, rd_meta, rd_data, rd_other; // sectors in its last 10 s, rd_n = reads
   char rd_file[33];
@@ -220,6 +228,10 @@ void rx_registry_init(void) {
         strlcpy(s_rx[i].id, saved[i].id, sizeof(s_rx[i].id));
         strlcpy(s_rx[i].name, saved[i].name, sizeof(s_rx[i].name));
         strlcpy(s_rx[i].key, saved[i].key, sizeof(s_rx[i].key));
+        size_t rlen = sizeof(s_rx[i].rst);
+        if (nvs_get_blob(h, s_rx[i].id, &s_rx[i].rst, &rlen) != ESP_OK || rlen != sizeof(s_rx[i].rst)) {
+          memset(&s_rx[i].rst, 0, sizeof(s_rx[i].rst));
+        }
       }
     }
     nvs_get_u32(h, "cfg_ver", &s_cfg_ver);
@@ -309,7 +321,6 @@ static void apply_status_locked(rx_entry_t *e, const cJSON *o) {
   e->reattach_ms = (int)json_num(o, "reattach_ms", e->reattach_ms);
   e->host_ms = (int)json_num(o, "host_ms", e->host_ms);
   e->rssi = (int)json_num(o, "rssi", e->rssi);
-  e->brownouts = (int)json_num(o, "brownouts", e->brownouts);
   if ((s = json_str(o, "rd_file"))) {
     strlcpy(e->rd_file, s, sizeof(e->rd_file));
     e->rd_n = (int)json_num(o, "rd_n", 0);
@@ -327,6 +338,39 @@ static void apply_status_locked(rx_entry_t *e, const cJSON *o) {
 static bool id_is_valid(const char *id) {
   return id && strlen(id) > 3 && strlen(id) < RX_ID_LEN && strncmp(id, "rx-", 3) == 0 &&
          strspn(id + 3, "0123456789abcdef") == strlen(id + 3);
+}
+
+// The receiver's console is UART only, so its restarts are recorded here.
+// Called with the lock held, before last_seen_us is updated.
+static void note_reset_locked(rx_entry_t *e, const cJSON *hb) {
+  double uptime = json_num(hb, "uptime_s", -1);
+  const char *why = json_str(hb, "reset_reason");
+  if (uptime < 0 || why == NULL) return; // older receiver firmware
+  bool back = e->uptime_known && uptime < e->uptime_s;
+  bool first = !e->uptime_known;
+  e->uptime_s = uptime;
+  e->uptime_known = true;
+  if (!first && !back) return;
+
+  int brownouts = (int)json_num(hb, "brownouts", -1);
+  ESP_LOGW(TAG, "%s restart check: %s, uptime %.0f s, last reset: %s, brownouts %d", e->id,
+           back ? "UPTIME WENT BACKWARDS" : "first heartbeat", uptime, why, brownouts);
+  time_t now = time(NULL);
+  int64_t epoch = now > EPOCH_VALID ? (int64_t)now - (int64_t)uptime : 0;
+  // A transmitter restart repeats the same record: leave NVS alone
+  if (!back && strcmp(e->rst.reason, why) == 0 && e->rst.brownouts == brownouts &&
+      (epoch == 0 || (e->rst.epoch && llabs(e->rst.epoch - epoch) < 300))) {
+    return;
+  }
+  strlcpy(e->rst.reason, why, sizeof(e->rst.reason));
+  e->rst.brownouts = brownouts;
+  e->rst.epoch = epoch;
+  nvs_handle_t h;
+  if (nvs_open(RX_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+    nvs_set_blob(h, e->id, &e->rst, sizeof(e->rst));
+    nvs_commit(h);
+    nvs_close(h);
+  }
 }
 
 bool rx_registry_heartbeat(const cJSON *hb) {
@@ -347,14 +391,7 @@ bool rx_registry_heartbeat(const cJSON *hb) {
     if (e->last_seen_us == 0 || !is_online(e->last_seen_us)) {
       ESP_LOGI(TAG, "%s (%s) online at %s", e->id, e->name, ip);
     }
-    // The receiver's console is UART only, so its restarts are logged here
-    double uptime = json_num(hb, "uptime_s", -1);
-    const char *why = json_str(hb, "reset_reason");
-    if (e->last_seen_us == 0 || (uptime >= 0 && uptime < e->uptime_s)) {
-      ESP_LOGW(TAG, "%s restart check: uptime %.0f s (was %.0f s), last reset: %s, brownouts %d", e->id, uptime,
-               e->uptime_s, why ? why : "?", (int)json_num(hb, "brownouts", -1));
-    }
-    if (uptime >= 0) e->uptime_s = uptime;
+    note_reset_locked(e, hb);
     strlcpy(e->ip, ip, sizeof(e->ip));
     apply_status_locked(e, hb);
     e->last_seen_us = now;
@@ -369,6 +406,7 @@ bool rx_registry_heartbeat(const cJSON *hb) {
     rx_entry_t *e = &s_rx[i];
     strlcpy(e->name, s_prereg[pr].name, sizeof(e->name));
     strlcpy(e->key, s_prereg[pr].key, sizeof(e->key));
+    note_reset_locked(e, hb);
     strlcpy(e->ip, ip, sizeof(e->ip));
     apply_status_locked(e, hb);
     e->last_seen_us = now;
@@ -492,7 +530,17 @@ static void add_entry_fields_locked(const rx_entry_t *e, cJSON *o) {
   cJSON_AddNumberToObject(o, "reattach_ms", e->reattach_ms);
   cJSON_AddNumberToObject(o, "host_ms", e->host_ms);
   cJSON_AddNumberToObject(o, "rssi", e->rssi);
-  cJSON_AddNumberToObject(o, "brownouts", e->brownouts);
+  cJSON_AddNumberToObject(o, "brownouts", e->rst.brownouts);
+  cJSON_AddStringToObject(o, "rst_reason", e->rst.reason);
+  // Seconds since the receiver started: from its uptime, else the saved time
+  double rst_ago = -1;
+  time_t now_s = time(NULL);
+  if (e->uptime_known) {
+    rst_ago = e->uptime_s + (double)((esp_timer_get_time() - e->last_seen_us) / 1000000);
+  } else if (e->rst.epoch && now_s > EPOCH_VALID && (int64_t)now_s >= e->rst.epoch) {
+    rst_ago = (double)((int64_t)now_s - e->rst.epoch);
+  }
+  cJSON_AddNumberToObject(o, "rst_ago_s", rst_ago);
   if (e->rd_seen) {
     cJSON *rd = cJSON_AddObjectToObject(o, "reads");
     if (rd) {
@@ -765,6 +813,12 @@ int rx_registry_unpair(const char *id, char *msg, size_t msg_len) {
     memmove(&s_rx[i], &s_rx[i + 1], sizeof(rx_entry_t) * (s_rx_count - i - 1));
     s_rx_count--;
     save_locked();
+    nvs_handle_t h;
+    if (nvs_open(RX_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+      nvs_erase_key(h, id);
+      nvs_commit(h);
+      nvs_close(h);
+    }
   }
   unlock();
   ESP_LOGI(TAG, "Unpaired %s%s", id, online ? "" : " (offline: hold its BOOT 10 s to reset it)");

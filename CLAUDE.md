@@ -2,6 +2,7 @@
 ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFER-<last 4 MAC hex>" 192.168.4.1 (factory/recovery SSID "CNC_WIRELESS"), http://filexfer.local (alias cnc-transfer.local), web UI + auth, forwards uploads. Receiver: Wi-Fi client (DHCP), USB mass-storage drive for CNC/laser/printer, SD over SPI (fallback: internal flash).
 - Receiver ID "rx-"+last 3 MAC bytes; heartbeat POST <gateway>/rx/heartbeat every 10 s (receiver/main/pairing.c).
 - Transmitter rx_registry: paired list (id, name, key) in NVS, pending list in RAM, online = heartbeat within 35 s (3 missed + 5 s).
+- Receiver restarts: TX keeps last reset reason/time/brownouts per machine (NVS key = rx id), from heartbeat uptime_s; shown on the machine card and in failed-transfer details. Running for less time than the transfer took = "Receiver restarted during transfer".
 - UI selects a machine; every receiver proxy takes X-Rx-Id (or ?rx=) and sends that receiver's X-Auth-Key.
 - Add machine (ESP-NOW, components/pair_proto): UI opens 120 s window; unpaired off-Wi-Fi receiver bursts PAIR_REQ ch 1-13 every ~3 s; approve -> PAIR_CFG (X25519+AES-GCM: AP creds, key, tx id, name); key is pre-registered on tx and provisional on rx until a heartbeat confirms (3 rejects -> rx drops it).
 - Pairing file: UI "Download pairing file" -> pair.cfg {v,ssid,pass,key,tx_id,name,expiry}; key pre-registered 24 h (NVS, clock from browser); receiver reads+deletes /pair.cfg at boot before USB, pairs provisionally; expiry enforced by transmitter only (receiver has no clock).

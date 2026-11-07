@@ -141,6 +141,16 @@ document.addEventListener('DOMContentLoaded', () => {
         return t('mc.lastSeen.h', { n: Math.round(s / 3600) });
     }
 
+    // Receiver's last restart from the heartbeat cache; '' until one is known
+    function restartText(v) {
+        if (!v.rst_reason) return '';
+        const s = v.rst_ago_s;
+        if (typeof s !== 'number' || s < 0) return t('tx.restartNoTime', { reason: v.rst_reason, n: v.brownouts });
+        const ago = s < 60 ? t('tx.agoS', { n: Math.round(s) })
+            : s < 3600 ? t('tx.agoMin', { n: Math.round(s / 60) }) : t('tx.agoH', { n: Math.round(s / 3600) });
+        return t('tx.restart', { reason: v.rst_reason, ago, n: v.brownouts });
+    }
+
     async function errorText(res) {
         try {
             return (await res.text()) || ('HTTP ' + res.status);
@@ -577,6 +587,7 @@ document.addEventListener('DOMContentLoaded', () => {
             $('txName').textContent = t('tx.noMachine');
             $('txSub').textContent = t('tx.noMachine.why');
             $('txReads').hidden = true;
+            $('txRestart').hidden = true;
             pill.hidden = true;
         } else {
             $('txName').textContent = v.name;
@@ -590,6 +601,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (rd) {
                 $('txReads').textContent = t('tx.reads', rd) + (rd.file ? ' ' + t('tx.readsFile', { file: rd.file }) : '');
             }
+            const restart = restartText(v);
+            $('txRestart').hidden = !restart;
+            $('txRestart').textContent = restart;
             const [pcls, ptxt] = pillFor(v);
             pill.className = pcls;
             pill.textContent = ptxt;
@@ -728,7 +742,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 : t(m.cancelled ? 'msg.fail.cancelled' : 'msg.fail.title', { pct: m.pct });
             const details = `<p class="msg-why">${esc(t('msg.fail.safe'))}</p>` + (m.showDetails && m.details
                 ? `<pre class="details">${esc(m.details)}</pre>` : '');
-            return { key: 'failed:' + !!m.showDetails, kind: 'err', icon: 'err', title, why: m.reason, extra: details,
+            return { key: 'failed:' + !!m.showDetails + ':' + m.reason + ':' + m.details, kind: 'err', icon: 'err', title, why: m.reason, extra: details,
                 actions: (m.retry === false ? '' : btn('retry', t('msg.fail.retry'), 'btn-primary')) +
                     (m.details ? btn('details', t(m.showDetails ? 'msg.fail.hide' : 'msg.fail.details'), 'btn-ghost') : '') };
         }
@@ -1210,6 +1224,30 @@ document.addEventListener('DOMContentLoaded', () => {
         return null;
     }
 
+    // A failed transfer's cause shows up in the heartbeats after it: a receiver
+    // that has been running for less time than the transfer took restarted during it.
+    async function explainFailure(rxId, tStart) {
+        const base = explicitMsg.details;
+        const tFail = performance.now();
+        for (let i = 0; i < 30; i++) { // a restart and Wi-Fi rejoin can take this long
+            await new Promise(r => setTimeout(r, 1500));
+            const m = explicitMsg;
+            if (!m || m.type !== 'failed' || m.tStart !== tStart) return;
+            try {
+                const res = await fetch('/status', { headers: authHeaders({ 'X-Rx-Id': rxId }) });
+                if (!res.ok) continue;
+                const d = await res.json();
+                const now = performance.now();
+                const restarted = d.rst_ago_s >= 0 && d.rst_ago_s < (now - tStart) / 1000;
+                const line = restartText(d);
+                if (line) m.details = base + '\n' + line;
+                if (restarted) m.reason = t('msg.fail.rxRestarted');
+                renderMsgArea();
+                if (restarted || (d.last_seen_s >= 0 && d.last_seen_s < (now - tFail) / 1000)) return;
+            } catch (e) { /* keep waiting */ }
+        }
+    }
+
     // Bytes/s over the last ~5 s of acked progress (0 until there is 1 s of data)
     function rateMeter() {
         const pts = [];
@@ -1382,6 +1420,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const network = e instanceof TypeError || /network error/.test(err.message);
             outcome = {
                 type: 'failed',
+                tStart,
+                rxId: target.id,
                 pct: lastPct,
                 cancelled: err.message === 'cancelled',
                 reason: err.message === 'cancelled' ? '' : network ? t('msg.fail.network') : err.message,
@@ -1395,6 +1435,7 @@ document.addEventListener('DOMContentLoaded', () => {
             cancelBtn.disabled = false;
             explicitMsg = outcome;
             renderAll();
+            if (outcome && outcome.tStart && !outcome.cancelled) explainFailure(outcome.rxId, outcome.tStart);
             loadReceiverFiles();
             startStatusPolling();
             setTimeout(pollStatus, 1000);
