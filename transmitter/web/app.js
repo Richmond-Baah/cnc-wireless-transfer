@@ -1246,7 +1246,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (line) m.details = base + '\n' + line;
                 if (restarted) m.reason = t('msg.fail.rxRestarted');
                 renderMsgArea();
-                if (restarted || (d.last_seen_s >= 0 && d.last_seen_s < (now - tFail) / 1000)) return;
+                // last_seen_s is rounded down: + 1 so a heartbeat from before the failure can't pass as newer
+                if (restarted || (d.last_seen_s >= 0 && d.last_seen_s + 1 < (now - tFail) / 1000)) return;
             } catch (e) { /* keep waiting */ }
         }
     }
