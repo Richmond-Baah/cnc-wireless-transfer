@@ -66,6 +66,8 @@ window.STRINGS = {
     'state.UNKNOWN': 'Waiting for status',
     'state.OFFLINE': 'Offline',
     'tx.fw': 'Firmware {v}',
+    'tx.reads': 'Drive reads, last 10 s: {n}. Sectors: {meta} FAT/root, {data} file data, {other} other.',
+    'tx.readsFile': 'Most read: {file}.',
     'tx.noMachine': 'No machine selected',
     'tx.noMachine.why': 'Choose a machine on the left, or add one.',
 

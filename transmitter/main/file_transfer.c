@@ -655,6 +655,8 @@ bool file_transfer_active_rx(char *rx_id_out, size_t len) {
   return active;
 }
 
+bool file_transfer_session_open(void) { return s_up.active; }
+
 // Expire a session the browser abandoned (closes its receiver socket)
 static void expire_idle_session(void) {
   if (s_up_mutex == NULL || xSemaphoreTake(s_up_mutex, 0) != pdTRUE) {

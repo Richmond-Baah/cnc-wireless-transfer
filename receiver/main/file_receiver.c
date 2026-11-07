@@ -176,6 +176,28 @@ static void clear_file_cache(void) {
     s_file_cache_valid = true;
 }
 
+#define READ_MAP_ROOT_MAX 8
+
+// Where each listed file sits, for the host read summary. Assumes files are
+// contiguous, so a fragmented file's later clusters can be named wrongly.
+static void read_map_add_files(FATFS *fs, const char *drv) {
+    FIL *fp = malloc(sizeof(FIL));
+    if (!fp) return;
+    const uint32_t cluster_bytes = fs->csize * 512u;
+    for (int i = 0; i < s_file_cache_count; i++) {
+        const cached_file_t *c = &s_file_cache[i];
+        char path[sizeof(c->name) + 8];
+        snprintf(path, sizeof(path), "%s/%s", drv, c->name);
+        if (c->is_dir || c->size == 0 || f_open(fp, path, FA_READ) != FR_OK) continue;
+        if (fp->obj.sclust >= 2) {
+            uint32_t clusters = c->size / cluster_bytes + (c->size % cluster_bytes != 0);
+            usb_msc_read_map_add(fs->database + (fp->obj.sclust - 2) * fs->csize, clusters * fs->csize, c->name);
+        }
+        f_close(fp);
+    }
+    free(fp);
+}
+
 // Requires active_storage_mounted().
 static void snapshot_storage(void) {
     clear_file_cache();
@@ -185,7 +207,19 @@ static void snapshot_storage(void) {
     FF_DIR dir;
     FILINFO fno;
     if (storage_manager_get_fatfs_drive(drv, sizeof(drv)) && f_opendir(&dir, drv) == FR_OK) {
-        while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+        FATFS *fs = dir.obj.fs;
+        usb_msc_read_map_begin(fs->database);
+        DWORD root_clust = 0;
+        int root_areas = 0;
+        while (1) {
+            // FAT32's root directory lives in the data area
+            if (fs->fs_type == FS_FAT32 && dir.clust >= 2 && dir.clust != root_clust &&
+                root_areas < READ_MAP_ROOT_MAX) {
+                root_clust = dir.clust;
+                root_areas++;
+                usb_msc_read_map_add(fs->database + (root_clust - 2) * fs->csize, fs->csize, NULL);
+            }
+            if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == '\0') break;
             size_t len = strlen(fno.fname);
             if (fno.fname[0] == '.' || (fno.fattrib & (AM_HID | AM_SYS)) ||
                 (len > 4 && strcmp(fno.fname + len - 4, ".tmp") == 0)) {
@@ -201,6 +235,7 @@ static void snapshot_storage(void) {
             c->size = c->is_dir ? 0 : (uint32_t)fno.fsize;
         }
         f_closedir(&dir);
+        read_map_add_files(fs, drv);
     }
     uint64_t total = 0, free_bytes = 0;
     const char *stype = NULL;
@@ -817,6 +852,14 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddBoolToObject(obj, "card_error", sd_card_has_card_error());
     // Same rule as the busy guard: the machine read the drive in the last 10 s
     cJSON_AddBoolToObject(obj, "busy", usb_msc_ms_since_host_read() < 10000);
+    usb_msc_read_summary_t rd;
+    if (usb_msc_read_summary(&rd)) {
+        cJSON_AddNumberToObject(obj, "rd_n", rd.reads);
+        cJSON_AddNumberToObject(obj, "rd_meta", rd.meta);
+        cJSON_AddNumberToObject(obj, "rd_data", rd.data);
+        cJSON_AddNumberToObject(obj, "rd_other", rd.other);
+        cJSON_AddStringToObject(obj, "rd_file", rd.file);
+    }
     cJSON_AddNumberToObject(obj, "reattach_ms", s_reattach_ms);
     cJSON_AddNumberToObject(obj, "host_ms", usb_msc_host_mount_ms());
     cJSON_AddNumberToObject(obj, "rssi", radio_sta_rssi());

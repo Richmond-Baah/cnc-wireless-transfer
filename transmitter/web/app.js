@@ -576,6 +576,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!v) {
             $('txName').textContent = t('tx.noMachine');
             $('txSub').textContent = t('tx.noMachine.why');
+            $('txReads').hidden = true;
             pill.hidden = true;
         } else {
             $('txName').textContent = v.name;
@@ -584,6 +585,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (v.storage_type) parts.push(storageLabel(v.storage_type));
             if (v.fw) parts.push(t('tx.fw', { v: v.fw }));
             $('txSub').textContent = parts.join(' · ');
+            const rd = v.online ? v.reads : null;
+            $('txReads').hidden = !rd;
+            if (rd) {
+                $('txReads').textContent = t('tx.reads', rd) + (rd.file ? ' ' + t('tx.readsFile', { file: rd.file }) : '');
+            }
             const [pcls, ptxt] = pillFor(v);
             pill.className = pcls;
             pill.textContent = ptxt;

@@ -31,7 +31,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 - Factory reset (UI Settings > System, POST /factory_reset {"confirm":"RESET","remove_machines"}): AP-only, AP FILEXFER-XXXX + factory password, no router, factory admin login, default accent; keeps machines (they pull the new AP creds before the restart) unless remove_machines unpairs all. The only path that changes the AP SSID of a set-up unit.
 - One upload session at a time across all receivers (409 for another receiver).
 - Status/cards come from the heartbeat cache only; request handlers never call receiver /status.
-- Upload timing: browser hashes per chunk and sends MD5 with /upload_finish; TX keeps one connection for /prepare, chunks, /finalize; RX keeps USB off at least 1.5 s from first detach, then sends a heartbeat at once on re-attach and host mount. Phases show under Show details and as PHASE log lines.
+- Upload timing: browser hashes per chunk and sends MD5 with /upload_finish; streaming relay (default) sends all chunks on one TX->RX socket, with /prepare and /finalize on a separate connection (3 connects per upload); X-Relay: buffered uses one connection for all; RX keeps USB off at least 1.5 s from first detach, then sends a heartbeat at once on re-attach and host mount. Phases show under Show details and as PHASE log lines.
 - Radio power: components/radio_power, NVS, default 8.5 dBm until tested. POST /radio/test is not saved and restores the saved level.
 - Recovery: receiver alternates saved/factory AP creds every 10 failed connects; transmitter /recovery = factory AP for 5 min, then reverts.
 

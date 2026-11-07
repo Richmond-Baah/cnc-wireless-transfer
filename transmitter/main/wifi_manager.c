@@ -2,6 +2,7 @@
 #include "sdkconfig.h"
 #include "esp_event.h"
 #include "radio_power.h"
+#include "file_transfer.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
@@ -38,6 +39,7 @@ static const char *TAG = "WIFI_MGR";
 static void mdns_alias_set(const esp_ip4_addr_t *sta_ip);
 
 // STA (router) link state for /status. Written by the event task, read by httpd.
+#define STA_PAUSE_POLL_S 5   // retry check while an upload holds off scanning
 #define STA_MAX_RETRIES 5   // fast retries, then slow down so scans don't disturb the AP
 #define STA_SLOW_RETRY_S 60 // one attempt per minute after that
 static esp_timer_handle_t s_sta_retry_timer;
@@ -95,6 +97,10 @@ static const char *sta_reason_text(uint8_t reason) {
 }
 
 static void sta_slow_retry(void *arg) {
+  if (file_transfer_session_open()) { // a scan would stall the transfer's AP clients
+    esp_timer_start_once(s_sta_retry_timer, STA_PAUSE_POLL_S * 1000000ULL);
+    return;
+  }
   ESP_LOGI(TAG, "STA retry (every %d s until connected)", STA_SLOW_RETRY_S);
   esp_wifi_connect();
 }
@@ -124,6 +130,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
       snprintf(reason, sizeof(reason), "%s (%d)", txt, event->reason);
     } else {
       snprintf(reason, sizeof(reason), "disconnected (reason %d)", event->reason);
+    }
+    if (file_transfer_session_open()) {
+      sta_set("connecting", reason, NULL);
+      ESP_LOGW(TAG, "STA disconnected: %s. No scan until the upload ends.", reason);
+      esp_timer_start_once(s_sta_retry_timer, STA_PAUSE_POLL_S * 1000000ULL);
+      return;
     }
     // A few quick tries, then one per minute: back-to-back scans keep the radio
     // off the AP channel, so AP clients lose beacons and drop. A link that
@@ -387,6 +399,9 @@ void wifi_init(void) {
     // Disable modem sleep so AP beacons are always sent on time
     // and the SSID remains visible to all clients.
     esp_wifi_set_ps(WIFI_PS_NONE);
+    wifi_ps_type_t ps = WIFI_PS_NONE;
+    esp_wifi_get_ps(&ps);
+    ESP_LOGI(TAG, "Wi-Fi power save: %s", ps == WIFI_PS_NONE ? "none" : "ON");
 
     // Set country code for proper regulatory domain (improves compatibility)
     wifi_country_t country = {

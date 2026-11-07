@@ -42,6 +42,9 @@ typedef struct {
   int host_ms;
   int rssi;             // at the receiver, dBm (0 = unknown)
   int brownouts;        // receiver's count since it was flashed
+  bool rd_seen;         // receiver has sent a host read summary
+  int rd_n, rd_meta, rd_data, rd_other; // sectors in its last 10 s, rd_n = reads
+  char rd_file[33];
   uint32_t cfg_fetched;
   int64_t last_seen_us; // 0 = never since boot
 } rx_entry_t;
@@ -306,6 +309,14 @@ static void apply_status_locked(rx_entry_t *e, const cJSON *o) {
   e->host_ms = (int)json_num(o, "host_ms", e->host_ms);
   e->rssi = (int)json_num(o, "rssi", e->rssi);
   e->brownouts = (int)json_num(o, "brownouts", e->brownouts);
+  if ((s = json_str(o, "rd_file"))) {
+    strlcpy(e->rd_file, s, sizeof(e->rd_file));
+    e->rd_n = (int)json_num(o, "rd_n", 0);
+    e->rd_meta = (int)json_num(o, "rd_meta", 0);
+    e->rd_data = (int)json_num(o, "rd_data", 0);
+    e->rd_other = (int)json_num(o, "rd_other", 0);
+    e->rd_seen = true;
+  }
   const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, "card_error");
   if (cJSON_IsBool(v)) e->card_error = cJSON_IsTrue(v);
   v = cJSON_GetObjectItemCaseSensitive(o, "busy");
@@ -473,6 +484,16 @@ static void add_entry_fields_locked(const rx_entry_t *e, cJSON *o) {
   cJSON_AddNumberToObject(o, "host_ms", e->host_ms);
   cJSON_AddNumberToObject(o, "rssi", e->rssi);
   cJSON_AddNumberToObject(o, "brownouts", e->brownouts);
+  if (e->rd_seen) {
+    cJSON *rd = cJSON_AddObjectToObject(o, "reads");
+    if (rd) {
+      cJSON_AddNumberToObject(rd, "n", e->rd_n);
+      cJSON_AddNumberToObject(rd, "meta", e->rd_meta);
+      cJSON_AddNumberToObject(rd, "data", e->rd_data);
+      cJSON_AddNumberToObject(rd, "other", e->rd_other);
+      cJSON_AddStringToObject(rd, "file", e->rd_file);
+    }
+  }
   cJSON_AddNumberToObject(o, "last_seen_s",
                           e->last_seen_us ? (double)((esp_timer_get_time() - e->last_seen_us) / 1000000) : -1);
 }

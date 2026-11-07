@@ -36,6 +36,8 @@ int file_transfer_finish(const char *session, const char *md5, char *msg, size_t
 int file_transfer_cancel(const char *session);
 // True while a session is active; rx_id_out gets its receiver.
 bool file_transfer_active_rx(char *rx_id_out, size_t len);
+// Same check without the lock, for the Wi-Fi event task.
+bool file_transfer_session_open(void);
 
 // Creates the session lock and the idle-session reaper task.
 void file_transfer_start(void);

@@ -32,8 +32,61 @@ static uint64_t s_read_bytes = 0;
 static uint32_t s_read_min_lba = UINT32_MAX;
 static uint32_t s_read_max_lba = 0;
 
-static void record_host_read(uint32_t lba, uint32_t bufsize) {
+#define READ_MAP_MAX 56 // 8 root directory clusters + FILE_CACHE_MAX files
+#define READ_WINDOW_S 10
+typedef struct {
+    uint32_t start, end;  // LBA, end exclusive
+    uint32_t sectors;     // this window
+    bool meta;
+    char name[33];
+} read_area_t;
+static read_area_t s_read_map[READ_MAP_MAX];
+static int s_read_map_count = 0;
+static uint32_t s_data_start_lba = 0;
+static usb_msc_read_summary_t s_win;     // window being filled (file unused)
+static usb_msc_read_summary_t s_summary; // last full window
+static bool s_summary_valid = false;
+
+void usb_msc_read_map_begin(uint32_t data_start_lba) {
+    s_data_start_lba = data_start_lba;
+    s_read_map_count = 0;
+}
+
+void usb_msc_read_map_add(uint32_t start_lba, uint32_t sectors, const char *name) {
+    if (s_read_map_count >= READ_MAP_MAX) return;
+    read_area_t *a = &s_read_map[s_read_map_count++];
+    a->start = start_lba;
+    a->end = start_lba + sectors;
+    a->sectors = 0;
+    a->meta = (name == NULL);
+    strlcpy(a->name, name ? name : "", sizeof(a->name));
+}
+
+bool usb_msc_read_summary(usb_msc_read_summary_t *out) {
     portENTER_CRITICAL(&s_read_stats_mux);
+    bool valid = s_summary_valid;
+    if (valid) *out = s_summary;
+    portEXIT_CRITICAL(&s_read_stats_mux);
+    return valid;
+}
+
+// Classified by the transfer's first sector
+static void record_host_read(uint32_t lba, uint32_t bufsize) {
+    uint32_t sectors = (bufsize + 511) / 512;
+    read_area_t *area = NULL;
+    for (int i = 0; i < s_read_map_count && !area; i++) {
+        if (lba >= s_read_map[i].start && lba < s_read_map[i].end) area = &s_read_map[i];
+    }
+    portENTER_CRITICAL(&s_read_stats_mux);
+    s_win.reads++;
+    if (lba < s_data_start_lba || (area && area->meta)) {
+        s_win.meta += sectors;
+    } else if (area) {
+        s_win.data += sectors;
+        area->sectors += sectors;
+    } else {
+        s_win.other += sectors;
+    }
     s_read_count++;
     s_read_bytes += bufsize;
     if (lba < s_read_min_lba) s_read_min_lba = lba;
@@ -41,10 +94,34 @@ static void record_host_read(uint32_t lba, uint32_t bufsize) {
     portEXIT_CRITICAL(&s_read_stats_mux);
 }
 
+static void read_window_end(void) {
+    portENTER_CRITICAL(&s_read_stats_mux);
+    read_area_t *top = NULL;
+    for (int i = 0; i < s_read_map_count; i++) {
+        read_area_t *a = &s_read_map[i];
+        if (a->sectors > 0 && (!top || a->sectors > top->sectors)) top = a;
+    }
+    s_summary = s_win;
+    strlcpy(s_summary.file, top ? top->name : "", sizeof(s_summary.file));
+    s_summary_valid = true;
+    memset(&s_win, 0, sizeof(s_win));
+    for (int i = 0; i < s_read_map_count; i++) s_read_map[i].sectors = 0;
+    usb_msc_read_summary_t r = s_summary;
+    portEXIT_CRITICAL(&s_read_stats_mux);
+    ESP_LOGI(TAG, "Host reads/%ds: %lu reads, FAT/root %lu, file data %lu, other %lu sectors, top file \"%s\"",
+             READ_WINDOW_S, (unsigned long)r.reads, (unsigned long)r.meta, (unsigned long)r.data,
+             (unsigned long)r.other, r.file);
+}
+
 static void host_read_log_task(void *arg) {
     (void)arg;
+    int seconds = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        if (++seconds >= READ_WINDOW_S) {
+            seconds = 0;
+            read_window_end();
+        }
         portENTER_CRITICAL(&s_read_stats_mux);
         uint32_t count = s_read_count;
         uint64_t bytes = s_read_bytes;
@@ -61,6 +138,12 @@ static void host_read_log_task(void *arg) {
                      (unsigned long)min_lba, (unsigned long)max_lba);
         }
     }
+}
+#else
+bool usb_msc_read_summary(usb_msc_read_summary_t *out) { (void)out; return false; }
+void usb_msc_read_map_begin(uint32_t data_start_lba) { (void)data_start_lba; }
+void usb_msc_read_map_add(uint32_t start_lba, uint32_t sectors, const char *name) {
+    (void)start_lba; (void)sectors; (void)name;
 }
 #endif
 
