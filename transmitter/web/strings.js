@@ -2,6 +2,8 @@
 // placeholders are filled by t(key, {name: ...}).
 window.STRINGS = {
     'app.name': 'FileXfer',
+    'app.name.file': 'File',
+    'app.name.xfer': 'Xfer',
     'app.title.login': 'Log in · FileXfer',
     'app.title.main': 'Machines · FileXfer',
 

@@ -12,6 +12,7 @@
     --accent-text: #C2410C;  /* accent for links/small text, >= 4.5:1 */
     --accent-ink: #FFFFFF;   /* text/icons on --accent */
     --accent-soft: rgba(194, 65, 12, 0.15);
+    --brand: #C2410C;        /* wordmark + logo, ignores the user accent */
     --ok: #17653A;
     --ok-bg: #E3F3E8;
     --busy: #7A4E00;
@@ -46,6 +47,7 @@
     --err: #F59A93;
     --err-bg: #3A1614;
     --danger: #B3261E;
+    --brand: #EA580C;
     --bar: #0A0C0E;
     --shadow: none;
 }
@@ -66,6 +68,7 @@
         --err: #F59A93;
         --err-bg: #3A1614;
         --danger: #B3261E;
+        --brand: #EA580C;
         --bar: #0A0C0E;
         --shadow: none;
     }
@@ -105,6 +108,7 @@ svg.i { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor;
     margin-right: auto;
 }
 .brand-mark { width: 28px; height: 28px; flex: none; }
+.brand-x { color: var(--brand); }
 .net-chip {
     display: inline-flex; align-items: center; gap: 8px; min-height: 32px;
     padding: 4px 12px; border: 1px solid var(--bar-line); border-radius: 999px;
@@ -472,9 +476,9 @@ fieldset { border: 0; min-width: 0; }
 .recovery .label { margin-top: 12px; }
 .recovery + .recovery { margin-top: 16px; }
 
-/* Brand mark follows the accent */
-.brand-mark rect { fill: var(--accent); }
-.brand-mark path { stroke: var(--accent-ink); }
+/* Brand: stays orange whatever the accent */
+.brand-mark rect { fill: var(--brand); }
+.brand-mark path { stroke: #FFFFFF; }
 
 /* Accent colour picker (Settings > Appearance) */
 .swatches { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
