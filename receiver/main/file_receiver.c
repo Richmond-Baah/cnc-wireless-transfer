@@ -1673,7 +1673,7 @@ void file_receiver_init(void) {
         const esp_timer_create_args_t watch_args = {.callback = xfer_watch, .name = "xfer_watch"};
         esp_timer_handle_t watch;
         if (esp_timer_create(&watch_args, &watch) == ESP_OK) {
-            esp_timer_start_periodic(watch, 5LL * 1000 * 1000);
+            esp_timer_start_periodic(watch, 1000LL * 1000); // drive back within ~61 s
         }
         httpd_uri_t uri_prepare = {.uri = "/prepare", .method = HTTP_POST, .handler = prepare_post_handler};
         httpd_uri_t uri_chunk = {.uri = "/chunk", .method = HTTP_POST, .handler = chunk_post_handler};
