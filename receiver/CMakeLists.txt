@@ -18,7 +18,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.git/logs/HEAD")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../.git/logs/HEAD")
 endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Release build (tools/build_release.sh): no stack audit, /debug compiled out,
+# log level WARN from tools/sdkconfig.release.
+if(FILEXFER_RELEASE)
+  if(FILEXFER_STACK_AUDIT)
+    message(FATAL_ERROR "FILEXFER_RELEASE and FILEXFER_STACK_AUDIT together: use tools/build_release.sh")
+  endif()
+  idf_build_set_property(COMPILE_DEFINITIONS "FILEXFER_RELEASE=1" APPEND)
+endif()
 project(cnc_receiver)
+if(FILEXFER_RELEASE AND CONFIG_LOG_DEFAULT_LEVEL GREATER 2)
+  message(FATAL_ERROR "Release build needs log level WARN or lower (tools/sdkconfig.release)")
+endif()
 
 # Signed apps (CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT, RSA-3072): the app is
 # signed in place with the key at $FILEXFER_SIGNING_KEY, kept outside the repo.

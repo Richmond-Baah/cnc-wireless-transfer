@@ -74,6 +74,7 @@ window.STRINGS = {
     'tx.agoMin': '{n} min ago',
     'tx.agoH': '{n} h ago',
     'tx.crash': 'Crash report saved. Get it in Settings › System.',
+    'tx.abortNoData': 'Transfer cancelled: no data for 60 s',
     'tx.noMachine': 'No machine selected',
     'tx.noMachine.why': 'Choose a machine on the left, or add one.',
 

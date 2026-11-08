@@ -13,3 +13,5 @@ __pycache__/
 *.key
 *signing_key*
 *signing-key*
+/transmitter/build-release/
+/receiver/build-release/

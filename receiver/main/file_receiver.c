@@ -94,6 +94,37 @@ static void prepare_abort_reconnect(void) {
     usb_msc_connect();
 }
 
+// No /prepare, /chunk or /finalize for this long while RECEIVING: the
+// transmitter is gone (it expires an idle session itself after 30 s and
+// cancels it here), so give up and hand the drive back to the machine.
+#define XFER_IDLE_TIMEOUT_US (60LL * 1000 * 1000)
+static httpd_handle_t s_server;
+static volatile int64_t s_xfer_alive_us; // last transfer request
+static const char *s_xfer_abort = "";    // why the last transfer was dropped here ("" = it wasn't)
+static void xfer_touch(void) { s_xfer_alive_us = esp_timer_get_time(); }
+
+// On the httpd task (queued), so it never runs inside a transfer handler.
+static void xfer_timeout_work(void *arg) {
+    (void)arg;
+    if (state_machine_get() != STATE_RECEIVING || !active_file ||
+        esp_timer_get_time() - s_xfer_alive_us < XFER_IDLE_TIMEOUT_US) {
+        return;
+    }
+    ESP_LOGW(TAG, "Transfer cancelled: no data for %lld s. Deleting %s, drive back to USB",
+             (long long)(XFER_IDLE_TIMEOUT_US / 1000000), active_filename);
+    s_xfer_abort = "no_data";
+    prepare_abort_reconnect(); // .tmp deleted, IDLE, FS released, USB on
+    pairing_heartbeat_now();   // the transmitter shows it at once
+}
+
+static void xfer_watch(void *arg) {
+    (void)arg;
+    if (s_server && state_machine_get() == STATE_RECEIVING &&
+        esp_timer_get_time() - s_xfer_alive_us >= XFER_IDLE_TIMEOUT_US) {
+        httpd_queue_work(s_server, xfer_timeout_work, NULL);
+    }
+}
+
 // Receiver-side budget for /prepare, below the transmitter's 10 s timeout so a
 // prepare the transmitter already gave up on never leaves USB disconnected.
 #define PREPARE_BUDGET_US (8LL * 1000 * 1000)
@@ -448,6 +479,8 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
         cJSON_Delete(json);
         return ESP_FAIL;
     }
+    xfer_touch();
+    s_xfer_abort = "";
 
     char sanitized[128];
     sanitize_filename(fname->valuestring, sanitized, sizeof(sanitized));
@@ -584,9 +617,15 @@ static esp_err_t prepare_post_handler(httpd_req_t *req) {
 static esp_err_t chunk_post_handler(httpd_req_t *req) {
     if (reject_unauthorized(req)) return ESP_OK;
     if (state_machine_get() != STATE_RECEIVING || !active_file) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not in RECEIVING state");
+        if (s_xfer_abort[0]) {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_sendstr(req, "Transfer cancelled: no data for 60 s");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not in RECEIVING state");
+        }
         return ESP_FAIL;
     }
+    xfer_touch();
 
     char idx_hdr[16] = {0};
     if (httpd_req_get_hdr_value_str(req, "X-Chunk-Index", idx_hdr, sizeof(idx_hdr)) != ESP_OK) {
@@ -691,9 +730,15 @@ static esp_err_t chunk_post_handler(httpd_req_t *req) {
 static esp_err_t finalize_post_handler(httpd_req_t *req) {
     if (reject_unauthorized(req)) return ESP_OK;
     if (state_machine_get() != STATE_RECEIVING || !active_file) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not in RECEIVING state");
+        if (s_xfer_abort[0]) {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_sendstr(req, "Transfer cancelled: no data for 60 s");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not in RECEIVING state");
+        }
         return ESP_FAIL;
     }
+    xfer_touch();
 
     int total_len = req->content_len;
     char finalize_md5[33] = {0};
@@ -869,6 +914,7 @@ void file_receiver_add_status_fields(cJSON *obj) {
     cJSON_AddNumberToObject(obj, "brownouts", radio_brownouts());
     cJSON_AddStringToObject(obj, "reset_reason", radio_reset_reason());
     cJSON_AddBoolToObject(obj, "coredump", coredump_http_present());
+    cJSON_AddStringToObject(obj, "xfer_abort", s_xfer_abort);
     cJSON_AddNumberToObject(obj, "uptime_s", (double)(esp_timer_get_time() / 1000000));
 }
 
@@ -1623,6 +1669,12 @@ void file_receiver_init(void) {
     config.max_uri_handlers = 24;
 
     if (httpd_start(&server, &config) == ESP_OK) {
+        s_server = server;
+        const esp_timer_create_args_t watch_args = {.callback = xfer_watch, .name = "xfer_watch"};
+        esp_timer_handle_t watch;
+        if (esp_timer_create(&watch_args, &watch) == ESP_OK) {
+            esp_timer_start_periodic(watch, 5LL * 1000 * 1000);
+        }
         httpd_uri_t uri_prepare = {.uri = "/prepare", .method = HTTP_POST, .handler = prepare_post_handler};
         httpd_uri_t uri_chunk = {.uri = "/chunk", .method = HTTP_POST, .handler = chunk_post_handler};
         httpd_uri_t uri_finalize = {.uri = "/finalize", .method = HTTP_POST, .handler = finalize_post_handler};

@@ -64,3 +64,5 @@ CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
 
 # System event task: rx sys_evt had 440 B free at 2304 (stack audit)
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+# IPC tasks: ipc0 had 496 B free at 1280 under load (stack audit)
+CONFIG_ESP_IPC_TASK_STACK_SIZE=2048

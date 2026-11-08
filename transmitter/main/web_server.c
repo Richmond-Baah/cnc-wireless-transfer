@@ -1774,6 +1774,12 @@ static esp_err_t rxfw_handler(httpd_req_t *req) {
   if (begin && code == 200) {
     strlcpy(s_rxfw_id, id, sizeof(s_rxfw_id));
     ESP_LOGW(TAG, "Updating firmware of %s", id);
+    // Chunks pass through s_rxfw_buf: never offer more than it holds
+    cJSON *r = cJSON_Parse(s_rx_resp);
+    cJSON *cs = r ? cJSON_GetObjectItem(r, "chunk_size") : NULL;
+    int n = cJSON_IsNumber(cs) && cs->valueint > 0 ? MIN(cs->valueint, (int)sizeof(s_rxfw_buf)) : (int)sizeof(s_rxfw_buf);
+    cJSON_Delete(r);
+    snprintf(s_rx_resp, sizeof(s_rx_resp), "{\"chunk_size\":%d}", n);
   }
   s_rxfw_last_us = esp_timer_get_time();
   if (code != 200 || strncmp(op, "finish", 6) == 0 || strncmp(op, "cancel", 6) == 0) {
@@ -1792,6 +1798,7 @@ static esp_err_t rxfw_handler(httpd_req_t *req) {
 }
 
 // ─── Debug endpoint — shows connected stations and receiver connectivity
+#ifndef FILEXFER_RELEASE // shows the AP password
 static esp_err_t debug_get_handler(httpd_req_t *req) {
   char resp[1024];
   int pos = 0;
@@ -1828,6 +1835,7 @@ static esp_err_t debug_get_handler(httpd_req_t *req) {
   httpd_resp_send(req, resp, pos);
   return ESP_OK;
 }
+#endif
 
 static void restart_delayed_task(void *pvParameters) {
   vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1910,7 +1918,9 @@ static const route_t s_routes[] = {
     {"/rxfw/finish", HTTP_POST, rxfw_handler, RT_RX},
     {"/rxfw/cancel", HTTP_POST, rxfw_handler, RT_RX},
     {"/receiver_coredump", HTTP_GET, receiver_coredump_handler, RT_RX},
+#ifndef FILEXFER_RELEASE // shows the AP password
     {"/debug", HTTP_GET, debug_get_handler, RT_SYNC},
+#endif
     // Receivers
     {"/rx/heartbeat", HTTP_POST, rx_heartbeat_handler, RT_SYNC},
     {"/rx/config", HTTP_GET, rx_config_handler, RT_SYNC},

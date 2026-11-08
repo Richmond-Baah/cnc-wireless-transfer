@@ -1,0 +1,6 @@
+# Applied on top of <board>/sdkconfig by tools/build_release.sh (app only;
+# bootloader settings are left alone: updates never replace the bootloader).
+# CONFIG_LOG_DEFAULT_LEVEL_INFO is not set
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL=2
+CONFIG_LOG_MAXIMUM_LEVEL=2

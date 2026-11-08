@@ -589,6 +589,7 @@ document.addEventListener('DOMContentLoaded', () => {
             $('txReads').hidden = true;
             $('txRestart').hidden = true;
             $('txCrash').hidden = true;
+            $('txAbort').hidden = true;
             pill.hidden = true;
         } else {
             $('txName').textContent = v.name;
@@ -607,6 +608,8 @@ document.addEventListener('DOMContentLoaded', () => {
             $('txRestart').textContent = restart;
             $('txCrash').hidden = !v.coredump;
             $('txCrash').textContent = t('tx.crash');
+            $('txAbort').hidden = v.xfer_abort !== 'no_data';
+            $('txAbort').textContent = t('tx.abortNoData');
             const [pcls, ptxt] = pillFor(v);
             pill.className = pcls;
             pill.textContent = ptxt;
@@ -1248,6 +1251,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const line = restartText(d);
                 if (line) m.details = base + '\n' + line;
                 if (restarted) m.reason = t('msg.fail.rxRestarted');
+                else if (d.xfer_abort === 'no_data') m.reason = t('tx.abortNoData');
                 renderMsgArea();
                 // last_seen_s is rounded down: + 1 so a heartbeat from before the failure can't pass as newer
                 if (restarted || (d.last_seen_s >= 0 && d.last_seen_s + 1 < (now - tFail) / 1000)) return;
