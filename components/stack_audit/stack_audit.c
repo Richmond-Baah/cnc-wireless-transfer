@@ -14,6 +14,12 @@
 #define AUDIT_MAX_TASKS 32
 
 static const char *TAG = "STACK";
+// Both boards' long-lived tasks (missing ones are skipped). Short-lived tasks
+// are left out: one could be deleted between the lookup and the read.
+static const char *const s_names[] = {
+    "IDLE0", "IDLE1", "ipc0", "ipc1", "sys_evt", "esp_timer", "tiT", "wifi", "mdns", "httpd", "main",
+    "TinyUSB", "boot_btn", "espnow_pair", "http_rx", "http_upload", "led_task", "rx_heartbeat",
+    "stack_audit", "upload_reaper", "usb_read_log"};
 static const char *s_who;
 static void (*s_publish)(const char *text);
 
@@ -48,18 +54,19 @@ static void audit_task(void *arg) {
   static char text[AUDIT_MAX_TASKS * 32];
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(AUDIT_PERIOD_MS));
+    // Known long-lived tasks only, each looked up under the kernel lock.
+    // (xTaskGetNext walks the task lists without a lock: with the other core
+    // changing them it looped forever and tripped the task watchdog.)
     int n = 0;
-    TaskIterator_t it = {0};
-    vTaskSuspendAll();
-    while (xTaskGetNext(&it) != -1 && n < AUDIT_MAX_TASKS) {
+    for (size_t k = 0; k < sizeof(s_names) / sizeof(s_names[0]) && n < AUDIT_MAX_TASKS; k++) {
+      TaskHandle_t h = xTaskGetHandle(s_names[k]);
       TaskSnapshot_t snap;
-      if (it.pxTaskHandle == NULL || vTaskGetSnapshot(it.pxTaskHandle, &snap) != pdTRUE) continue;
-      strlcpy(rows[n].name, pcTaskGetName(it.pxTaskHandle), sizeof(rows[n].name));
-      rows[n].size = (char *)snap.pxEndOfStack - (char *)pxTaskGetStackStart(it.pxTaskHandle);
-      rows[n].free = uxTaskGetStackHighWaterMark(it.pxTaskHandle); // bytes on ESP-IDF
+      if (h == NULL || vTaskGetSnapshot(h, &snap) != pdTRUE) continue;
+      strlcpy(rows[n].name, s_names[k], sizeof(rows[n].name));
+      rows[n].size = (char *)snap.pxEndOfStack - (char *)pxTaskGetStackStart(h);
+      rows[n].free = uxTaskGetStackHighWaterMark(h); // bytes on ESP-IDF
       n++;
     }
-    xTaskResumeAll();
     size_t pos = 0;
     for (int i = 0; i < n; i++) {
       log_row(s_who, rows[i].name, rows[i].size, rows[i].free);
