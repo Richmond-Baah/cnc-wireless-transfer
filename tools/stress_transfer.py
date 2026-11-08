@@ -148,7 +148,7 @@ def host_md5(name, timeout=60):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.16.100")
+    ap.add_argument("--host", default="filexfer.local")
     ap.add_argument("--user", default="admin")
     ap.add_argument("--rx", default="rx-842c94")
     ap.add_argument("--sends", type=int, default=60)

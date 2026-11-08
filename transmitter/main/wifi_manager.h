@@ -14,6 +14,10 @@ esp_err_t wifi_init(void); // ESP_OK once the AP is up
 void wifi_get_sta_status(char *state, size_t state_len, char *reason,
                          size_t reason_len, char *ip, size_t ip_len);
 
+// Router link lost (had an IP, then disconnected) since boot; *ago_s = seconds
+// since the last one, -1 if none.
+uint32_t wifi_sta_drops(int64_t *ago_s);
+
 // Recovery mode: AP uses the factory SSID/password for `seconds`, then reverts
 // to the saved ones (clients on the AP are disconnected both times).
 esp_err_t wifi_recovery_start(int seconds);

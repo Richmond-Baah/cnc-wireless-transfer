@@ -1315,7 +1315,8 @@ static esp_err_t perf_sd_handler(httpd_req_t *req) {
 }
 
 // ─── Radio power (Settings > System) ────────────────────────────────────────
-// GET /radio -> saved/actual level, brownouts, reset reason of this board.
+// GET /radio -> saved/actual level, brownouts, reset reason, uptime and router
+// link drops (count, seconds since the last) of this board.
 // POST /radio {"qdbm":n}: saved here and on every online machine.
 // POST /radio/test?rx= {"qdbm":n,"seconds":30}: both boards at qdbm (not saved),
 // data TX->RX then RX->TX, RSSI at both ends, then back to the saved level.
@@ -1324,10 +1325,15 @@ static esp_err_t radio_get_handler(httpd_req_t *req) {
     send_status_text(req, 401, "Unauthorized");
     return ESP_OK;
   }
-  char out[128];
-  snprintf(out, sizeof(out), "{\"saved\":%d,\"actual\":%d,\"brownouts\":%lu,\"reset_reason\":\"%s\",\"coredump\":%s}",
+  char out[224];
+  int64_t drop_ago = -1;
+  uint32_t drops = wifi_sta_drops(&drop_ago);
+  snprintf(out, sizeof(out),
+           "{\"saved\":%d,\"actual\":%d,\"brownouts\":%lu,\"reset_reason\":\"%s\",\"coredump\":%s,"
+           "\"uptime_s\":%lld,\"sta_drops\":%lu,\"sta_drop_ago_s\":%lld}",
            radio_power_saved(), radio_power_actual(), (unsigned long)radio_brownouts(), radio_reset_reason(),
-           coredump_http_present() ? "true" : "false");
+           coredump_http_present() ? "true" : "false", (long long)(esp_timer_get_time() / 1000000),
+           (unsigned long)drops, (long long)drop_ago);
   httpd_resp_set_type(req, "application/json; charset=utf-8");
   httpd_resp_sendstr(req, out);
   return ESP_OK;

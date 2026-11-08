@@ -55,6 +55,9 @@ static char s_sta_reason[48] = "";
 static char s_sta_ip[16] = "";
 static int s_sta_retries = 0;
 static bool s_sta_was_connected = false;
+static bool s_sta_up = false;        // has an IP from the router now
+static uint32_t s_sta_drops = 0;     // router link lost since boot
+static int64_t s_sta_drop_us = 0;    // when it was last lost
 
 static void sta_set(const char *state, const char *reason, const char *ip) {
   portENTER_CRITICAL(&s_sta_mux);
@@ -124,6 +127,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     wifi_event_sta_disconnected_t *event =
         (wifi_event_sta_disconnected_t *)event_data;
+    if (s_sta_up) {
+      s_sta_up = false;
+      s_sta_drops++;
+      s_sta_drop_us = esp_timer_get_time();
+    }
     char reason[48];
     const char *txt = sta_reason_text(event->reason);
     if (txt) {
@@ -161,6 +169,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     snprintf(ip, sizeof(ip), IPSTR, IP2STR(&event->ip_info.ip));
     s_sta_retries = 0;
     s_sta_was_connected = true;
+    s_sta_up = true;
     sta_set("connected", NULL, ip);
     ESP_LOGI(TAG, "==================================================");
     ESP_LOGI(TAG, " STA connected to router. STA IP: %s", ip);
@@ -200,6 +209,11 @@ int wifi_recovery_seconds_left(void) {
   int64_t end = s_recovery_end_us;
   int64_t left = end ? (end - esp_timer_get_time()) / 1000000 : 0;
   return left > 0 ? (int)left : 0;
+}
+
+uint32_t wifi_sta_drops(int64_t *ago_s) {
+  if (ago_s) *ago_s = s_sta_drops ? (esp_timer_get_time() - s_sta_drop_us) / 1000000 : -1;
+  return s_sta_drops;
 }
 
 void wifi_get_ap_creds(char *ssid, size_t ssid_len, char *pass, size_t pass_len) {
