@@ -28,6 +28,7 @@ ESP32-S3 boards: 1 transmitter, up to 16 receivers. Transmitter: SoftAP "FILEXFE
 - SD card is the only storage. No card at boot → CARD_ERROR (storage_type "None", UI "No SD card") until restarted with one; SD failure → 503/CARD_ERROR.
 - Never auto-format. Mount failure → CARD_ERROR. Format/Wipe need typed FORMAT/WIPE, checked server-side.
 - Every error path: delete .tmp before unmount, release storage, reconnect USB.
+- Boot (step 8c, first mount, before USB attach): file_receiver_boot_scan removes orphan *.tmp (any case) from the root, then caches the list.
 - RX gives up a transfer after 60 s without /prepare|/chunk|/finalize (TX gone; a live TX expires idle sessions at 30 s): .tmp deleted, USB on, heartbeat xfer_abort "no_data" -> UI "Transfer cancelled: no data for 60 s"; later chunks get 409.
 - Chunks: indexed; dup = ack+discard, out-of-order = 409.
 - Busy guard: /prepare, /clear and /delete → 423 if host read <10 s ago, unless X-Force: 1.

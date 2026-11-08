@@ -97,9 +97,9 @@ void app_main(void) {
         }
     }
 
-    // USB is not connected yet: safe to snapshot the file list + free space
-    ESP_LOGI(TAG, "Step 8c: Caching file list...");
-    file_receiver_refresh_cache();
+    // USB is not connected yet: remove orphan .tmp files, snapshot list + free space
+    ESP_LOGI(TAG, "Step 8c: Orphan temp files + file list...");
+    file_receiver_boot_scan();
     ESP_LOGI(TAG, "Step 8c: DONE");
 
     ESP_LOGI(TAG, "Step 9: USB MSC init (LAST STEP)...");

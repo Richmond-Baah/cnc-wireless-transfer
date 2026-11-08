@@ -9,6 +9,7 @@ void file_receiver_init(void);
 // Snapshot the file list + total/free space into RAM (mounting and releasing
 // storage if needed). Call only while the USB host cannot access the storage.
 void file_receiver_refresh_cache(void);
+void file_receiver_boot_scan(void); // boot, before USB: orphan .tmp cleanup + cache
 
 // Reads (up to len-1 bytes, NUL-terminated) and deletes a file in the storage
 // root, mounting and releasing storage if needed. Boot only, before USB.

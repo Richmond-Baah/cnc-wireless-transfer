@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/param.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -278,6 +279,28 @@ static void snapshot_storage(void) {
     }
 }
 
+static void cleanup_orphan_temp_files(void);
+
+// Boot, before USB attaches: first mount of the card. Removes orphan staging
+// files, then caches the file list + free space and releases the card.
+void file_receiver_boot_scan(void) {
+    if (storage_manager_is_sd_present() && sd_card_has_card_error()) {
+        clear_file_cache();
+        return;
+    }
+    bool mounted_here = false;
+    if (!active_storage_mounted()) {
+        mounted_here = (storage_manager_remount() == ESP_OK) && active_storage_mounted();
+    }
+    if (active_storage_mounted()) {
+        cleanup_orphan_temp_files();
+        snapshot_storage();
+    }
+    if (mounted_here) {
+        storage_manager_flush_and_release_for_usb();
+    }
+}
+
 // Mounts the active storage if needed, snapshots it, and releases it again.
 // Only call while the USB host cannot be accessing the storage.
 void file_receiver_refresh_cache(void) {
@@ -379,22 +402,27 @@ static void sanitize_filename(const char *input, char *output, size_t max_len) {
 }
 
 // Cleanup any orphan temporary files on startup
+// Staging files a reset or power loss left behind: "<name>.tmp" (what /prepare
+// writes) and older ".<name>.tmp". Storage must be mounted; boot only, never
+// while a transfer could be writing one. Names are collected first, then removed.
 static void cleanup_orphan_temp_files(void) {
     DIR *dir = opendir(STORAGE_PATH);
     if (!dir) return;
-
+    static char names[8][256];
+    int n = 0;
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') {
-            if (strstr(entry->d_name, ".tmp") != NULL) {
-                char filepath[320];
-                snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_PATH, entry->d_name);
-                ESP_LOGI(TAG, "Removing orphan temp file: %s", filepath);
-                remove(filepath);
-            }
+    while ((entry = readdir(dir)) != NULL && n < 8) {
+        size_t len = strlen(entry->d_name);
+        if (len > 4 && strcasecmp(entry->d_name + len - 4, ".tmp") == 0) {
+            strlcpy(names[n++], entry->d_name, sizeof(names[0]));
         }
     }
     closedir(dir);
+    for (int i = 0; i < n; i++) {
+        char filepath[320];
+        snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_PATH, names[i]);
+        ESP_LOGW(TAG, "Removing orphan temp file: %s (%s)", filepath, remove(filepath) == 0 ? "ok" : "failed");
+    }
 }
 
 static esp_err_t prepare_post_handler(httpd_req_t *req) {
@@ -1654,9 +1682,6 @@ static esp_err_t httpd_sock_open(httpd_handle_t hd, int fd) {
 }
 
 void file_receiver_init(void) {
-    ESP_LOGI(TAG, "Cleaning up any orphan temp files on storage...");
-    cleanup_orphan_temp_files();
-
     ESP_LOGI(TAG, "File receiver HTTP server starting...");
 
     httpd_handle_t server = NULL;
