@@ -35,8 +35,23 @@ def note(val, x, y):
 
 
 def footprint(name, descr, body, attr):
+    model = f'\t(model "${{KIPRJMOD}}/3dmodels/{name}.wrl")\n'
     return (f'(footprint "{name}"\n\t(version 20241229)\n\t(generator "filexfer_gen_fp")\n'
-            f'\t(layer "F.Cu")\n\t(descr "{descr}")\n\t(attr {attr})\n{body})\n')
+            f'\t(layer "F.Cu")\n\t(descr "{descr}")\n\t(attr {attr})\n{body}{model})\n')
+
+
+def wrl_box(path, boxes):
+    """Placeholder VRML model: boxes = [(x0, x1, y0, y1, z0, z1, rgb)] in footprint mm (y down).
+    KiCad VRML unit = 0.1 inch; model Y = -footprint y."""
+    u = 1 / 2.54
+    out = ['#VRML V2.0 utf8', '# FileXfer placeholder box model (not vendor geometry)']
+    for x0, x1, y0, y1, z0, z1, rgb in boxes:
+        cx, cy, cz = (x0 + x1) / 2 * u, -(y0 + y1) / 2 * u, (z0 + z1) / 2 * u
+        sx, sy, sz = abs(x1 - x0) * u, abs(y1 - y0) * u, abs(z1 - z0) * u
+        out.append(f'Transform {{ translation {cx:.4f} {cy:.4f} {cz:.4f} children [ Shape {{ '
+                   f'appearance Appearance {{ material Material {{ diffuseColor {rgb} }} }} '
+                   f'geometry Box {{ size {sx:.4f} {sy:.4f} {sz:.4f} }} }} ] }}')
+    open(path, 'w').write('\n'.join(out) + '\n')
 
 
 def tf_push():
@@ -88,6 +103,17 @@ def usb_a_xkb():
 
 def main():
     os.makedirs(OUT, exist_ok=True)
+    m3d = os.path.join(OUT, '..', '3dmodels')
+    os.makedirs(m3d, exist_ok=True)
+    metal = '0.45 0.46 0.5'
+    # SD: body 14.75 x 14.50, 1.90 tall (drawing 1.80-2.00)
+    wrl_box(os.path.join(m3d, 'microSD_SHOUHAN_TF_PUSH.wrl'),
+            [(4.95 - 7.375, 4.95 + 7.375, -10.48, 4.02, 0.0, 1.9, metal)])
+    # XKB: shell 12.00 x 4.50 x 18.75, front 17.78 from hole row (EasyEDA); assumed +1.90/-2.60 about
+    # the board top (drawing gives 1.90/2.60, face not identified) [U]; tongue as a white block.
+    wrl_box(os.path.join(m3d, 'USB_A_Plug_XKB_U217-041N-4BV81.wrl'),
+            [(-6.0, 6.0, 17.78 - 18.75, 17.78, -2.6, 1.9, metal),
+             (-5.5, 5.5, 17.78 - 9.0, 17.78 - 0.2, -2.0, -0.2, '0.95 0.95 0.95')])
     for name, fn in (('microSD_SHOUHAN_TF_PUSH', tf_push), ('USB_A_Plug_XKB_U217-041N-4BV81', usb_a_xkb)):
         with open(os.path.join(OUT, name + '.kicad_mod'), 'w') as f:
             f.write(fn())

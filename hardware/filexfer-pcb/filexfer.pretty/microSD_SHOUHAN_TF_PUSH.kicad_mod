@@ -32,4 +32,5 @@
 	(fp_line (start -2.425 4.220) (end 12.325 4.220) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
 	(fp_text user "card slot (front); card protrudes 5.60 when ejected" (at 4.95 6.20 0) (layer "Dwgs.User") (effects (font (size 0.6 0.6) (thickness 0.1))))
 	(fp_text user "Cd = pad 9; switch closes to shell on insert [U]" (at 4.95 7.00 0) (layer "Dwgs.User") (effects (font (size 0.6 0.6) (thickness 0.1))))
+	(model "${KIPRJMOD}/3dmodels/microSD_SHOUHAN_TF_PUSH.wrl")
 )

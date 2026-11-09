@@ -1,0 +1,4 @@
+#VRML V2.0 utf8
+# FileXfer placeholder box model (not vendor geometry)
+Transform { translation 0.0000 -3.3091 -0.1378 children [ Shape { appearance Appearance { material Material { diffuseColor 0.45 0.46 0.5 } } geometry Box { size 4.7244 7.3819 1.7717 } } ] }
+Transform { translation 0.0000 -5.1890 -0.4331 children [ Shape { appearance Appearance { material Material { diffuseColor 0.95 0.95 0.95 } } geometry Box { size 4.3307 3.4646 0.7087 } } ] }

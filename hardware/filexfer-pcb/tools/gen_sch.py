@@ -64,7 +64,7 @@ PARTS = [
      dict(Fit='ALL', MPN='TPS22917DBVR', LCSC='C2681320', Note='3V3 soft-start, tR ~3.5 ms (inrush)')),
     C('C5', '2.2n', 'SS_CT', '3V3_LDO', Note='CT to VIN per TPS22917 DS'),
     C('C6', '22u', '+3V3', 'GND', fp=C0805, Note='bulk'),
-    C('C7', '10u', '+3V3', 'GND', fp=C0603, Note='at module 3V3 pin (HDG)'),
+    C('C7', '10u', '+3V3', 'GND', Note='at module 3V3 pin (HDG); 0402 X5R 6.3V (CL05A106MQ5NUNC C15525) to fit 1.15 mm strip'),
     C('C8', '100n', '+3V3', 'GND'),
     # --- Module -------------------------------------------------------------------------------
     ('U4', 'RF_Module', 'ESP32-S3-MINI-1', 'ESP32-S3-MINI-1-N8', 'filexfer:ESP32-S3-MINI-1', 'MODULE',

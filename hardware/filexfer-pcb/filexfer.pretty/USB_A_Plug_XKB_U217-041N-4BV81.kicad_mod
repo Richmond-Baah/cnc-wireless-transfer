@@ -25,4 +25,5 @@
 	(fp_line (start 6.750 2.920) (end -6.750 2.920) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
 	(fp_line (start -6.750 2.920) (end -6.750 -3.850) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
 	(fp_text user "shell straddles board plane (+1.90/-2.60 or +2.60/-1.90); behind-edge clearance [U] - 3D model" (at 0.00 4.40 0) (layer "Dwgs.User") (effects (font (size 0.6 0.6) (thickness 0.1))))
+	(model "${KIPRJMOD}/3dmodels/USB_A_Plug_XKB_U217-041N-4BV81.wrl")
 )
