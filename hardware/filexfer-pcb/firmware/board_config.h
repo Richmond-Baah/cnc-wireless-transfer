@@ -15,8 +15,8 @@
 #define BOARD_PIN_BOOT          0    /* BOOT pinhole, active low (10k pull-up on rev A)        */
 #define BOARD_PIN_USB_DM        19
 #define BOARD_PIN_USB_DP        20
-#define BOARD_PIN_U0TXD         43   /* console; rev A: 499R series, TC2030 pin 2               */
-#define BOARD_PIN_U0RXD         44   /* TC2030 pin 4                                            */
+#define BOARD_PIN_U0TXD         43   /* console; rev A: 499R series, test pad TP6                */
+#define BOARD_PIN_U0RXD         44   /* test pad TP7                                             */
 #define BOARD_PIN_LED           48   /* WS2812-protocol, 1 LED                                  */
 
 #if defined(CONFIG_FILEXFER_BOARD_SUPERMINI)
@@ -36,20 +36,20 @@
 /* ---- FileXfer PCB rev A (ESP32-S3-MINI-1-N8) --------------------------------------------- */
 #define BOARD_NAME              "fx-a"
 #define BOARD_SD_MODE_SPI       0    /* SDMMC 4-bit; set 1 to run SPI on the same pins:          */
-#define BOARD_PIN_SD_CLK        12   /*   CLK  = SPI CLK                                        */
-#define BOARD_PIN_SD_CMD        11   /*   CMD  = SPI MOSI                                       */
-#define BOARD_PIN_SD_D0         13   /*   D0   = SPI MISO                                       */
-#define BOARD_PIN_SD_D1         14
-#define BOARD_PIN_SD_D2         9
-#define BOARD_PIN_SD_D3         10   /*   D3   = SPI CS                                         */
+#define BOARD_PIN_SD_CLK        13   /*   CLK  = SPI CLK                                        */
+#define BOARD_PIN_SD_CMD        12   /*   CMD  = SPI MOSI                                       */
+#define BOARD_PIN_SD_D0         14   /*   D0   = SPI MISO                                       */
+#define BOARD_PIN_SD_D1         15   /* SDMMC via GPIO matrix; pins in module-edge order (routing) */
+#define BOARD_PIN_SD_D2         10
+#define BOARD_PIN_SD_D3         11   /*   D3   = SPI CS                                         */
 #define BOARD_PIN_SD_MOSI       BOARD_PIN_SD_CMD
 #define BOARD_PIN_SD_MISO       BOARD_PIN_SD_D0
 #define BOARD_PIN_SD_CS         BOARD_PIN_SD_D3
-#define BOARD_PIN_SD_PWR        2    /* TPS22917 ON, 10k pull-up: card ON by default.
+#define BOARD_PIN_SD_PWR        33   /* (module pin 28, near U6) TPS22917 ON, 10k pull-up: card ON by default.
                                       * Power-cycle: set SD pins input/low first (no back-power),
                                       * drive low >= 50 ms (QOD discharge), release, wait >= 5 ms. */
 #define BOARD_SD_PWR_ACTIVE     1
-#define BOARD_PIN_SD_CD         21   /* Cd switch to shell/GND, 10k pull-up; sense TBD on bench */
+#define BOARD_PIN_SD_CD         16   /* Cd switch to shell/GND, 10k pull-up; sense TBD on bench */
 #define BOARD_PIN_BOARD_ID      1    /* ADC1_CH0, 100k top / R7 bottom, 100 nF                  */
 #define BOARD_LED_5V_BUFFERED   1    /* LED on VBUS via SN74LV1T125; 10k pull-down on GPIO48   */
 

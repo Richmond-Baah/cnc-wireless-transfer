@@ -20,13 +20,15 @@ OX, OY = 100.0, 100.0
 W = 18.3                    # board width (case inner 18.54)
 PLUG_EDGE_TO_HOLES = 2.92   # XKB: board edge to hole row (EasyEDA C319178)
 NOTCH = (-6.5, 6.5, 0.0, 3.9)   # x0,x1,y0,y1: plug-shell zone kept free for a possible notch
-SD_Y0 = 27.2                # SD courtyard start (local y)
+SD_Y0 = 23.75               # SD courtyard start (local y)
 SD_OY = SD_Y0 + 3.65        # SD footprint origin y (courtyard starts 3.65 before origin)
-G0 = SD_Y0 + 17.25          # passives row between SD and module
-MOD_CY = G0 + 4.0 + 8.0     # module pad-field centre (courtyard starts 8.0 before it)
+G0 = SD_Y0 + 17.25          # passives rows between SD and module (6 mm; USB channel in the middle)
+MOD_CY = G0 + 6.05 + 8.0    # module pad-field centre (courtyard starts 8.0 before it)
 L = MOD_CY + 7.7            # board end = antenna boundary; antenna overhangs 5.1 mm
 E = W / 2 - 0.6             # 0402 column next to the board edge (pad edge 0.29 from edge)
 R1Y, R2Y = G0 + 0.98, G0 + 2.96
+SD_COL = {'CD': 2.3, 'D1': 3.5, 'D0': 4.5, 'CLK': 5.5, 'CMD': 6.5, 'D3': 7.5, 'D2': 8.5}
+SR_Y = G0 + 3.56
 
 # ref: (x, y, rot, side)   side 'F' or 'B'
 P = {
@@ -38,34 +40,38 @@ P = {
     'C3': (-5.0, 7.75, 0, 'F'),
     'D2': (3.6, 8.2, 0, 'F'), 'C12': (5.8, 8.2, 90, 'F'),
     # --- row B: USB series R, LDO, soft-start, LED buffer -----------------------------------------
-    'R1': (-0.95, 12.1, 90, 'F'), 'R2': (0.95, 12.1, 90, 'F'),
-    'C1': (-0.95, 14.1, 90, 'F'), 'C2': (0.95, 14.1, 90, 'F'), 'R3': (0.95, 16.1, 90, 'F'),
     'U2': (-5.4, 15.55, 90, 'F'),
     'U3': (3.9, 12.9, 0, 'F'), 'C5': (6.55, 12.9, 90, 'F'), 'C6': (8.1, 13.0, 90, 'F'),
     'C4': (3.2, 15.6, 0, 'F'),
     'U5': (7.0, 18.2, 0, 'F'), 'R10': (2.2, 18.2, 90, 'F'), 'R9': (3.3, 18.2, 90, 'F'),
     'C11': (4.35, 18.2, 90, 'F'),
-    # --- row C: buttons + Tag-Connect -------------------------------------------------------------
-    'SW2': (-5.25, 23.6, 0, 'F'), 'J2': (0, 23.6, 90, 'F'), 'SW1': (5.25, 23.6, 0, 'F'),
-    'R5': (5.25, 26.35, 0, 'F'),
+    # --- row C: buttons (TC2030 dropped: bottom test pads are the pogo-jig target) ---------------
+    'SW2': (-5.5, 21.9, 0, 'F'), 'SW1': (5.5, 21.9, 0, 'F'), 'R5': (1.9, 21.9, 90, 'F'),
     # --- SD socket (card slot faces -x) ------------------------------------------------------------
     'J3': (-W / 2 + 4.02, SD_OY, 270, 'F'),
     # --- row G (between SD and module): SD series R, pull-ups, SD switch, board ID ----------------
-    **{'R%d' % (12 + i): (3.25 + 1.05 * i, R1Y, 90, 'F') for i in range(6)},
-    **{'R%d' % (18 + i): (3.25 + 1.05 * i, R2Y, 90, 'F') for i in range(5)},
-    'R23': (8.5, R2Y, 90, 'F'),
-    'U6': (0.3, G0 + 1.75, 0, 'F'),
-    'C13': (-2.4, R1Y, 90, 'F'), 'R11': (-3.45, R1Y, 90, 'F'), 'R24': (-4.5, R1Y, 90, 'F'),
-    'C15': (-5.55, R1Y, 90, 'F'), 'C14': (-7.2, G0 + 1.55, 90, 'F'),
-    'R6': (-2.4, R2Y, 90, 'F'), 'R7': (-3.45, R2Y, 90, 'F'), 'C10': (-4.5, R2Y, 90, 'F'),
+    # SD columns, pitch 1.0 (x = SD_COL): pull-up at R1Y (VDD pad up), via, series R at SR_Y
+    **{r: (SD_COL[n], SR_Y, 90, 'F') for r, n in (('R15', 'D1'), ('R14', 'D0'), ('R12', 'CLK'),
+                                                  ('R13', 'CMD'), ('R17', 'D3'), ('R16', 'D2'))},
+    **{r: (SD_COL[n], R1Y, 90, 'F') for r, n in (('R20', 'D1'), ('R19', 'D0'), ('R18', 'CMD'),
+                                                 ('R22', 'D3'), ('R21', 'D2'))},
+    'R23': (8.0, 24.6, 180, 'F'),                   # CD pull-up, strip beside J3
+    # USB channel (HDG: series R and reserves near the chip): DP line x = -1.1, DM line x = 0
+    'R2': (-1.1, G0 + 4.6, 270, 'F'), 'R1': (0.0, G0 + 4.6, 270, 'F'),
+    'C2': (-1.61, G0 + 0.6, 180, 'F'), 'C1': (0.51, G0 + 0.6, 0, 'F'), 'R3': (0.6, 13.6, 0, 'F'),        # DNP D+ pull-up, beside the D+ via at the plug end
+    # SD power switch group (route.py sd_power): U6 west pins +3V3 / GND / ON, east VOUT / VOUT / CT
+    'U6': (-5.2, 43.2, 0, 'F'), 'R11': (-7.75, 43.2, 270, 'F'), 'C13': (-4.4, 45.75, 0, 'F'),
+    'C15': (-2.2, 43.0, 90, 'F'), 'C14': (-2.2, 44.9, 270, 'F'),
+    # board ID divider: strip beside the module's +x pins (IO1, pin 5)
+    'C10': (E, 51.1, 270, 'F'), 'R7': (E, 53.8, 90, 'F'), 'R6': (E, 55.9, 90, 'F'),
     # --- module + strips beside it -----------------------------------------------------------
     'U4': (0, MOD_CY, 180, 'F'),
-    'C8': (E, MOD_CY + 2.2, 90, 'F'), 'C7': (E, MOD_CY + 4.25, 90, 'F'),
-    'R8': (-E, MOD_CY + 0.85, 90, 'F'), 'R4': (-E, MOD_CY + 4.0, 90, 'F'), 'C9': (-E, MOD_CY + 6.0, 90, 'F'),
+    'C7': (E, 59.65, 270, 'F'), 'C8': (E, 61.5, 90, 'F'),   # GND pads level with module GND pins 2 / 1
+    'R8': (-E, 52.0, 90, 'F'), 'R4': (-E, 58.0, 270, 'F'), 'C9': (-E, 61.0, 270, 'F'),   # -x strip (route.py bus)
     # --- bottom: test pads (copper only, no assembly) under the power section ----------------------
     **{'TP%d' % (i + 1): (xy[0], xy[1], 0, 'B') for i, xy in enumerate(
         [(-7.5, 12.0), (-5.2, 12.0), (7.5, 9.0), (-2.9, 16.5), (2.9, 16.5),
-         (-7.5, 16.5), (-5.2, 16.5), (2.9, 12.0), (5.2, 12.0), (7.5, 12.0)])},
+         (-7.5, 16.5), (-5.2, 16.5), (-2.2, 20.0), (1.35, 20.0), (8.35, 53.6)])},   # TP10 under the ID divider
 }
 
 
@@ -173,13 +179,13 @@ def main():
         fp = load_fp(c['fp'])
         fp.SetReference(ref)
         fp.SetValue(c['value'])
-        for k in ('Fit', 'MPN', 'LCSC'):
-            if c['fields'].get(k):
+        for k in c['fields']:   # all custom symbol fields (Fit, MPN, LCSC, Note, Alt, ...)
+            if k not in ('Reference', 'Value', 'Footprint', 'Datasheet', 'Description') and c['fields'].get(k):
                 fp.SetField(k, c['fields'][k])
                 fp.GetField(k).SetVisible(False)
         if c['fields'].get('Fit') == 'DNP':
             fp.SetDNP(True); fp.SetExcludedFromBOM(True); fp.SetExcludedFromPosFiles(True)
-        if ref.startswith('TP') or ref == 'J2':  # copper only
+        if ref.startswith('TP'):  # copper only (pogo-jig pads)
             fp.SetExcludedFromBOM(True); fp.SetExcludedFromPosFiles(True)
         x, y, rot, side = P[ref]
         board.Add(fp)
@@ -194,7 +200,7 @@ def main():
         fp.Reference().SetVisible(False)   # dense board: refs on F.Fab / assembly drawing only
     edge(board)
     keepout(board, *NOTCH, 'PLUG_NOTCH_RESERVE')
-    text(board, 'FileXfer rev A', 0, 36.0, pcbnew.B_SilkS)
+    text(board, 'FileXfer rev A', 0, 32.5, pcbnew.B_SilkS)
     pcbnew.SaveBoard(PCB, board)
     print(f'wrote {PCB}: {len(comps)} footprints, {len(netinfo)} nets, board {W} x {L:.1f} mm '
           f'(+5.1 antenna overhang)')

@@ -29,11 +29,12 @@ def R(ref, val, a, b, fit='ALL', fp=R0402, **f):
 def C(ref, val, a, b, fit='ALL', fp=C0402, **f):
     return (ref, 'Device', 'C', val, fp, {'1': a, '2': b}, dict(Fit=fit, **f))
 
-MOD_NC = ['IO3', 'IO4', 'IO5', 'IO6', 'IO7', 'IO8', 'IO15', 'IO16', 'IO17', 'IO18', 'IO26', 'IO47',
-          'IO33', 'IO34', 'IO35', 'IO36', 'IO37', 'IO38', 'IO39', 'IO40', 'IO41', 'IO42', 'IO45', 'IO46']
-mod_map = {'GND': 'GND', '3V3': '+3V3', 'EN': 'EN', 'IO0': 'BOOT', 'IO1': 'BOARD_ID', 'IO2': 'SD_PWR_EN',
-           'IO9': 'SD_D2', 'IO10': 'SD_D3', 'IO11': 'SD_CMD', 'IO12': 'SD_CLK', 'IO13': 'SD_D0',
-           'IO14': 'SD_D1', 'USB_D-': 'USB_DM', 'USB_D+': 'USB_DP', 'IO21': 'SD_CD', 'IO48': 'LED_DATA_3V3',
+MOD_NC = ['IO2', 'IO3', 'IO4', 'IO5', 'IO6', 'IO7', 'IO8', 'IO9', 'IO17', 'IO18', 'IO26', 'IO47',
+          'IO33', 'IO34', 'IO36', 'IO37', 'IO38', 'IO39', 'IO40', 'IO41', 'IO42', 'IO45', 'IO46', 'IO21']
+mod_map = {'GND': 'GND', '3V3': '+3V3', 'EN': 'EN', 'IO0': 'BOOT', 'IO1': 'BOARD_ID', 'IO35': 'SD_PWR_EN',
+           # SDMMC via GPIO matrix, pins in module-edge order = resistor column order (routing, stage 4)
+           'IO10': 'SD_D2', 'IO11': 'SD_D3', 'IO12': 'SD_CMD', 'IO13': 'SD_CLK', 'IO14': 'SD_D0',
+           'IO15': 'SD_D1', 'IO16': 'SD_CD', 'USB_D-': 'USB_DM', 'USB_D+': 'USB_DP', 'IO48': 'LED_DATA_3V3',
            'TXD0': 'U0TXD_MOD', 'RXD0': 'U0RXD', **{n: 'NC' for n in MOD_NC}}
 
 PARTS = [
@@ -50,9 +51,9 @@ PARTS = [
      dict(Fit='ALL', MPN='USBLC6-2SC6', LCSC='C7519')),
     R('R1', '22', 'USB_DM_C', 'USB_DM', Note='HDG 22/33 ohm, near module'),
     R('R2', '22', 'USB_DP_C', 'USB_DP', Note='HDG 22/33 ohm, near module'),
-    C('C1', 'DNP', 'USB_DM', 'GND', fit='DNP', Note='HDG reserve, unpopulated'),
-    C('C2', 'DNP', 'USB_DP', 'GND', fit='DNP', Note='HDG reserve, unpopulated'),
-    R('R3', 'DNP', 'USB_DP', '+3V3', fit='DNP', Note='HDG optional D+ pull-up, value TBD'),
+    C('C1', 'DNP', 'USB_DM_C', 'GND', fit='DNP', Note='HDG reserve, unpopulated; connector side of R1'),
+    C('C2', 'DNP', 'USB_DP_C', 'GND', fit='DNP', Note='HDG reserve, unpopulated; connector side of R2'),
+    R('R3', 'DNP', 'USB_DP_C', '+3V3', fit='DNP', Note='HDG optional D+ pull-up, value TBD'),
     # --- 3V3 supply: LDO + soft-start ---------------------------------------------------------
     ('U2', 'Regulator_Linear', 'LD1117S33TR_SOT223', 'LDL1117S33R', 'Package_TO_SOT_SMD:SOT-223-3_TabPin2',
      {'3': '+5V', '2': '3V3_LDO', '1': 'GND'},
@@ -80,13 +81,9 @@ PARTS = [
     C('C10', '100n', 'BOARD_ID', 'GND', Note='ADC filter (HDG)'),
     R('R8', '499', 'U0TXD_MOD', 'U0TXD', Note='U0TXD series (HDG)'),
     # --- Debug / test ---------------------------------------------------------------------------
-    ('J2', 'Connector_Generic', 'Conn_02x03_Odd_Even', 'TC2030-NL',
-     'Connector:Tag-Connect_TC2030-IDC-NL_2x03_P1.27mm_Vertical',
-     {'1': '+3V3', '2': 'U0TXD', '3': 'GND', '4': 'U0RXD', '5': 'EN', '6': 'BOOT'},
-     dict(Fit='ALL', MPN='footprint only', Note='1 3V3, 2 TXD (ESP out), 3 GND, 4 RXD, 5 EN, 6 IO0')),
 ] + [
     ('TP%d' % (i + 1), 'Connector', 'TestPoint', n, TP, {'1': n}, dict(Fit='ALL', MPN='pad'))
-    for i, n in enumerate(['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP', 'USB_DM', 'BOARD_ID'])
+    for i, n in enumerate(['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C', 'BOARD_ID'])
 ] + [
     # --- RGB LED on 5 V via SN74LV1T125 buffer ------------------------------------------------------------
     ('U5', '74xGxx', '74LVC1G125', 'SN74LV1T125', 'Package_TO_SOT_SMD:SOT-23-5',
@@ -101,12 +98,11 @@ PARTS = [
     C('C12', '100n', '+5V', 'GND', Note='at LED VDD'),
     # --- microSD (RX only) -------------------------------------------------------------------------
     ('U6', 'Power_Management', 'TPS22917DBV', 'TPS22917DBVR', SOT236,
-     {'1': '+3V3', '2': 'GND', '3': 'SD_PWR_EN', '4': 'SD_CT', '5': 'SD_QOD', '6': 'SD_VDD'},
+     {'1': '+3V3', '2': 'GND', '3': 'SD_PWR_EN', '4': 'SD_CT', '5': 'SD_VDD', '6': 'SD_VDD'},   # QOD tied to VOUT (DS option 1, fast discharge)
      dict(Fit='RX', MPN='TPS22917DBVR', LCSC='C2681320', Note='SD power switch')),
-    R('R24', '0', 'SD_QOD', 'SD_VDD', fit='RX', Note='QOD to VOUT: fast discharge on power-cycle (DS option 1)'),
     C('C13', '1n', 'SD_CT', '+3V3', fit='RX', Note='CT to VIN, tR ~1.6 ms'),
     R('R11', '10k', '+3V3', 'SD_PWR_EN', fit='RX', Note='SD power default ON'),
-    C('C14', '10u', 'SD_VDD', 'GND', fit='RX', fp=C0603),
+    C('C14', '10u', 'SD_VDD', 'GND', fit='RX', Note='0402 X5R 6.3V (CL05A106MQ5NUNC C15525), fits beside U6'),
     C('C15', '100n', 'SD_VDD', 'GND', fit='RX'),
     ('J3', 'Connector', 'Micro_SD_Card_Det1', 'microSD push-push', 'filexfer:microSD_SHOUHAN_TF_PUSH',
      {'1': 'SD_D2_C', '2': 'SD_D3_C', '3': 'SD_CMD_C', '4': 'SD_VDD', '5': 'SD_CLK_C', '6': 'GND',
@@ -163,6 +159,15 @@ def main():
         key = f'{libname}:{symname}'
         if key not in libsyms:
             libsyms[key] = flatten(libname, symname)
+            if symname == 'TPS22917DBV':   # QOD tied to VOUT (DS option 1): pin 5 open_collector -> passive for ERC
+                def relax(node):
+                    if isinstance(node, list):
+                        if node and node[0] == 'pin' and any(isinstance(c, list) and c[:1] == ['number'] and
+                                                              str(c[1]).strip('"') == '5' for c in node):
+                            node[1] = 'passive'
+                        for c in node:
+                            relax(c)
+                relax(libsyms[key])
         ps = [p for p in pins(libsyms[key]) if p['unit'] in (0, 1)]
         if netmap == 'MODULE':
             netmap = {p['num']: mod_map[p['name']] for p in ps}
@@ -181,7 +186,7 @@ def main():
             Y = round((cursor_y + max(ys) + 8) / 2.54) * 2.54
             cursor_x += w + 70; rowh = max(rowh, h + 16)
         sym = ['symbol', ['lib_id', q(key)], ['at', f'{X:.2f}', f'{Y:.2f}', '0'], ['unit', '1'],
-               ['exclude_from_sim', 'no'], ['in_bom', 'yes' if fields.get('Fit') != 'DNP' else 'no'],
+               ['exclude_from_sim', 'no'], ['in_bom', 'yes' if fields.get('Fit') != 'DNP' and not ref.startswith('TP') else 'no'],
                ['on_board', 'yes'], ['dnp', 'yes' if fields.get('Fit') == 'DNP' else 'no'],
                ['uuid', q(uid('sym', ref))],
                prop('Reference', ref, X, Y - max(ys) - 3), prop('Value', val, X, Y - min(ys) + 3),

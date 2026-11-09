@@ -39,25 +39,81 @@ Legend: **[V]** checked in the named datasheet/drawing; **[U]** unverified.
 - Drawing side view: board-top plane 1.90 mm from one shell face, 2.60 from the other → shell straddles the board; shell rear (front − 18.75) is about 1 mm behind the hole row, so about 3.9 mm of shell is over the board. Whether the lower half of the shell is cut away there (legs only) or needs a board notch is **not determinable from the drawing** [U].
 - Ask: a STEP from LCSC (logged in) into `hardware/case/`, or a sample to measure.
 
-## 4. Placement (rev A, not routed) — `tools/gen_pcb.py` → `filexfer-pcb.kicad_pcb`
+## 4. Placement (rev A) — `tools/gen_pcb.py` → `filexfer-pcb.kicad_pcb`
 Frame: y from the plug board edge toward the antenna; x from the centreline, **+x = right, viewed from the top with the plug pointing away** (card slot is on the left, −x).
-- Board **18.3 × 64.2 mm**, 2 layers, 1.6 mm; module antenna overhangs the far end by 5.1 mm (total 69.3); plug protrudes 14.86 mm past the front edge.
-- All assembled parts on top; bottom = 10 test pads only (copper, not in BOM/CPL). J2 TC2030 is copper only.
-- Order: plug (0–6.8) → USB ESD / LDO / soft-start / LED (6.8–20) → buttons + TC2030 (20–27.2) → SD socket (27.2–44.4) → SD passives, SD switch, board ID (44.5–48.4) → module (48.4–64.2) + antenna.
+- Board **18.3 × 62.75 mm**, 2 layers, 1.6 mm; module antenna overhangs the far end by 5.1 mm (total 67.85); plug protrudes 14.86 mm past the front edge.
+- All assembled parts on top; bottom = 10 test pads only (copper, not in BOM/CPL), the production pogo-jig target. TC2030 dropped (user, routing go-ahead).
+- Order: plug (0–6.8) → USB ESD / LDO / soft-start / LED (6.8–20) → buttons (20–23.7) → SD socket (23.75–39.7) → SD resistor columns + SD switch (41–46.9) → module (47.35–62.75) + antenna. Board-ID divider and EN/UART parts sit in the strips beside the module (§5).
 - **Notch reserve** x ±6.5, y 0–3.9: KiCad rule area on both layers (no tracks, vias, pour); only J1's own NPTH holes and leg slots are inside. F1/D1 sit beside it (|x| ≥ 6.78). Note: the leg slots are at x ±5.70 (pads to ±6.5), so a notch can be at most about 9.8 mm wide unless the legs are inside it [U, depends on the STEP].
 - Module strips (1.15 mm between module courtyard and board edge): C7 10 µF 0402 + C8 by the 3V3 pin; R8 (TXD), R4/C9 (EN RC) on the other side.
 - Rules (JLC 2-layer): 0.127 track/space min, default net class 0.2/0.15, via 0.6/0.3, copper–edge 0.25, hole–hole 0.5.
-- DRC: 0 courtyard/clearance/edge errors; remaining = unrouted (163), 4 module silk outside the board edge (antenna overhang, clipped by the fab).
 - Height (top / bottom of board): plug +1.90/−2.60 or +2.60/−1.90 [U face], module 2.4, SD 2.0, SOT-223 1.8, TS-1088 1.6; bottom: plug only. Stack ≤ 6.8 mm vs 7.3 inner.
 
 ### Case features (new positions; the old Super Mini case does not apply)
 | Feature | x (mm) | y from plug board edge | Notes |
 |---|---|---|---|
 | LED (WS2812B-2020) | +3.6 | 8.2 | top, 0.85 mm tall |
-| BOOT button SW1 | +5.25 | 23.6 | TS-1088-AR02016, 1.6 mm actuator top [U] |
-| RESET button SW2 | −5.25 | 23.6 | same |
-| TC2030 (J2) | 0 | 23.6 | case open to use |
-| microSD card slot | left edge (−x) | body 28.4–43.2, card about 30.3–41.3 | socket front flush with the board edge; side-wall slot needed |
-| Antenna | — | 64.2–69.3 | plastic only around it |
-- Case inner length grows from 64.3 to about 70 mm. Dropping the TC2030 (UART/EN/IO0/3V3/GND remain as bottom test pads) would save about 3.5 mm.
+| BOOT button SW1 | +5.5 | 21.9 | TS-1088-AR02016, 1.6 mm actuator top [U] |
+| RESET button SW2 | −5.5 | 21.9 | same |
+| microSD socket J3 | −9.15 … +5.35 (slot faces −x, flush with the left edge) | body 23.75–39.7; card about 25.7–36.7 | **sealed inside, no case slot.** Socket 2.0 mm tall (height list above). Retaining rib: case wall/rib at the left edge, y ≈ 26–36, ≥0.3 mm from the card face, so a push-push eject cannot move the card out. Keep 0.5 mm clear above the socket. |
+| Antenna | — | 62.75–67.85 | plastic only around it |
+- Case inner length about 68.5 mm (board 67.85 + clearance).
 - Placeholder 3D models: XKB plug and SD socket are boxes at datasheet dimensions (`tools/gen_fp.py`), not vendor geometry.
+
+## 5. Routing (rev A) — `tools/route.py` (run after `gen_pcb.py`)
+Freerouting could not be downloaded (blocked as external code), so routing is a script:
+- **Fixed geometry** for the critical and congested parts: USB pair; SD bus fan; SD switch group; front↔module trunks under the SD socket; terminations at the module strips; LED nets; GND vias for boxed-in pads.
+- **A\* maze router** (0.1 mm grid, two layers, real clearances) for everything else; it also joins islands.
+- **GND:** fanout vias, stitching (module EPAD ×4, a 1 mm row inside the antenna edge, board edges, 2 mm grid), pours on both layers (0.2 mm clearance), plus a via in every pour island.
+
+**DRC (KiCad 10, JLC rules, schematic parity on): 0 errors, 0 unconnected, 0 parity issues.** 9 warnings left:
+- 4 module silkscreen lines past the board edge (antenna overhang; the fab clips them).
+- 5 GND pour necks 0.08–0.10 mm. They are at the J1 shell pads, which sit inside the notch reserve where pour is not allowed, and at two vias. Each item is also connected by other paths. Cosmetic.
+
+ERC 0. 310 tracks, 169 vias.
+
+### USB D+/D− (90 Ω differential)
+- Geometry: 0.5 mm traces, 0.15 mm gap, 0.2 mm gap to the coplanar GND pour, 1.6 mm FR-4 (εr 4.5), no solder mask.
+  - Result: **91.4 Ω** (my own 2D field solver, `tools/zdiff.py`). Mask should pull it down 2–3 Ω, so expect about 88–90 Ω [estimate; not the fab's calculator].
+  - Solver check: an isolated 1.1 mm microstrip gives 158.5 Ω vs Hammerstad's ≈163 Ω (−3 %).
+- Route: J1 → U1 (ESD, flow-through) on top → vias → coupled run on the **bottom under the SD socket**, referenced to the top GND pour under the socket body → vias → R1/R2 (22 Ω) on top → module pins 23/24.
+  - D+/D− swap order between plug and module; one crossover at the plug-end vias.
+  - Necked to 0.4 mm only at the module pins.
+- Lengths: D+ 42.9 mm, D− 41.9 mm, excluding test-pad stubs and the R3 stub. The ~1 mm skew is negligible at USB full speed (12 Mbit/s).
+- Stubs: TP8/TP9 (bottom, 1.45 mm) and R3 (DNP D+ pull-up, moved beside the plug-end D+ via, 1.4 mm). C1/C2 (DNP) sit on the connector side of R1/R2.
+
+### Power
+- VBUS 0.6 mm; +5V and 3V3_LDO 0.5 mm.
+- +3V3 trunk 0.5 mm from the front to the module along the bottom corridor, then east under the SD resistor row and up the +x strip to pin 3 / C7 / C8.
+- A 0.3 mm second +3V3 trunk, fed from TP1, runs along the −x edge to R4 and the SD switch (U6).
+- SD_VDD 0.4 mm (0.3 mm inside the U6 group).
+
+### Antenna keep-out
+- The board ends at the antenna boundary. No copper, vias or parts under the antenna (it overhangs).
+- GND stitching row 1 mm pitch just inside that edge.
+- Bottom under the module core and top inside the pad ring are GND-only.
+
+### Changes made for routing (schematic / placement / firmware proposal)
+1. **SDMMC pins remapped** to follow the module edge order (any GPIO is allowed via the GPIO matrix — ESP-IDF SDMMC docs [V]): CLK IO13, CMD IO12, D0 IO14, D1 IO15, D2 IO10, D3 IO11, CD IO16. IO9 and IO21 are now NC.
+2. **SD_PWR_EN moved IO2 → IO35** (module pin 31, beside U6). IO33–IO37 are octal-PSRAM pins only on modules with octal PSRAM; MINI-1-N8 has none (my reading of the module variants; not rechecked this stage) [U]. Don't swap to an octal-PSRAM module.
+3. **SD bus layout:** resistors in columns at 1.0 mm pitch. Each column is the 10k pull-up (card side), then a via, then the 22 Ω series resistor, running straight to the module pins.
+   - J3 pins escape to vias beside the socket and run in non-crossing bottom lanes. SD_VDD runs as a top lane beside J3.
+   - R23 (CD pull-up) moved beside J3.
+4. **U6 (TPS22917) group:**
+   - QOD tied directly to VOUT (datasheet option 1, unchanged behaviour). The 0 Ω R24 is removed, and the QOD pin type is set to passive in the embedded symbol so ERC accepts the tie.
+   - C14 changed to 10 µF **0402** (CL05A106MQ5NUNC, same part as C7). DC-bias derating at 3.3 V not checked [U].
+5. **Board-ID divider** (R6/R7/C10) moved beside module pin 5 (IO1); TP10 is under it on the bottom. **R8/R4/C9** stay beside the −x pins.
+6. TP symbols excluded from the BOM in the schematic, matching the PCB. All symbol fields are copied to the footprints.
+7. `firmware/board_config.h` updated for items 1–2.
+
+### Open / unverified
+- **TPS22917 CT capacitor:** the schematic note says "CT to VIN"; recheck against the datasheet (I believe the usual connection is CT to GND) [U].
+- Impedance: not checked by the fab's stack-up calculator (JLC impedance tool) [U].
+- XKB plug seating and the plug notch: waiting for the STEP. Notch width is limited to about 9.8 mm by the leg slots.
+- CD switch polarity; TS-1088 height; C7/C14 0402 10 µF derating.
+
+### Rev B (to shorten the board)
+- Evaluate the SD socket on the bottom, under the module.
+- Evaluate solderable SD NAND (e.g. an LGA-8 part) instead of a socket. It drops the socket, card retention and CD.
+
+Renders: `docs/img/routed-3d-top.png`, `routed-3d-bottom.png`, `routed-3d-iso.png`, `routed-copper.png` (top/bottom copper, pours shaded).
