@@ -1,0 +1,6 @@
+~*.lck
+*.lck
+__pycache__/
+*-backups/
+_autosave-*
+fp-info-cache

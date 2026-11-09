@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "filexfer")(type "KiCad")(uri "${KIPRJMOD}/filexfer.pretty")(options "")(descr "FileXfer custom footprints (Stage 4)"))
+)
