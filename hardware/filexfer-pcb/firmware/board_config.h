@@ -49,9 +49,9 @@
                                       * Power-cycle: set SD pins input/low first (no back-power),
                                       * drive low >= 50 ms (QOD discharge), release, wait >= 5 ms. */
 #define BOARD_SD_PWR_ACTIVE     1
-#define BOARD_PIN_SD_CD         21   /* low = card present (10k pull-up) [polarity unverified]  */
+#define BOARD_PIN_SD_CD         21   /* Cd switch to shell/GND, 10k pull-up; sense TBD on bench */
 #define BOARD_PIN_BOARD_ID      1    /* ADC1_CH0, 100k top / R7 bottom, 100 nF                  */
-#define BOARD_LED_5V_BUFFERED   1    /* LED on VBUS via 74AHCT1G125; 10k pull-down on GPIO48    */
+#define BOARD_LED_5V_BUFFERED   1    /* LED on VBUS via SN74LV1T125; 10k pull-down on GPIO48   */
 
 #else
 #error "Select a board: CONFIG_FILEXFER_BOARD_SUPERMINI or CONFIG_FILEXFER_BOARD_FX_REV_A"

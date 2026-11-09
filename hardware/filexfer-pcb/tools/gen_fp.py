@@ -73,9 +73,14 @@ def usb_a_xkb():
     for x in (-5.70, 5.70):
         b += (f'\t(pad "SH" thru_hole oval (at {x:.3f} 0.000) (size 1.60 4.00) (drill oval 1.00 2.50) '
               f'(layers "*.Cu" "*.Mask"))\n')
-    b += rect(-6.0, -1.9, 6.0, 16.85, 'F.Fab')          # shell 12.00 wide, 18.75 long [U] Y position
-    b += rect(-6.75, -3.85, 6.75, 2.25, 'F.CrtYd', 0.05)  # on-board part only; shell overhangs edge
-    b += note('shell overhangs board edge toward +Y; edge position and mid-mount drop [U] - confirm with 3D model', 0, 3.0)
+    # Board edge +2.92 from the hole row and shell front +17.78: EasyEDA footprint for C319178 (board-outline
+    # + silk layers); not in the XKB drawing. Shell rear = front - 18.75 (drawing length) [U].
+    EDGE, FRONT = 2.92, 17.78
+    b += line(-9.0, EDGE, 9.0, EDGE, 'Dwgs.User', 0.1)
+    b += note('board edge (EasyEDA C319178)', 0, EDGE + 0.6)
+    b += rect(-6.0, FRONT - 18.75, 6.0, FRONT, 'F.Fab')   # shell 12.00 x 18.75
+    b += rect(-6.75, -3.85, 6.75, EDGE, 'F.CrtYd', 0.05)  # on-board part only; shell overhangs edge 14.86
+    b += note('shell straddles board plane (+1.90/-2.60 or +2.60/-1.90); behind-edge clearance [U] - 3D model', 0, 4.4)
     return footprint('USB_A_Plug_XKB_U217-041N-4BV81',
                      'USB 2.0 Type-A plug, XKB U217-041N-4BV81 (LCSC C319178), SMD signal pins + plated shell-leg slots. '
                      'Pads from vendor PCB layout; shell outline/board-edge position [U]', b, 'through_hole')
