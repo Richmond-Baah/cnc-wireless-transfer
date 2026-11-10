@@ -1,4 +1,4 @@
-"""FileXfer rev A schematic drawing: functional blocks, wires, labels, power symbols (A3, one sheet).
+"""FileXfer schematic drawing (rev A cleanup 2026-11-10; rev B short-case changes 2026-11-10): functional blocks, wires, labels, power symbols (A3, one sheet).
 
 Used once by gen_sch.py for the 2026-11-10 readability cleanup; since then filexfer-pcb.kicad_sch is
 the master. PARTS (gen_sch.py) is the electrical spec. build() traces the drawing (wires, labels, power
@@ -39,15 +39,14 @@ PLACE = {
     # A  USB input & protection
     'J1': (30.48, 50.8, 0), 'F1': (63.5, 35.56, 90), 'D1': (73.66, 39.37, 270),
     'U1': (106.68, 83.82, 0), 'R2': (111.76, 50.8, 90), 'R1': (111.76, 63.5, 90),
-    'C2': (93.98, 54.61, 0), 'C1': (96.52, 67.31, 0), 'R3': (88.9, 46.99, 180),
     # B  3.3 V supply + soft-start
-    'C3': (152.4, 44.45, 0), 'U2': (167.64, 40.64, 0), 'C4': (180.34, 44.45, 0),
+    'C3': (152.4, 44.45, 0), 'U2': (167.64, 43.18, 0), 'C4': (180.34, 44.45, 0),
     'C5': (198.12, 44.45, 180), 'U3': (215.9, 48.26, 0), 'C6': (236.22, 49.53, 0),
     # E  status LED + level shifter
     'R9': (292.1, 54.61, 0), 'U5': (314.96, 50.8, 0), 'C11': (302.26, 39.37, 0),
     'R10': (347.98, 50.8, 90), 'D2': (370.84, 50.8, 0), 'C12': (381.0, 39.37, 0),
     # F  reset / boot buttons, board ID
-    'R4': (30.48, 121.92, 0), 'C9': (43.18, 129.54, 0), 'SW2': (58.42, 130.81, 270),
+    'R4': (30.48, 121.92, 0), 'C9': (43.18, 129.54, 0),
     'R5': (30.48, 151.13, 0), 'SW1': (50.8, 160.02, 270),
     'R6': (30.48, 180.34, 0), 'R7': (30.48, 187.96, 0), 'C10': (50.8, 187.96, 0),
     # C  module
@@ -57,12 +56,8 @@ PLACE = {
     'C13': (261.62, 128.27, 180), 'R11': (246.38, 130.81, 0), 'U6': (281.94, 132.08, 0),
     'C14': (302.26, 133.35, 0), 'C15': (312.42, 133.35, 0),
     'J3': (378.46, 175.26, 0), 'R23': (337.82, 167.64, 0),
+    'RN1': (287.02, 167.64, 0), 'R22': (307.34, 167.64, 180),     # pull-ups: array pins 1-4 at the bottom
 }
-SD_SERIES = ['SD_CLK', 'SD_CMD', 'SD_D0', 'SD_D1', 'SD_D2', 'SD_D3']          # R12..R17
-for _i, _s in enumerate(SD_SERIES):
-    PLACE['R%d' % (12 + _i)] = (256.54, 154.94 + 7.62 * _i, 90)
-for _i in range(5):                                                         # R18..R22 pull-ups
-    PLACE['R%d' % (18 + _i)] = (281.94 + 10.16 * _i, 167.64, 180)   # pin 1 (_C side) at the bottom
 TPS = ['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C', 'BOARD_ID']
 for _i in range(10):                                                        # TP1..TP10, body left
     PLACE['TP%d' % (_i + 1)] = (35.56 + 50.8 * (_i // 5), 236.22 + 10.16 * (_i % 5), 90)
@@ -71,7 +66,7 @@ FRAMES = [   # x0, y0, x1, y1, title
     (15, 15, 135, 100, 'USB INPUT & PROTECTION'),
     (140, 15, 265, 100, '3.3 V SUPPLY + SOFT-START'),
     (270, 15, 405, 100, 'STATUS LED + 3.3 V -> 5 V LEVEL SHIFTER'),
-    (15, 105, 100, 215, 'RESET / BOOT / BOARD ID'),
+    (15, 105, 100, 215, 'EN RC / BOOT / BOARD ID'),
     (105, 105, 215, 215, 'ESP32-S3 MODULE'),
     (220, 105, 405, 215, 'microSD + POWER SWITCH  (RX ONLY)'),
     (15, 220, 140, 285, 'TEST PADS (bottom side, pogo jig)'),
@@ -80,18 +75,20 @@ FRAMES = [   # x0, y0, x1, y1, title
 
 NOTES = [
     (19, 82, 'J1 hand-soldered (DNP in assembly). F1 750 mA PTC.\n'
-             'D1 SMF5.0A TVS after F1. U1 USBLC6-2SC6 at the plug.\n'
+             'D1 SMF5.0A TVS after F1. U1 USBLC6-2P6 (SOT-666) at the plug.\n'
              'R1/R2 22 R series near the module (HDG).\n'
-             'C1, C2, R3: footprint reserves, not fitted (DNP).'),
-    (144, 66, 'U2 LDL1117 5 V -> 3.3 V: P = 1.7 V x 0.25 A avg = 0.43 W; tab copper + 4 vias.\n'
+             'Rev B: rev A DNP reserves C1, C2, R3 removed.'),
+    (144, 66, 'U2 TLV76733DRVR (WSON-6) 5 V -> 3.3 V, 1 A: P = 1.7 V x 0.25 A avg = 0.43 W;\n'
+              'EN tied to IN, SNS to OUT, thermal pad to the GND plane (vias).\n'
               'U3 TPS22917 soft-start: CT (C5) to VIN per TI DS pin table;\n'
               'tR = 1.6 us/pF x 2.2 nF = 3.5 ms (at 3.6 V).\n'
               'Inrush = C x dV/dt = (22u + 10u + 0.1u + module) x 3.3 V / 3.5 ms = ~30 mA + module.\n'
-              'QOD open: no quick output discharge on the main rail.'),
+              'QOD open: no quick output discharge on the main rail. Kept in rev B: the TLV767\n'
+              'internal 0.5 ms soft-start alone gives ~170 uC at attach (> 50 uC), see docs.'),
     (274, 70, 'U5 SN74LV1T125 (74LVC1G125 symbol, same pinout): single-supply\n'
               'translator at VCC 5 V, VIH 2.03 V max -> 3.3 V input is valid. OE tied low.\n'
               'R9 holds DIN low during boot (LED dark). R10 100 R at DIN.'),
-    (19, 198, 'EN RC: R4 10k / C9 1u (module DS). SW2 = reset.\n'
+    (19, 198, 'EN RC: R4 10k / C9 1u (module DS). No reset button (rev B): replug.\n'
               'BOOT (IO0): R5 10k pull-up, no cap. Hold SW1 at reset -> download.\n'
               'Board ID (IO1, ADC): RX R7 = 100k -> 1.65 V;\n'
               'TX R7 = 22k (C25768) -> 0.60 V. TX firmware ignores BOARD_ID.'),
@@ -101,15 +98,15 @@ NOTES = [
     (224, 199, 'RX only: every part in this block is Fit=RX (not fitted on TX).\n'
                'U6 TPS22917: CT (C13 1 nF) to VIN, tR = ~1.6 ms. QOD tied to VOUT (fast discharge).\n'
                'R11 pulls ON high: SD power on by default; IO35 can switch it off.\n'
-               'R12-R17 0 R series (tune in layout); R18-R22 pull-ups to the switched SD_VDD.\n'
-               'J3 SHOU HAN TF PUSH (push-push). Card detect switches to GND on insert [polarity unverified].'),
+               'RN1 (4x10k array) + R22: pull-ups to the switched SD_VDD. No series R (rev B).\n'
+               'J3 SHOU HAN TF PUSH, bottom side, hand-soldered. CD to GND on insert [polarity unverified].'),
     (149, 230, 'Fit field: ALL = TX + RX builds; RX = receiver only (DNP on TX); DNP = footprint only (X).\n'
                'TX build: microSD block not fitted, R7 = 22k. J1 hand-soldered in every build.\n'
                'Inter-block nets use local labels; power symbols are sheet-local (net names /GND, /+3V3, /+5V).\n'
                'Test pads: bottom-side copper pads for the production pogo jig (not in BOM/CPL).\n'
                'This sheet was laid out by tools/gen_sch.py once (2026-11-10);\n'
                'filexfer-pcb.kicad_sch is now the master. Edit it in KiCad.\n'
-               'Design notes: docs/stage2-parts.md, docs/stage4-notes.md, docs/schematic-style.md.'),
+               'Design notes: docs/stage2-parts.md, docs/stage4-notes.md, docs/revB-notes.md, docs/schematic-style.md.'),
 ]
 
 
@@ -130,7 +127,6 @@ def drawing(P):
     pw('GND', *P('D1', '2'))
     w(j1p, P('R2', '1')); lab('USB_DP_C', 45.72, 50.8, 0)
     w(j1m, (43.18, j1m[1]), (43.18, 63.5), P('R1', '1')); lab('USB_DM_C', 45.72, 63.5, 0)
-    pw('GND', *P('C2', '2')); pw('GND', *P('C1', '2')); pw('+3V3', *P('R3', '2'))
     for r, net in (('R2', 'USB_DP'), ('R1', 'USB_DM')):
         e = P(r, '2'); w(e, (e[0] + 6.35, e[1])); lab(net, e[0] + 6.35, e[1], 0)
     for pin, net, d in (('1', 'USB_DM_C', -1), ('3', 'USB_DP_C', -1), ('6', 'USB_DM_C', 1), ('4', 'USB_DP_C', 1)):
@@ -139,8 +135,11 @@ def drawing(P):
 
     # ---- B: 3.3 V supply + soft-start ----------------------------------------------------------
     y = 40.64
-    pw('+5V', 147.32, y); w((147.32, y), P('U2', '3')); pw('GND', *P('C3', '2')); pw('GND', *P('U2', '1'))
-    w(P('U2', '2'), (203.2, y)); lab('3V3_LDO', 176.53, y, 0); pw('GND', *P('C4', '2'))
+    pw('+5V', 147.32, y); w((147.32, y), P('U2', '6')); pw('GND', *P('C3', '2'))
+    en = P('U2', '4'); w(en, (157.48, en[1]), (157.48, y))                   # EN tied to IN
+    g, ep = P('U2', '3'), P('U2', '7'); w(ep, g); pw('GND', *g)              # GND pins + thermal pad
+    w(P('U2', '1'), (203.2, y)); lab('3V3_LDO', 176.53, y, 0); pw('GND', *P('C4', '2'))
+    sn = P('U2', '2'); w(sn, (177.8, sn[1]), (177.8, y))                     # SNS to OUT
     vin, ct, on = P('U3', '1'), P('U3', '4'), P('U3', '3')
     w(vin, (203.2, vin[1]), (203.2, y))
     w(P('C5', '1'), ct); lab('SS_CT', 199.39, ct[1], 0)
@@ -159,12 +158,12 @@ def drawing(P):
     w((vd[0], 35.56), P('C12', '1')); pw('GND', *P('C12', '2')); pw('GND', *P('D2', '2'))
 
     # ---- F: reset / boot / board ID ------------------------------------------------------------
-    for top, node, net, taps in (('R4', 'R4', 'EN', [('C9', '1'), ('SW2', '1')]),
+    for top, node, net, taps in (('R4', 'R4', 'EN', [('C9', '1')]),
                                  ('R5', 'R5', 'BOOT', [('SW1', '1')]),
                                  ('R6', 'R6', 'BOARD_ID', [('C10', '1')])):
         pw('+3V3', *P(top, '1'))
         n = P(node, '2'); w(n, (76.2, n[1])); lab(net, 76.2, n[1], 0)
-    for r in ('C9', 'SW2', 'SW1', 'R7', 'C10'):
+    for r in ('C9', 'SW1', 'R7', 'C10'):
         pw('GND', *P(r, '2'))
 
     # ---- C: module -----------------------------------------------------------------------------
@@ -191,19 +190,17 @@ def drawing(P):
     w(vo, (320.04, vo[1])); lab('SD_VDD', 320.04, vo[1], 0)
     w(qod, (294.64, qod[1]), (294.64, vo[1]))
     pw('GND', *P('U6', '2')); pw('GND', *P('C14', '2')); pw('GND', *P('C15', '2'))
-    for i, s in enumerate(SD_SERIES):
-        r = 'R%d' % (12 + i); a, b = P(r, '1'), P(r, '2')
-        w((a[0] - 5.08, a[1]), a); lab(s, a[0] - 5.08, a[1], 180)
-        w(b, (b[0] + 5.08, b[1])); lab(s + '_C', b[0] + 5.08, b[1], 0)
     yr = 157.48
-    w((281.94, yr), (322.58, yr)); lab('SD_VDD', 303.53, yr, 0)
-    for i, s in enumerate(['SD_CMD', 'SD_D0', 'SD_D1', 'SD_D2', 'SD_D3']):
-        r = 'R%d' % (18 + i); t, b = P(r, '2'), P(r, '1')
-        w(t, (t[0], yr)); w(b, (b[0], b[1] + 2.54)); lab(s + '_C', b[0], b[1] + 2.54, 270)
+    w((281.94, yr), (307.34, yr)); lab('SD_VDD', 298.45, yr, 0)
+    for t, b, s in (('8', '1', 'SD_CMD'), ('7', '2', 'SD_D0'), ('6', '3', 'SD_D1'), ('5', '4', 'SD_D2')):
+        t, b = P('RN1', t), P('RN1', b)
+        w(t, (t[0], yr)); w(b, (b[0], b[1] + 2.54)); lab(s, b[0], b[1] + 2.54, 270)
+    t, b = P('R22', '2'), P('R22', '1')
+    w(t, (t[0], yr)); w(b, (b[0], b[1] + 2.54)); lab('SD_D3', b[0], b[1] + 2.54, 270)
     pw('+3V3', *P('R23', '1'))
     b = P('R23', '2'); w(b, (b[0], b[1] + 2.54)); lab('SD_CD', b[0], b[1] + 2.54, 270)
-    for num, net in (('1', 'SD_D2_C'), ('2', 'SD_D3_C'), ('3', 'SD_CMD_C'), ('4', 'SD_VDD'), ('5', 'SD_CLK_C'),
-                     ('7', 'SD_D0_C'), ('8', 'SD_D1_C'), ('9', 'SD_CD')):
+    for num, net in (('1', 'SD_D2'), ('2', 'SD_D3'), ('3', 'SD_CMD'), ('4', 'SD_VDD'), ('5', 'SD_CLK'),
+                     ('7', 'SD_D0'), ('8', 'SD_D1'), ('9', 'SD_CD')):
         p = P('J3', num); w(p, (p[0] - 5.08, p[1])); lab(net, p[0] - 5.08, p[1], 180)
     p = P('J3', '6'); w(p, (p[0] - 2.54, p[1])); pw('GND', p[0] - 2.54, p[1], 270)
     pw('GND', *P('J3', 'SH'))
@@ -434,7 +431,7 @@ def build(PARTS, mod_map, flatten, OUT, PROJECT, ROOT_UUID, uid, prop):
                       ['uuid', q(uid('note', i))]])
     doc = ['kicad_sch', ['version', '20250114'], ['generator', q('eeschema')], ['generator_version', q('9.0')],
            ['uuid', q(ROOT_UUID)], ['paper', q('A3')],
-           ['title_block', ['title', q('FileXfer rev A')], ['date', q('2026-11-10')], ['rev', q('A')],
+           ['title_block', ['title', q('FileXfer rev B (short case)')], ['date', q('2026-11-10')], ['rev', q('B')],
             ['company', q('FileXfer')],
             ['comment', '1', q('Author: Richmond Osei-Baah')],
             ['comment', '2', q('Sheet 1/1: Main (USB input, 3.3 V supply, module, microSD, LED, buttons, test pads)')],
@@ -478,6 +475,7 @@ FIELD_OVERRIDE = {
     'C5': {'ref': (195.58, 43.18, 0, 'right'), 'val': (195.58, 45.72, 0, 'right')},
     'R23': {'ref': (335.28, 166.37, 0, 'right'), 'val': (335.28, 168.91, 0, 'right')},
     'C13': {'ref': (259.08, 127.0, 0, 'right'), 'val': (259.08, 129.54, 0, 'right')},
+    'RN1': {'ref': (279.4, 166.37, 0, 'right'), 'val': (279.4, 168.91, 0, 'right')},
 }
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the FileXfer rev A schematic from KiCad stock symbols (layout: tools/sch_layout.py).
+"""Generate the FileXfer rev B (short case) schematic from KiCad stock symbols (layout: tools/sch_layout.py).
 
 Every symbol pin must be mapped to a net name or 'NC'; the script fails otherwise.
 Run: python3 -I tools/gen_sch.py --force  (from hardware/filexfer-pcb; the .kicad_sch is the master now)
@@ -29,7 +29,7 @@ PASSIVE = {
     (C0402, '100n'): ('CL05B104KO5NNNC', 'C1525'), (C0402, '1u'): ('CL05A105KA5NQNC', 'C52923'),
     (C0402, '10u'): ('CL05A106MQ5NUNC', 'C15525'), (C0402, '1n'): ('0402B102K500NT', 'C1523'),
     (C0402, '2.2n'): ('0402B222K500NT', 'C1531'),            # E
-    (C0603, '4.7u'): ('CL10A475KO8NNNC', 'C19666'), (C0805, '22u'): ('CL21A226MAQNNNE', 'C45783'),
+    (C0603, '4.7u'): ('CL10A475KO8NNNC', 'C19666'), (C0603, '22u'): ('CL10A226MQ8NRNC', 'C59461'),
     (R0402, '22'): ('0402WGF220JTCE', 'C25092'), (R0402, '0'): ('0402WGF0000TCE', 'C17168'),
     (R0402, '10k'): ('0402WGF1002TCE', 'C25744'), (R0402, '100k'): ('0402WGF1003TCE', 'C25741'),
     (R0402, '22k'): ('0402WGF2202TCE', 'C25768'), (R0402, '100'): ('0402WGF1000TCE', 'C25076'),
@@ -61,33 +61,28 @@ PARTS = [
      dict(Fit='ALL', MPN='BSMD1206-075-6V', LCSC='C883127')),
     ('D1', 'Device', 'D_Zener', 'SMF5.0A', 'Diode_SMD:D_SMF', {'1': '+5V', '2': 'GND'},
      dict(Fit='ALL', MPN='SMF5.0A (Leiditech)', LCSC='C2759874', Note='unidirectional TVS 5 V')),
-    ('U1', 'Power_Protection', 'USBLC6-2SC6', 'USBLC6-2SC6', SOT236,
+    ('U1', 'Power_Protection', 'USBLC6-2P6', 'USBLC6-2P6', 'Package_TO_SOT_SMD:SOT-666',
      {'1': 'USB_DM_C', '6': 'USB_DM_C', '3': 'USB_DP_C', '4': 'USB_DP_C', '5': '+5V', '2': 'GND'},
-     dict(Fit='ALL', MPN='USBLC6-2SC6', LCSC='C7519')),
+     dict(Fit='ALL', MPN='USBLC6-2P6', LCSC='C15999')),
     R('R1', '22', 'USB_DM_C', 'USB_DM', Note='HDG 22/33 ohm, near module'),
     R('R2', '22', 'USB_DP_C', 'USB_DP', Note='HDG 22/33 ohm, near module'),
-    C('C1', 'DNP', 'USB_DM_C', 'GND', fit='DNP', Note='HDG reserve, unpopulated; connector side of R1'),
-    C('C2', 'DNP', 'USB_DP_C', 'GND', fit='DNP', Note='HDG reserve, unpopulated; connector side of R2'),
-    R('R3', 'DNP', 'USB_DP_C', '+3V3', fit='DNP', Note='HDG optional D+ pull-up, value TBD'),
     # --- 3V3 supply: LDO + soft-start ---------------------------------------------------------
-    ('U2', 'Regulator_Linear', 'LD1117S33TR_SOT223', 'LDL1117S33R', 'Package_TO_SOT_SMD:SOT-223-3_TabPin2',
-     {'3': '+5V', '2': '3V3_LDO', '1': 'GND'},
-     dict(Fit='ALL', MPN='LDL1117S33R', LCSC='C435835', Note='symbol LD1117 SOT-223: same pinout 1 GND 2 VOUT/tab 3 VIN')),
+    ('U2', 'Regulator_Linear', 'TLV76733DRVx', 'TLV76733DRVR', 'Package_SON:WSON-6-1EP_2x2mm_P0.65mm_EP1x1.6mm',
+     {'6': '+5V', '4': '+5V', '1': '3V3_LDO', '2': '3V3_LDO', '3': 'GND', '5': 'GND', '7': 'GND'},
+     dict(Fit='ALL', MPN='TLV76733DRVR', LCSC='C2848334', Note='1 A, 16 V, WSON-6 2x2; EN tied to IN, SNS to OUT, thermal pad to GND (TI SLVSE84D)')),
     C('C3', '4.7u', '+5V', 'GND', fp=C0603, Note='LDO in, >=1u; counts in VBUS 10u limit'),
     C('C4', '4.7u', '3V3_LDO', 'GND', fp=C0603, Note='LDO out, ceramic X7R'),
     ('U3', 'Power_Management', 'TPS22917DBV', 'TPS22917DBVR', SOT236,
      {'1': '3V3_LDO', '2': 'GND', '3': '3V3_LDO', '4': 'SS_CT', '5': 'NC', '6': '+3V3'},
      dict(Fit='ALL', MPN='TPS22917DBVR', LCSC='C2681320', Note='3V3 soft-start, tR ~3.5 ms (inrush)')),
     C('C5', '2.2n', 'SS_CT', '3V3_LDO', Note='CT to VIN per TPS22917 DS'),
-    C('C6', '22u', '+3V3', 'GND', fp=C0805, Note='bulk'),
+    C('C6', '22u', '+3V3', 'GND', fp=C0603, Note='bulk'),
     C('C7', '10u', '+3V3', 'GND', Note='at module 3V3 pin (HDG); 0402 X5R 6.3V (CL05A106MQ5NUNC C15525) to fit 1.15 mm strip'),
     C('C8', '100n', '+3V3', 'GND'),
     # --- Module -------------------------------------------------------------------------------
     ('U4', 'RF_Module', 'ESP32-S3-MINI-1', 'ESP32-S3-MINI-1-N8', 'filexfer:ESP32-S3-MINI-1', 'MODULE',
      dict(Fit='ALL', MPN='ESP32-S3-MINI-1-N8', LCSC='C2913206', Note='ESP32-S3-MINI-1-N8 only (IO35 used; no PSRAM variants)', Alt='ESP32-S3-MINI-1U-N8 C2980299 (U.FL; also no PSRAM)')),
     R('R4', '10k', '+3V3', 'EN'), C('C9', '1u', 'EN', 'GND', Note='EN RC 10k/1u (DS-M)'),
-    ('SW2', 'Switch', 'SW_Push', 'RESET', 'Button_Switch_SMD:SW_SPST_TS-1088-xR020', {'1': 'EN', '2': 'GND'},
-     dict(Fit='ALL', MPN='TS-1088-AR02016', LCSC='C720477')),
     R('R5', '10k', '+3V3', 'BOOT', Note='GPIO0 pull-up (HDG); no cap'),
     ('SW1', 'Switch', 'SW_Push', 'BOOT', 'Button_Switch_SMD:SW_SPST_TS-1088-xR020', {'1': 'BOOT', '2': 'GND'},
      dict(Fit='ALL', MPN='TS-1088-AR02016', LCSC='C720477')),
@@ -101,9 +96,9 @@ PARTS = [
     for i, n in enumerate(['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C', 'BOARD_ID'])
 ] + [
     # --- RGB LED on 5 V via SN74LV1T125 buffer ------------------------------------------------------------
-    ('U5', '74xGxx', '74LVC1G125', 'SN74LV1T125', 'Package_TO_SOT_SMD:SOT-23-5',
+    ('U5', '74xGxx', '74LVC1G125', 'SN74LV1T125', 'Package_TO_SOT_SMD:SOT-353_SC-70-5',
      {'1': 'GND', '2': 'LED_DATA_3V3', '3': 'GND', '4': 'LED_DATA_5V', '5': '+5V'},
-     dict(Fit='ALL', MPN='SN74LV1T125DBVR', LCSC='C473338', Note='single-supply translator, VCC 1.6-5.5 V; OE low = enabled; symbol 74LVC1G125 (same pinout)')),
+     dict(Fit='ALL', MPN='SN74LV1T125DCKR', LCSC='C75925', Note='single-supply translator, VCC 1.6-5.5 V; OE low = enabled; symbol 74LVC1G125 (same pinout)')),
     C('C11', '100n', '+5V', 'GND'),
     R('R9', '10k', 'LED_DATA_3V3', 'GND', Note='LED dark during boot'),
     R('R10', '100', 'LED_DATA_5V', 'LED_DIN'),
@@ -120,16 +115,13 @@ PARTS = [
     C('C14', '10u', 'SD_VDD', 'GND', fit='RX', Note='0402 X5R 6.3V (CL05A106MQ5NUNC C15525), fits beside U6'),
     C('C15', '100n', 'SD_VDD', 'GND', fit='RX'),
     ('J3', 'Connector', 'Micro_SD_Card_Det1', 'microSD push-push', 'filexfer:microSD_SHOUHAN_TF_PUSH',
-     {'1': 'SD_D2_C', '2': 'SD_D3_C', '3': 'SD_CMD_C', '4': 'SD_VDD', '5': 'SD_CLK_C', '6': 'GND',
-      '7': 'SD_D0_C', '8': 'SD_D1_C', '9': 'SD_CD', 'SH': 'GND'},
+     {'1': 'SD_D2', '2': 'SD_D3', '3': 'SD_CMD', '4': 'SD_VDD', '5': 'SD_CLK', '6': 'GND',
+      '7': 'SD_D0', '8': 'SD_D1', '9': 'SD_CD', 'SH': 'GND'},
      dict(Fit='RX', MPN='TF PUSH (SHOU HAN)', LCSC='C393941', Note='CD switch to GND on insert [U polarity]')),
-] + [
-    R('R%d' % (12 + i), '0', s, s + '_C', fit='RX', Note='SDIO series (HDG), tune in layout')
-    for i, s in enumerate(['SD_CLK', 'SD_CMD', 'SD_D0', 'SD_D1', 'SD_D2', 'SD_D3'])
-] + [
-    R('R%d' % (18 + i), '10k', s + '_C', 'SD_VDD', fit='RX', Note='SD pull-up to switched rail')
-    for i, s in enumerate(['SD_CMD', 'SD_D0', 'SD_D1', 'SD_D2', 'SD_D3'])
-] + [
+    ('RN1', 'Device', 'R_Pack04', '4x10k', 'Resistor_SMD:R_Array_Convex_4x0402',
+     {'1': 'SD_CMD', '2': 'SD_D0', '3': 'SD_D1', '4': 'SD_D2', '5': 'SD_VDD', '6': 'SD_VDD', '7': 'SD_VDD', '8': 'SD_VDD'},
+     dict(Fit='RX', MPN='4D02WGJ0103TCE', LCSC='C25725', Note='SD pull-ups to switched rail (replaces rev A R18-R21)')),
+    R('R22', '10k', 'SD_D3', 'SD_VDD', fit='RX', Note='SD pull-up to switched rail'),
     R('R23', '10k', '+3V3', 'SD_CD', fit='RX', Note='card detect pull-up'),
 ]
 def flatten(libname, symname):
