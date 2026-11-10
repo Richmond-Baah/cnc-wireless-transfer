@@ -70,7 +70,7 @@ The module is 72–80 % of the cost. Not included [U, quote JLC at Stage 4]: PCB
 4. Board ID by ADC on GPIO1; refuse the wrong app.
 5. SD power-cycle on a card error via SD_PWR_EN **IO35**; card detect on **IO16** (instead of "restart with card"); polarity set after the bench test.
 6. Re-test TX power above 8.5 dBm on the new board (brownout count).
-7. **TX firmware ignores BOARD_ID.** The transmitter build doesn't read IO1 yet. Add `board_id_read()` at TX boot (R7 22k → 0.60 V; RX 100k → 1.65 V) so a TX image on RX hardware, or the reverse, is logged and refused (added 2026-11-10).
+7. **TX firmware ignores BOARD_ID (all rev A boards may be RX-populated).** The transmitter build doesn't read IO1, and there is no refusal or mismatch check (added 2026-11-10).
 
 ## 6. Questions for approval
 1. **One PCB → TX case grows to the RX length (about 50 mm board)?** Or allow a short TX variant?

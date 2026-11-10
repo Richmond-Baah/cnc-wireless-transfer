@@ -182,6 +182,6 @@ Analyzers run: schematic, PCB (`--full`, with schematic), cross-analysis. KiCad 
 4. **Rails:** order with JLC edge rails joined by **mouse-bites, not V-cut**; fiducials on the rails.
 5. **Re-check stock and prices** for every BOM line (JLC Basic/Extended may change). Lowest stock on 2026-11-10: TPS22917 C2681320 (2.2k), ESP32-S3-MINI-1-N8 C2913206 (22.7k). Extended passives: C1531, C4125.
 6. **Module:** ESP32-S3-MINI-1-N8 only (IO35 used; no PSRAM variants).
-7. **Regenerate after any change:** `gen_sch.py` → `gen_pcb.py` → `route.py` → DRC (`--schematic-parity`) → `gen_fab.py`. The router isn't bit-for-bit repeatable, so re-check DRC every time.
-8. Choose the build: RX or TX BOM/CPL (one BOM per JLC order). Add the firmware backlog item "TX reads BOARD_ID" (stage2-parts §5 #7) before shipping mixed units.
+7. **The committed `filexfer-pcb.kicad_pcb` is the master.** Regenerate only on a design change, because the router isn't deterministic and every rerun gives different copper. Regenerate in this order: `gen_sch.py` → `gen_pcb.py` → `route.py` → DRC (`--schematic-parity`) → `gen_fab.py`. Re-check DRC and refresh `fab/rev-A/` after every regeneration. For fab files only, run `gen_fab.py` on the committed board.
+8. Choose the build: RX or TX BOM/CPL (one BOM per JLC order). TX firmware ignores BOARD_ID (stage2-parts §5 #7), so any rev A board, RX-populated included, can run TX firmware.
 9. Open items: C7/C14 0402 10 µF DC-bias derating; LDO tab temperature on the bench; impedance via JLC's calculator if they offer controlled impedance.
