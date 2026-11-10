@@ -42,7 +42,7 @@ Legend: **[V]** checked in the named datasheet/drawing; **[U]** unverified.
 ## 4. Placement (rev A) — `tools/gen_pcb.py` → `filexfer-pcb.kicad_pcb`
 Frame: y from the plug board edge toward the antenna; x from the centreline, **+x = right, viewed from the top with the plug pointing away** (card slot is on the left, −x).
 - Board **18.3 × 62.75 mm**, 2 layers, 1.6 mm; module antenna overhangs the far end by 5.1 mm (total 67.85); plug protrudes 14.86 mm past the front edge.
-- All assembled parts on top; bottom = 10 test pads only (copper, not in BOM/CPL), the production pogo-jig target. TC2030 dropped (user, routing go-ahead).
+- All assembled parts on top; bottom = 10 test pads only (copper, not in BOM/CPL), the production pogo-jig target. TP2 (GND) at (−5.2, 8.4) and TP5 (BOOT) at (3.6, 21.5) since the review. TC2030 dropped (user, routing go-ahead).
 - Order: plug (0–6.8) → USB ESD / LDO / soft-start / LED (6.8–20) → buttons (20–23.7) → SD socket (23.75–39.7) → SD resistor columns + SD switch (41–46.9) → module (47.35–62.75) + antenna. Board-ID divider and EN/UART parts sit in the strips beside the module (§5).
 - **Notch reserve** x ±6.5, y 0–3.9: KiCad rule area on both layers (no tracks, vias, pour); only J1's own NPTH holes and leg slots are inside. F1/D1 sit beside it (|x| ≥ 6.78). Note: the leg slots are at x ±5.70 (pads to ±6.5), so a notch can be at most about 9.8 mm wide unless the legs are inside it [U, depends on the STEP].
 - Module strips (1.15 mm between module courtyard and board edge): C7 10 µF 0402 + C8 by the 3V3 pin; R8 (TXD), R4/C9 (EN RC) on the other side.
@@ -141,11 +141,19 @@ Analyzers run: schematic, PCB (`--full`, with schematic), cross-analysis. KiCad 
 
 **DRC after the fixes:** 0 errors, 0 unconnected, 0 parity. Warnings: 4 module silk lines past the edge (antenna), 3 pour necks at the J1 shell. ERC 0.
 
-**Findings left open (for decision)**
-- **Panel / edge rails (JLC assembly):** 18 parts sit 0.07–0.22 mm from the long edges (pads keep ≥0.25 mm copper-to-edge). The module overhangs the antenna end by 5.1 mm. JLC needs rails on the long sides. V-cut beside C6 (0805, 0.07 mm) risks cracking; mouse-bite tabs are safer.
-- **No fiducials** on the board. JLC rails carry them.
-- **LDO U2 thermal [U, estimate]:** dissipation is 1.7 V × 0.25 A avg ≈ 0.43 W (≈0.6 W peaks). The tab (VOUT) has only its pad, no spreading copper. At ~100 °C/W that is +45–60 °C, so Tj ≈ 85–100 °C in a 40 °C cabinet (limit 125 °C). Optional: add 3V3_LDO copper around the tab.
-- **SD socket C393941:** LCSC's listing says "No Push-Push", but the stage 2 drawing reading says push-push. Recheck the drawing. Either way the card is sealed in with the rib.
+**Findings and decisions (updated 2026-11-10, design archived)**
+- **Single board, no panel.** **Order-time: request JLC edge rails with mouse-bites, not V-cut** (parts 0.07–0.22 mm from the long edges, C6 near the edge); the rails carry the fiducials. The board has no fiducials of its own.
+- **LDO U2 tab copper (added).** 3V3_LDO spreader on both layers (`route.py LDO_CU`, priority-1 zones, solid pad connection):
+  - Top: 21.8 mm² around the tab. Bottom: 18.4 mm² under it.
+  - 4 thermal vias in a row beside the tab, at y 10.4 (not in the pad).
+  - Other nets are kept out of the region. TP2 moved to (−5.2, 8.4).
+  - The top spreader stops at x −7.6, leaving a GND corridor along the −x edge (without it the front GND pour was cut off).
+- **LDO temperature (estimate [U]):** LDL1117 datasheet θJA = 120 °C/W (board not specified); operating Tj max 125 °C [V DS Table 3].
+  - With the spreader I estimate ≈ 90–100 °C/W.
+  - 0.43 W average → +39–43 °C → Tj ≈ 80–83 °C in a 40 °C cabinet.
+  - 0.6 W sustained worst case → Tj ≈ 95–100 °C.
+  - Before the spreader: ≈ 92 / 112 °C. Check on the bench (thermocouple on the tab).
+- **SD socket C393941 = push-push [V].** SHOU HAN drawing TF PUSH Rev A (2020/07/07, page 1 of the LCSC PDF) shows the "PUSH IN" / "PUSH OUT" card positions and the latch cam. The JLC attribute "No Push-Push" is a listing error (LCSC's own title says "Connector and Ejector Push-Push"). Keep the case retaining rib. Same drawing: card-detect pad "Cd", height 1.80 min / 2.00 max.
 - **0402 10 µF X5R 6.3 V (C7, C14):** DC-bias loss at 3.3 V not checked [U].
 - **SD_CLK_C reference:** 80 % (bottom lanes cross top tracks under J3). Short net at ≤25 MHz; accepted.
 - **Analyzer false positives:**
@@ -153,3 +161,27 @@ Analyzers run: schematic, PCB (`--full`, with schematic), cross-analysis. KiCad 
   - UC-001/002: VBUS protection (TVS D1, C3) sits after F1 on +5V by design.
   - J3 courtyard over the edge: the socket is flush with the edge.
   - U4 over the edge: antenna overhang.
+
+## 7. Fab files (rev A, single board) — `tools/gen_fab.py` → `fab/rev-A/`
+- Gerber X2 (9 layers: F/B Cu, Paste, Silkscreen, Mask, Edge.Cuts), Excellon PTH/NPTH (mm) + drill maps, `filexfer-revA-gerbers.zip`.
+- BOM and CPL in JLC format for two builds of the same board:
+  - **RX:** 47 placements, 24 lines.
+  - **TX:** 29 placements, 22 lines; SD block not fitted, R7 = 22k (C25768).
+  - J1 (plug) is DNP in both (hand-soldered). Test pads and the Fit=DNP parts (C1, C2, R3) are never placed.
+- Gerber check:
+  - `analyze_gerbers.py`: complete, 0 findings, 18.35 × 62.8 mm.
+  - Independent raster of the copper/silk/mask/outline/drills: `fab/rev-A/gerber-check.png`. Matches the layout.
+- Final DRC: 0 errors, 0 unconnected, 0 parity.
+  - Warnings: 4 module silk lines past the antenna edge, 3 pour necks at the J1 shell (0.09 mm), 1 copper sliver on B.Cu (KiCad gives no location).
+- CPL rotations are KiCad's. **Check JLC's placement preview** (SOT-23/SOT-223/module/LED orientation) when ordering.
+
+## 8. Before ordering (checklist)
+1. **Plug STEP / notch:** get the XKB U217-041N-4BV81 (C319178) STEP. Confirm seating, shell height above/below the board, and whether a board notch is needed (the reserve x ±6.5, y 0–3.9 is kept free; the leg slots limit a notch to about 9.8 mm).
+2. **Sample test-fit:** hand-fit a plug and an SD socket on a bare board or a 1:1 print. Check the case fit, the SD retaining rib, the buttons and the LED window.
+3. **Card-detect polarity:** the Cd switch sense isn't specified in the drawing. Bench-test with a card and set the firmware sense.
+4. **Rails:** order with JLC edge rails joined by **mouse-bites, not V-cut**; fiducials on the rails.
+5. **Re-check stock and prices** for every BOM line (JLC Basic/Extended may change). Lowest stock on 2026-11-10: TPS22917 C2681320 (2.2k), ESP32-S3-MINI-1-N8 C2913206 (22.7k). Extended passives: C1531, C4125.
+6. **Module:** ESP32-S3-MINI-1-N8 only (IO35 used; no PSRAM variants).
+7. **Regenerate after any change:** `gen_sch.py` → `gen_pcb.py` → `route.py` → DRC (`--schematic-parity`) → `gen_fab.py`. The router isn't bit-for-bit repeatable, so re-check DRC every time.
+8. Choose the build: RX or TX BOM/CPL (one BOM per JLC order). Add the firmware backlog item "TX reads BOARD_ID" (stage2-parts §5 #7) before shipping mixed units.
+9. Open items: C7/C14 0402 10 µF DC-bias derating; LDO tab temperature on the bench; impedance via JLC's calculator if they offer controlled impedance.

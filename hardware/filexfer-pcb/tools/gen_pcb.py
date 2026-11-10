@@ -70,8 +70,8 @@ P = {
     'R8': (-E, 52.0, 90, 'F'), 'R4': (-E, 58.0, 270, 'F'), 'C9': (-E, 61.0, 270, 'F'),   # -x strip (route.py bus)
     # --- bottom: test pads (copper only, no assembly) under the power section ----------------------
     **{'TP%d' % (i + 1): (xy[0], xy[1], 0, 'B') for i, xy in enumerate(
-        [(-7.5, 12.0), (-5.2, 12.0), (7.5, 9.0), (-2.9, 16.5), (3.6, 21.5),
-         (-7.5, 16.5), (-5.2, 16.5), (-2.2, 20.0), (1.35, 20.0), (8.35, 53.6)])},   # TP5 under SW1.1, TP10 under the ID divider
+        [(-7.5, 12.0), (-5.2, 8.4), (7.5, 9.0), (-2.9, 16.5), (3.6, 21.5),
+         (-7.5, 16.5), (-5.2, 16.5), (-2.2, 20.0), (1.35, 20.0), (8.35, 53.6)])},   # TP2 clear of the LDO spreader, TP5 under SW1.1, TP10 under the ID divider
 }
 
 

@@ -39,6 +39,9 @@ NOGO = [
     (-6.3, 6.3, G.MOD_CY - 6.3, G.MOD_CY + 6.3, 0),                        # inside the module pad ring
     (-G.W / 2 - 1, 5.35, G.SD_OY - 2.425, G.SD_OY + 12.325, 0),            # top under the SD body
 ]
+# LDO (U2) tab heat spreader: 3V3_LDO copper only (x0, x1, y0, y1, layer); poured at priority 1
+LDO_CU = [(-7.6, -2.4, 9.7, 13.9, 0), (-6.9, -2.6, 9.7, 14.0, 1)]
+LDO_VIAS = [(-6.4, 10.4), (-5.4, 10.4), (-4.4, 10.4), (-3.4, 10.4)]
 
 
 def mm(v):
@@ -190,6 +193,10 @@ class Router:
         nx0, nx1, ny0, ny1 = G.NOTCH
         self.box(tb[0], nx0, nx1, ny0, ny1, hw + MARGIN); self.box(tb[1], nx0, nx1, ny0, ny1, hw + MARGIN)
         self.box(vb, nx0, nx1, ny0, ny1, vr + MARGIN)
+        if net != '3V3_LDO':
+            for x0, x1, y0, y1, l in LDO_CU:
+                self.box(tb[l], x0, x1, y0, y1, hw + MARGIN)
+                self.box(vb, x0, x1, y0, y1, vr + MARGIN)
         if net != 'GND':
             for x0, x1, y0, y1, l in NOGO:
                 self.box(tb[l], x0, x1, y0, y1, hw + MARGIN)
@@ -490,6 +497,17 @@ class Router:
             for x, y in ((-G.W / 2, 0), (G.W / 2, 0), (G.W / 2, G.L), (-G.W / 2, G.L)):
                 o.Append(mm(G.OX + x), mm(G.OY + y))
             self.b.Add(z)
+        for k, (x0, x1, y0, y1, l) in enumerate(LDO_CU):   # U2 tab heat spreader
+            z = pcbnew.ZONE(self.b)
+            z.SetLayer(pcbnew.F_Cu if l == 0 else pcbnew.B_Cu); z.SetNet(self.nets['3V3_LDO'])
+            z.SetZoneName('LDO_TAB_' + 'FB'[l]); z.SetAssignedPriority(1)
+            z.SetLocalClearance(mm(ZONE_CLR)); z.SetMinThickness(mm(0.2))
+            z.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+            z.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
+            o = z.Outline(); o.NewOutline()
+            for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+                o.Append(mm(G.OX + x), mm(G.OY + y))
+            self.b.Add(z)
         pcbnew.ZONE_FILLER(self.b).Fill(self.b.Zones())
 
     def fix_starved(self, log):
@@ -675,6 +693,9 @@ def bus(r):
     r.track('GND', 0, [(5.8, 7.72), (6.55, 7.1)], 0.3); r.via('GND', 6.55, 7.1)                      # C12.2
     # U1.2 GND: pocket enclosed by the USB pair on top -> via between the U1 pin rows
     r.track('GND', 0, [(0.0, 9.6), (0.0, 8.95)], 0.3); r.via('GND', 0.0, 8.95)
+    # U2 tab thermal vias (3V3_LDO spreader, both layers)
+    for x, y in LDO_VIAS:
+        r.via('3V3_LDO', x, y)
     # U3.2 GND: boxed in by the 3V3_LDO pins -> via to the left of the pad
     r.track('GND', 0, [(2.76, 12.9), (1.6, 12.75)], 0.3); r.via('GND', 1.6, 12.75)
     # U3.6 (+3V3 out of the soft-start switch): escape via beside the pad (no via in pad)
