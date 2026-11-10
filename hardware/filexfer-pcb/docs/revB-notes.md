@@ -310,10 +310,10 @@ Separate check of the pass-16 board (committed in 3b55b02) and the regenerated f
 1. **Fab files:** `fab/rev-B/` (gen_fab.py on the committed board, 2026-11-10). Upload `filexfer-revB-gerbers.zip`, and use the BOM/CPL for one build (RX or TX) per order.
 2. **Board spec:** 2 layers, 1.6 mm FR-4, 1 oz, 18.3 × 34.9 mm. Min track 0.15, clearance 0.127, via 0.45/0.2 (JLC standard tier, §3c). All vias tented (no plugging option needed).
 3. **Rails:** order with JLC edge rails joined by **mouse-bites, not V-cut**, with fiducials on the rails. Pad copper sits ≥ 0.29 mm from the long edges (C8, U4, F1, U6). The economic-tier minimum board size is still [U]: check at order time.
-4. **DNP / hand-solder:** J1 (USB-A plug, top), J3 (microSD, bottom) and SW1 (BOOT, bottom) are not in the BOM/CPL. Order them separately: plug U217-041N-4BV81 C319178, SW1 TS-1088-AR02016 C720477, socket SHOU HAN TF PUSH C393941 (LCSC number only in the footprint description; the schematic has no LCSC field for J3). TP1–3 are bare pads.
+4. **DNP / hand-solder:** J1 (USB-A plug, top), J3 (microSD, bottom) and SW1 (BOOT, bottom) are not in the BOM/CPL. Order them separately: plug U217-041N-4BV81 C319178, SW1 TS-1088-AR02016 C720477, socket SHOU HAN TF PUSH C393941 (LCSC field set on J3 in the schematic and board; DNP parts are left out of the JLC BOM). TP1–3 are bare pads.
 5. **Check JLC's placement preview** for rotations: U2 (WSON-6), U1 (SOT-666), U5 (SC-70-5), RN1, D2 (WS2812B-2020 pin 1).
 6. **Stock and price:** re-check every line. Extended parts: TLV76733 C2848334, USBLC6-2P6 C15999, SN74LV1T125 C75925, TPS22917 C2681320, RN1 C25725, WS2812B-2020 C52917434, SMF5.0A C2759874, BSMD1206 C883127, C1531, C1523.
-7. **Case:** case notes in §3, updated for the 34.9 mm board. The case inner length must grow to 41–42 mm before the boards are useful in a case.
+7. **Case:** case notes in §3, updated for the 34.9 mm board. Board STEP with all parts: `fab/rev-B/filexfer-revB.step`. J1, J3 and D2 are placeholder boxes from `tools/gen_fp.py` (not vendor geometry; the J1 height split about the board is [U]). The case inner length must grow to 41–42 mm before the boards are useful in a case.
 8. **The committed `filexfer-pcb.kicad_pcb` is the master** (the router isn't deterministic). Regenerate fab files only with `python3 tools/gen_fab.py`. After any design change: gen_sch → gen_pcb → route → DRC (`--schematic-parity`) → gen_fab → gerber check.
 9. **Firmware before bring-up:**
    - `CONFIG_FILEXFER_BOARD_FX_REV_B` board config.

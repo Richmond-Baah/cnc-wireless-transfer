@@ -95,6 +95,8 @@ def netlist():
     return comps, nets
 
 
+MODEL_OVERRIDE = {'LED_WS2812B-2020_PLCC4_2.0x2.0mm': '${KIPRJMOD}/3dmodels/LED_WS2812B-2020_PLCC4_2.0x2.0mm.step'}  # gen_fp.py placeholder
+
 def load_fp(libfp):
     lib, name = libfp.split(':')
     path = LIBS.get(lib, os.path.join(STOCK, lib + '.pretty'))
@@ -102,6 +104,8 @@ def load_fp(libfp):
     if fp is None:
         sys.exit('footprint not found: ' + libfp)
     fp.SetFPID(pcbnew.LIB_ID(lib, name))
+    if name in MODEL_OVERRIDE:   # stock footprint whose stock 3D model is missing in KiCad 10 (STEP export)
+        fp.Models()[0].m_Filename = MODEL_OVERRIDE[name]
     return fp
 
 

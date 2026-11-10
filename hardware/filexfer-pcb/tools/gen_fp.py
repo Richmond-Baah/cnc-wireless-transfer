@@ -54,6 +54,73 @@ def wrl_box(path, boxes):
     open(path, 'w').write('\n'.join(out) + '\n')
 
 
+def step_boxes(path, name, boxes):
+    """Placeholder STEP (AP214, one B-rep solid per box) with the same geometry as wrl_box, for STEP export
+    (kicad-cli pcb export step --subst-models swaps it in for the same-name .wrl). Units mm, model Y = -footprint y."""
+    ents = []
+    def e(txt):
+        ents.append(txt); return '#%d' % len(ents)
+    ac = e("APPLICATION_CONTEXT('automotive_design')")
+    e("APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,%s)" % ac)
+    pc = e("PRODUCT_CONTEXT('',%s,'mechanical')" % ac)
+    pr = e("PRODUCT('%s','%s','FileXfer placeholder box model (not vendor geometry)',(%s))" % (name, name, pc))
+    pdf = e("PRODUCT_DEFINITION_FORMATION('','',%s)" % pr)
+    pdc = e("PRODUCT_DEFINITION_CONTEXT('part definition',%s,'design')" % ac)
+    pd = e("PRODUCT_DEFINITION('design','',%s,%s)" % (pdf, pdc))
+    pds = e("PRODUCT_DEFINITION_SHAPE('','',%s)" % pd)
+    mm = e("( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) )")
+    rad = e("( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) )")
+    sr = e("( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() )")
+    unc = e("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),%s,'distance_accuracy_value','confusion accuracy')" % mm)
+    ctx = e("( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((%s)) "
+            "GLOBAL_UNIT_ASSIGNED_CONTEXT((%s,%s,%s)) REPRESENTATION_CONTEXT('','3D') )" % (unc, mm, rad, sr))
+    f = lambda v: '%.4f' % v
+    pt = lambda q: e("CARTESIAN_POINT('',(%s,%s,%s))" % tuple(map(f, q)))
+    dr = lambda q: e("DIRECTION('',(%s,%s,%s))" % tuple(map(f, q)))
+    o = pt((0, 0, 0)); origin = e("AXIS2_PLACEMENT_3D('',%s,%s,%s)" % (o, dr((0, 0, 1)), dr((1, 0, 0))))
+    solids = []
+    faces_ccw = (((0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0), (0, 0, -1)), ((0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1), (0, 0, 1)),
+                 ((0, 0, 0), (0, 0, 1), (0, 1, 1), (0, 1, 0), (-1, 0, 0)), ((1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1), (1, 0, 0)),
+                 ((0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1), (0, -1, 0)), ((0, 1, 0), (0, 1, 1), (1, 1, 1), (1, 1, 0), (0, 1, 0)))
+    for x0, x1, y0, y1, z0, z1, _rgb in boxes:
+        X = sorted((x0, x1)); Y = sorted((-y0, -y1)); Z = sorted((z0, z1))
+        P = lambda k: (X[k[0]], Y[k[1]], Z[k[2]])
+        verts = {}; edges = {}
+        def V(k):
+            if k not in verts:
+                verts[k] = e("VERTEX_POINT('',%s)" % pt(P(k)))
+            return verts[k]
+        def E(a, b):
+            if (b, a) in edges:
+                return edges[(b, a)], '.F.'
+            if (a, b) not in edges:
+                pa, pb = P(a), P(b); d = [pb[i] - pa[i] for i in range(3)]; L = max(abs(c) for c in d)
+                ln = e("LINE('',%s,%s)" % (pt(pa), e("VECTOR('',%s,%s)" % (dr([c / L for c in d]), f(L)))))
+                edges[(a, b)] = e("EDGE_CURVE('',%s,%s,%s,.T.)" % (V(a), V(b), ln))
+            return edges[(a, b)], '.T.'
+        fl = []
+        for *ks, n in faces_ccw:
+            oes = []
+            for i in range(4):
+                ec, sense = E(ks[i], ks[(i + 1) % 4]); oes.append(e("ORIENTED_EDGE('',*,*,%s,%s)" % (ec, sense)))
+            a, b = P(ks[0]), P(ks[1]); d = [b[i] - a[i] for i in range(3)]; L = max(abs(c) for c in d)
+            pl = e("PLANE('',%s)" % e("AXIS2_PLACEMENT_3D('',%s,%s,%s)" % (pt(a), dr(n), dr([c / L for c in d]))))
+            bound = e("FACE_OUTER_BOUND('',%s,.T.)" % e("EDGE_LOOP('',(%s))" % ','.join(oes)))
+            fl.append(e("ADVANCED_FACE('',(%s),%s,.T.)" % (bound, pl)))
+        solids.append(e("MANIFOLD_SOLID_BREP('',%s)" % e("CLOSED_SHELL('',(%s))" % ','.join(fl))))
+    rep = e("ADVANCED_BREP_SHAPE_REPRESENTATION('%s',(%s,%s),%s)" % (name, origin, ','.join(solids), ctx))
+    e("SHAPE_DEFINITION_REPRESENTATION(%s,%s)" % (pds, rep))
+    hdr = ("ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('FileXfer placeholder box model'),'2;1');\n"
+           "FILE_NAME('%s.step','',(''),(''),'filexfer_gen_fp','filexfer_gen_fp','');\n"
+           "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n" % name)
+    open(path, 'w').write(hdr + ''.join('#%d=%s;\n' % (i + 1, t) for i, t in enumerate(ents)) + 'ENDSEC;\nEND-ISO-10303-21;\n')
+
+
+def placeholder(m3d, name, boxes):
+    wrl_box(os.path.join(m3d, name + '.wrl'), boxes)
+    step_boxes(os.path.join(m3d, name + '.step'), name, boxes)
+
+
 def tf_push():
     b = text('Reference', 'REF**', 4.95, -13.2, 'F.SilkS') + text('Value', 'microSD_SHOUHAN_TF_PUSH', 4.95, 5.4, 'F.Fab')
     # 9 contact pads: Cd at x=-1.60, then 8..1 at 1.10 pitch; 0.70 x 1.60, centre y=-11.00
@@ -107,13 +174,17 @@ def main():
     os.makedirs(m3d, exist_ok=True)
     metal = '0.45 0.46 0.5'
     # SD: body 14.75 x 14.50, 1.90 tall (drawing 1.80-2.00)
-    wrl_box(os.path.join(m3d, 'microSD_SHOUHAN_TF_PUSH.wrl'),
+    placeholder(m3d, 'microSD_SHOUHAN_TF_PUSH',
             [(4.95 - 7.375, 4.95 + 7.375, -10.48, 4.02, 0.0, 1.9, metal)])
     # XKB: shell 12.00 x 4.50 x 18.75, front 17.78 from hole row (EasyEDA); assumed +1.90/-2.60 about
     # the board top (drawing gives 1.90/2.60, face not identified) [U]; tongue as a white block.
-    wrl_box(os.path.join(m3d, 'USB_A_Plug_XKB_U217-041N-4BV81.wrl'),
+    placeholder(m3d, 'USB_A_Plug_XKB_U217-041N-4BV81',
             [(-6.0, 6.0, 17.78 - 18.75, 17.78, -2.6, 1.9, metal),
              (-5.5, 5.5, 17.78 - 9.0, 17.78 - 0.2, -2.0, -0.2, '0.95 0.95 0.95')])
+    # D2: KiCad 10 has no stock STEP for LED_WS2812B-2020 (gen_pcb.py MODEL_OVERRIDE points D2 here).
+    # 2.0 x 2.0 body, 0.85 tall (stage4-notes LED height) [U vendor drawing not checked]; STEP only.
+    step_boxes(os.path.join(m3d, 'LED_WS2812B-2020_PLCC4_2.0x2.0mm.step'), 'LED_WS2812B-2020_PLCC4_2.0x2.0mm',
+               [(-1.0, 1.0, -1.0, 1.0, 0.0, 0.85, '0.95 0.95 0.95')])
     for name, fn in (('microSD_SHOUHAN_TF_PUSH', tf_push), ('USB_A_Plug_XKB_U217-041N-4BV81', usb_a_xkb)):
         with open(os.path.join(OUT, name + '.kicad_mod'), 'w') as f:
             f.write(fn())
