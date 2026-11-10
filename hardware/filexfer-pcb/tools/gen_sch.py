@@ -45,8 +45,9 @@ def C(ref, val, a, b, fit='ALL', fp=C0402, **f):
     return (ref, 'Device', 'C', val, fp, {'1': a, '2': b}, dict(Fit=fit, **_src(fp, val, f)))
 
 MOD_NC = ['IO2', 'IO3', 'IO4', 'IO5', 'IO6', 'IO7', 'IO8', 'IO9', 'IO17', 'IO18', 'IO26', 'IO47',
-          'IO33', 'IO34', 'IO36', 'IO37', 'IO38', 'IO39', 'IO40', 'IO41', 'IO42', 'IO45', 'IO46', 'IO21']
-mod_map = {'GND': 'GND', '3V3': '+3V3', 'EN': 'EN', 'IO0': 'BOOT', 'IO1': 'BOARD_ID', 'IO35': 'SD_PWR_EN',
+          'IO33', 'IO34', 'IO36', 'IO37', 'IO38', 'IO39', 'IO40', 'IO41', 'IO42', 'IO45', 'IO46', 'IO21',
+          'IO1']   # IO1: rev A board-ID ADC; rev B board rev lives in factory NVS
+mod_map = {'GND': 'GND', '3V3': '+3V3', 'EN': 'EN', 'IO0': 'BOOT', 'IO35': 'SD_PWR_EN',
            # SDMMC via GPIO matrix, pins in module-edge order = resistor column order (routing, stage 4)
            'IO10': 'SD_D2', 'IO11': 'SD_D3', 'IO12': 'SD_CMD', 'IO13': 'SD_CLK', 'IO14': 'SD_D0',
            'IO15': 'SD_D1', 'IO16': 'SD_CD', 'USB_D-': 'USB_DM', 'USB_D+': 'USB_DP', 'IO48': 'LED_DATA_3V3',
@@ -86,14 +87,11 @@ PARTS = [
     R('R5', '10k', '+3V3', 'BOOT', Note='GPIO0 pull-up (HDG); no cap'),
     ('SW1', 'Switch', 'SW_Push', 'BOOT', 'Button_Switch_SMD:SW_SPST_TS-1088-xR020', {'1': 'BOOT', '2': 'GND'},
      dict(Fit='ALL', MPN='TS-1088-AR02016', LCSC='C720477')),
-    R('R6', '100k', '+3V3', 'BOARD_ID', Note='board ID top'),
-    R('R7', '100k', 'BOARD_ID', 'GND', Note='board ID: RX 100k (1.65 V), TX 22k (0.60 V, 0402WGF2202TCE C25768); see board_config.h'),
-    C('C10', '100n', 'BOARD_ID', 'GND', Note='ADC filter (HDG)'),
     R('R8', '499', 'U0TXD_MOD', 'U0TXD', Note='U0TXD series (HDG)'),
     # --- Debug / test ---------------------------------------------------------------------------
 ] + [
     ('TP%d' % (i + 1), 'Connector', 'TestPoint', n, TP, {'1': n}, dict(Fit='ALL', MPN='pad'))
-    for i, n in enumerate(['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C', 'BOARD_ID'])
+    for i, n in enumerate(['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C'])
 ] + [
     # --- RGB LED on 5 V via SN74LV1T125 buffer ------------------------------------------------------------
     ('U5', '74xGxx', '74LVC1G125', 'SN74LV1T125', 'Package_TO_SOT_SMD:SOT-353_SC-70-5',

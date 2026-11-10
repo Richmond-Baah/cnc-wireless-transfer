@@ -67,10 +67,11 @@ The module is 72–80 % of the cost. Not included [U, quote JLC at Stage 4]: PCB
 1. Stream RX logs over Wi-Fi to TX (field logs without opening the case).
 2. Hold off or ramp Wi-Fi TX until USB is configured (USB 100 mA pre-configuration limit) [U spec text not read].
 3. SDMMC 4-bit driver via the GPIO matrix. Rev A pins (stage 4 remap): CLK IO13, CMD IO12, D0 IO14, D1 IO15, D2 IO10, D3 IO11 (`firmware/board_config.h`).
-4. Board ID by ADC on GPIO1; refuse the wrong app.
+4. Board ID by ADC on GPIO1; refuse the wrong app (rev A only). **Rev B has no divider (removed 2026-11-10 for routing room): write board rev + role to a factory NVS partition at production test; firmware reads it at boot and refuses the wrong app; a missing entry → log + fall back to the build role.** `board_config.h`: `BOARD_PIN_BOARD_ID = -1` for rev B.
 5. SD power-cycle on a card error via SD_PWR_EN **IO35**; card detect on **IO16** (instead of "restart with card"); polarity set after the bench test.
 6. Re-test TX power above 8.5 dBm on the new board (brownout count).
-7. **TX firmware ignores BOARD_ID (all rev A boards may be RX-populated).** The transmitter build doesn't read IO1, and there is no refusal or mismatch check (added 2026-11-10).
+7. **Rev B SD speed fallback:** SD lines run 7–15 mm on the bottom with no GND plane directly under them (2-layer). Run SDMMC at 40 MHz; on a CRC or timeout error, re-init at 20 MHz and stay there until reboot (`BOARD_SD_FREQ_FALLBACK_KHZ`). Bench-test both rates.
+8. **TX firmware ignores BOARD_ID (all rev A boards may be RX-populated).** The transmitter build doesn't read IO1, and there is no refusal or mismatch check (added 2026-11-10).
 
 ## 6. Questions for approval
 1. **One PCB → TX case grows to the RX length (about 50 mm board)?** Or allow a short TX variant?

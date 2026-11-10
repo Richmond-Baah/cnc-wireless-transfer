@@ -22,7 +22,7 @@ LAYERS = 'F.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge
 ALWAYS_DNP = {'J1', 'J3', 'SW1'}                      # plug + bottom parts: hand-soldered (DNP-bottom)
 VARIANTS = {
     'RX': dict(fit={'ALL', 'RX'}, override={}),
-    'TX': dict(fit={'ALL'}, override={'R7': ('22k', '0402WGF2202TCE', 'C25768')}),
+    'TX': dict(fit={'ALL'}, override={}),            # rev B: no board-ID divider (role/rev in factory NVS)
 }
 
 

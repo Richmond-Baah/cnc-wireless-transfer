@@ -38,7 +38,7 @@ C_3V3 = 4.7 C4 + 10 C7 + 22 C6 + 1 C9 + ~0.6 decoupling + SD rail ~4.8 + 1 (rev 
 History: with SW1 on top, the +x front half was at 93 % courtyard fill, so no fit. The user approved option 1: SW1 goes to the bottom, U6/C13/R11 stay, and a smaller switch is used only if needed (ask first). It wasn't needed.
 
 - **Generator:** `tools/gen_pcb.py` (P dict; placement only, no tracks).
-- **Board:** 18.3 × 31.9 mm, 2 layers. The antenna overhangs 5.1 mm (37.0 of 37.5 inner length).
+- **Board:** 18.3 × 31.9 mm, 2 layers. The antenna overhangs 5.1 mm (37.0 of 37.5 inner length). **Now 34.9 mm, see §3c.**
 - **Renders:** `docs/img/revB-placement-2d.png` (top and bottom courtyards), `revB-placement-3d-top.png`, `-bottom.png`, `-iso.png`.
 
 **DRC (placement):**
@@ -134,6 +134,69 @@ Router: `tools/route.py` rewritten for rev B (scripted USB pair, plug power and 
 - **Still needed on 4 layers** (via room is layer-independent): J3 0.5 mm forward, one strip part out of the +x strip, SW1 rotated 180° (BOOT pad toward the strip; same centre and pinhole).
 - **USB pair:** must be re-dimensioned for L1 over L2 (JLC 4-layer prepreg ≈ 0.2 mm) [E].
 - **Cost:** 4-layer costs more; quote at order time.
+
+## 3c. 2-layer routing, pass 2 (user: stay 2-layer, free via room)
+
+This section supersedes the §3 / §3b numbers where they differ.
+
+**Changes:**
+- **Board +3.0 mm:** 18.3 × 34.9 mm (DL = 3.0; module centre y 27.2). Antenna overhang 5.1 mm, so the board plus antenna is 40.0 mm. **Case inner length 41–42 mm** (1–2 mm antenna clearance).
+- **Board-ID divider removed** (R6, R7, C10, TP10; IO1 = no connect). Board rev and role go in factory NVS (`firmware/board_config.h` `CONFIG_FILEXFER_BOARD_FX_REV_B`; backlog `stage2-parts.md` §5 items 4 and 7). There is no TX/RX BOM difference any more.
+- **JLC 2-layer rules at standard price** [V jlcpcb.com/capabilities/pcb-capabilities, checked 2026-11-10]:
+  - Via 0.45 / 0.2 drill (0.125 annular ring).
+  - Clearance 0.127, hole clearance 0.2, hole-to-hole 0.25.
+  - Written to the board and to `.kicad_pro` by `gen_pcb.py`.
+- **The three approved placement changes:**
+  - J3 moved 0.5 mm toward the plug.
+  - C7 out of the +x strip.
+  - SW1 rotated 180°.
+- **Further placement changes needed to route** (flagged, not approved separately):
+  - **−x front:** U6 at y 11.3; R11 between U6 and C13 (C13 rot 90); R4/C9 (EN RC) beside U6.1; R8 below the −x lanes; R9 at x −5.6. TP2/TP4/TP6 swapped so the test-pad order matches the lane order (TP6 = U0TXD at (−4.85, 12), TP4 = EN at (−7.2, 8.7), TP2 = GND at (−7.2, 12)).
+  - **+x:** C7 (3V3 bulk) and R5 (BOOT pull-up) at the +x strip start (y 17 / 18). U3 moved 0.25 mm toward −x and C5 0.25 mm toward −x. Row order is C14, R22, C15, with C14/C15 at rot 270 so all SD_VDD pads sit on one line. C8 at rot 270.
+- **Scripted routing** (`route.py`):
+  - `mx_corner`: −x lanes in W→E order SD_PWR_EN, EN, RXD, TXD_MOD. SD_PWR_EN takes a 2.5 mm bottom hop at pin 31 to reach the outer lane.
+  - `px_corner`:
+    - +3V3 and SD_VDD cross under the RN1…C15 row on bottom lanes.
+    - The U3 VIN↔ON tie runs along the board edge (0.2 mm, no via).
+    - SD_VDD crosses the front on the bottom at y 10.45, under the U1→R1/R2 section of the USB pair (D+ already hops there).
+  - LED: bottom hop. USB, plug power: as §3b. The −x +3V3 feed continues the y 5.4 bottom band under the J1 pads to a via beside C12.
+  - D2 has its via in the J3 D2 pad. This is the hand-soldered bottom part, not a JLC-placed pad.
+- **SD lines:**
+  - CMD/CLK/D0/D1/CD: vias at y 19.2, then a grouped bottom ribbon at 0.35 pitch into J3 from −x. D2/D3 enter J3 from +x.
+  - Lengths: D2 5.2, CLK 9.6, D0 12.0, D3 12.1, CMD 12.6, CD 14.6, D1 17.5 mm (D1 includes its pull-up hop).
+  - 20 MHz fallback noted in firmware (`BOARD_SD_FREQ_FALLBACK_KHZ`, backlog item 7).
+
+**Result (pass 14):** evidence in `docs/img/revB-routed-2d.png`, `revB-routed-3d-top.png`, `-bottom.png`, `-iso.png`.
+- **Routing:** every net routed (272 tracks, 110 vias, 66 of them GND).
+- **DRC** (kicad-cli, project rules, schematic parity):
+  - 0 errors and 0 parity issues.
+  - 4 silk warnings at the antenna edge, as rev A.
+  - 2 J3 peg exclusions.
+  - **6 unconnected items, all GND pour pockets** (listed below).
+- **Bottom copper:** 185 mm of track on the bottom (top 249 mm).
+  - Longest: SD_VDD 26 mm (front crossing 9 mm, plus the J3.4 lane 12 mm), SD ribbon (above), +3V3 12 mm, U0RXD 11 mm, EN 9 mm, BOOT 8 mm.
+
+**Criteria:**
+- **DRC clean:** no. 0 violations, but 6 unconnected GND pockets.
+- **GND under module pads:** yes.
+- **GND under the USB pair:** yes, except the D+ swap hop and the SD_VDD crossing at y 10.45 (0.3 mm track, stitching vias each side).
+- **SD lines (relaxed rule):** grouped ribbon. Stitching comes from the 2 mm grid and module-ring vias; spacing along the ribbon not checked per segment. Not met on the +x side: D2/D3 run beside BOOT/+3V3/SD_VDD lanes without GND between them.
+- **No tracks under the antenna:** yes.
+- **Bottom mostly GND, short tracks:** no in the +x strip. Five parallel bottom lanes run at x 6.6–8.6: D2, D3, BOOT, +3V3, SD_VDD.
+- **0402:** yes.
+
+**What still blocks (the 6 GND pockets, each with no legal via spot):**
+
+| Pocket (top unless noted) | Enclosed by | Why no via fits |
+|---|---|---|
+| C7.2 + U4.63 (module corner GND), x 4.7–8.1, y 16–21 | D0 pull-up track, D2/D3 pull-up tracks, BOOT strip lane, module pin row; the D3 stub (pin 15 → via) seals the module corner | Bottom underneath is slivered by the D2/D3/BOOT lanes and the CMD hop (gaps 0.3–0.47 mm; a via needs 0.70 mm) |
+| C15.2 (SD_VDD bulk GND) | R22, the +3V3 via and track to C7, board edge | +3V3 and SD_VDD bottom lanes are 0.3 mm apart below it |
+| J3 shield pad (bottom, 4.87, 17.7) | D1 and CMD pull-up hops, plus the SD via row at y 19.2 (0.4 mm gaps) | Top above is the C7.2 pocket (also isolated) |
+| U6.2 (SD switch GND) | U6.1 / U6.3 pads, board edge, +3V3 track under the U6 body (feeds R11/C13) | 0.39 mm between pad and track |
+| R9.2 (LED pull-down GND) | SD_CT track (west) and LED_DATA_3V3 track (east) | Bottom underneath: U0RXD (x −5.7) and U0TXD (x −4.85) lanes 0.7 mm apart |
+| TP2 (bottom GND test pad) + 1 via | EN, U0RXD, +5V bottom hop | Top above is the U6.2 pocket |
+
+The root cause is the same in both corners. The +x and −x corners each have to pass 4–5 nets between the front zone and the module (+x: D2, D3, BOOT, +3V3, SD_VDD; −x: SD_PWR_EN, EN, RXD, TXD, plus U6/C13/R11/LED). On 2 layers those nets take both layers locally, so the GND pockets between them cannot be stitched.
 
 ## 4. Bring-up checklist (rev B)
 

@@ -45,10 +45,9 @@ PLACE = {
     # E  status LED + level shifter
     'R9': (292.1, 54.61, 0), 'U5': (314.96, 50.8, 0), 'C11': (302.26, 39.37, 0),
     'R10': (347.98, 50.8, 90), 'D2': (370.84, 50.8, 0), 'C12': (381.0, 39.37, 0),
-    # F  reset / boot buttons, board ID
+    # F  EN RC / boot button
     'R4': (30.48, 121.92, 0), 'C9': (43.18, 129.54, 0),
     'R5': (30.48, 151.13, 0), 'SW1': (50.8, 160.02, 270),
-    'R6': (30.48, 180.34, 0), 'R7': (30.48, 187.96, 0), 'C10': (50.8, 187.96, 0),
     # C  module
     'U4': (160.02, 160.02, 0), 'C7': (165.1, 123.19, 0), 'C8': (175.26, 123.19, 0),
     'R8': (195.58, 134.62, 90),
@@ -58,15 +57,15 @@ PLACE = {
     'J3': (378.46, 175.26, 0), 'R23': (337.82, 167.64, 0),
     'RN1': (287.02, 167.64, 0), 'R22': (307.34, 167.64, 180),     # pull-ups: array pins 1-4 at the bottom
 }
-TPS = ['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C', 'BOARD_ID']
-for _i in range(10):                                                        # TP1..TP10, body left
+TPS = ['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C']
+for _i in range(len(TPS)):                                                  # TP1..TP9, body left
     PLACE['TP%d' % (_i + 1)] = (35.56 + 50.8 * (_i // 5), 236.22 + 10.16 * (_i % 5), 90)
 
 FRAMES = [   # x0, y0, x1, y1, title
     (15, 15, 135, 100, 'USB INPUT & PROTECTION'),
     (140, 15, 265, 100, '3.3 V SUPPLY + SOFT-START'),
     (270, 15, 405, 100, 'STATUS LED + 3.3 V -> 5 V LEVEL SHIFTER'),
-    (15, 105, 100, 215, 'EN RC / BOOT / BOARD ID'),
+    (15, 105, 100, 215, 'EN RC / BOOT'),
     (105, 105, 215, 215, 'ESP32-S3 MODULE'),
     (220, 105, 405, 215, 'microSD + POWER SWITCH  (RX ONLY)'),
     (15, 220, 140, 285, 'TEST PADS (bottom side, pogo jig)'),
@@ -90,8 +89,8 @@ NOTES = [
               'R9 holds DIN low during boot (LED dark). R10 100 R at DIN.'),
     (19, 198, 'EN RC: R4 10k / C9 1u (module DS). No reset button (rev B): replug.\n'
               'BOOT (IO0): R5 10k pull-up, no cap. Hold SW1 at reset -> download.\n'
-              'Board ID (IO1, ADC): RX R7 = 100k -> 1.65 V;\n'
-              'TX R7 = 22k (C25768) -> 0.60 V. TX firmware ignores BOARD_ID.'),
+              'Rev B: no board-ID divider; board rev + role in factory NVS.\n'
+              'IO1 unused (no connect).'),
     (109, 198, 'U4 = ESP32-S3-MINI-1-N8 only (IO35 used; no PSRAM variants).\n'
                'Native USB on IO19/IO20 (USB_D-/D+). C7 10u + C8 100n at the 3V3 pin.\n'
                'SDMMC via GPIO matrix: pin order follows the layout.'),
@@ -159,11 +158,10 @@ def drawing(P):
 
     # ---- F: reset / boot / board ID ------------------------------------------------------------
     for top, node, net, taps in (('R4', 'R4', 'EN', [('C9', '1')]),
-                                 ('R5', 'R5', 'BOOT', [('SW1', '1')]),
-                                 ('R6', 'R6', 'BOARD_ID', [('C10', '1')])):
+                                 ('R5', 'R5', 'BOOT', [('SW1', '1')])):
         pw('+3V3', *P(top, '1'))
         n = P(node, '2'); w(n, (76.2, n[1])); lab(net, 76.2, n[1], 0)
-    for r in ('C9', 'SW1', 'R7', 'C10'):
+    for r in ('C9', 'SW1'):
         pw('GND', *P(r, '2'))
 
     # ---- C: module -----------------------------------------------------------------------------
@@ -174,7 +172,7 @@ def drawing(P):
     e = P('R8', '2'); w(e, (e[0] + 2.54, e[1])); lab('U0TXD', e[0] + 2.54, e[1], 0)
     for num, net in (('40', 'U0RXD'), ('23', 'USB_DM'), ('24', 'USB_DP'), ('31', 'SD_PWR_EN'), ('30', 'LED_DATA_3V3')):
         p = P('U4', num); w(p, (p[0] + 2.54, p[1])); lab(net, p[0] + 2.54, p[1], 0)
-    for num, net in (('45', 'EN'), ('4', 'BOOT'), ('5', 'BOARD_ID'), ('14', 'SD_D2'), ('15', 'SD_D3'),
+    for num, net in (('45', 'EN'), ('4', 'BOOT'), ('14', 'SD_D2'), ('15', 'SD_D3'),
                      ('16', 'SD_CMD'), ('17', 'SD_CLK'), ('18', 'SD_D0'), ('19', 'SD_D1'), ('20', 'SD_CD')):
         p = P('U4', num); w(p, (p[0] - 2.54, p[1])); lab(net, p[0] - 2.54, p[1], 180)
 

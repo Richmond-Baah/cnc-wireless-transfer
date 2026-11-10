@@ -20,7 +20,8 @@ OX, OY = 100.0, 100.0
 W = 18.3                    # board width (rev B short case, inner 18.54; case to be widened, see revB-notes)
 PLUG_EDGE_TO_HOLES = 2.92   # XKB: board edge to hole row (EasyEDA C319178)
 NOTCH = (-6.5, 6.5, 0.0, 3.9)   # x0,x1,y0,y1: plug-shell zone kept free for a possible notch
-MOD_CY = 24.2               # module pad-field centre (courtyard starts 8.11 before it, y 16.09)
+DL = 3.0                    # rev B +3 mm (2026-11-10): via / escape band in front of the module
+MOD_CY = 24.2 + DL          # module pad-field centre (courtyard starts 8.11 before it)
 L = MOD_CY + 7.7            # board end = antenna boundary; antenna overhangs 5.1 mm
 E = 8.55                    # 0402 column beside the module (pad edge 0.25 from the board edge, as rev A)
 RV = 14.75                  # row of 0402s / RN1 just in front of the module (SD vias at y ~15.85)
@@ -35,30 +36,34 @@ P = {
     'R2': (-1.0, 15.05, 270, 'F'), 'R1': (0.0, 15.05, 270, 'F'),   # connector side toward U1
     # --- +x half: LDO -> soft-start -> +3V3, then SD pull-ups in front of the module SD pins ----------
     'C3': (2.55, 8.4, 90, 'F'), 'U2': (4.85, 8.2, 180, 'F'), 'C4': (7.05, 8.4, 90, 'F'),
-    'C6': (2.6, 11.8, 90, 'F'), 'C5': (4.3, 11.1, 90, 'F'), 'U3': (7.0, 11.85, 180, 'F'),
+    'C6': (2.6, 11.8, 90, 'F'), 'C5': (4.05, 11.1, 90, 'F'), 'U3': (6.75, 11.85, 180, 'F'),
     'R23': (2.2, RV, 90, 'F'), 'RN1': (4.7, RV - 0.15, 90, 'F'),
-    'C14': (6.55, RV, 90, 'F'), 'C15': (7.6, RV, 90, 'F'), 'R22': (E, RV, 90, 'F'),
+    # +x row: SD_VDD pads all on the south line (one track); R22 (D3) mid so D3 drops west of the BOOT/3V3/VDD lanes
+    'C14': (6.55, RV, 270, 'F'), 'R22': (7.6, RV, 90, 'F'), 'C15': (E, RV, 270, 'F'),
     # --- -x half: LED + buffer, SD power switch --------------------------------------------------------
     'D2': (-3.3, 8.25, 0, 'F'), 'C12': (-5.55, 8.25, 90, 'F'),
     'U5': (-3.4, 12.0, 0, 'F'), 'R10': (-1.4, 11.9, 90, 'F'), 'C11': (-3.4, 14.4, 0, 'F'),
-    'U6': (-7.0, 11.65, 0, 'F'),
-    'R11': (-E, 19.4, 90, 'F'), 'C13': (-7.5, RV, 90, 'F'), 'R9': (-5.95, RV, 90, 'F'),   # R11: -x strip at pin 31
+    'U6': (-7.0, 11.3, 0, 'F'),
+    'R11': (-7.25, 13.55, 180, 'F'),                                   # SD_PWR_EN pull-up between U6 and C13
+    'R4': (-6.85, 8.55, 90, 'F'), 'C9': (-8.25, 8.55, 270, 'F'),      # EN RC beside U6.1 (+3V3)
+    'C13': (-7.5, 15.0, 90, 'F'), 'R9': (-5.6, RV, 90, 'F'),
     # --- strips beside the module ------------------------------------------------------------------------
-    # +x: board ID divider at IO1 (pin 5), BOOT pull-up at pin 4, 3V3 decoupling at pin 3 / GND pins 2, 1
-    'C10': (E, 20.1, 270, 'F'), 'R7': (E, 22.05, 90, 'F'), 'R6': (E, 24.0, 90, 'F'),
-    'R5': (E, 25.95, 90, 'F'), 'C8': (E, 27.9, 90, 'F'), 'C7': (E, 29.85, 270, 'F'),
-    # -x: TXD series R, EN RC (the strip also carries EN / TXD / RXD / SD_PWR_EN lanes)
-    'R8': (-E, 25.0, 90, 'F'), 'R4': (-E, 28.0, 270, 'F'), 'C9': (-E, 30.0, 270, 'F'),
+    # Strips beside the module carry lanes only (rev B +3 mm): +x BOOT -> pin 4, +3V3 -> C8 / pin 3;
+    # -x SD_PWR_EN, U0TXD_MOD, U0RXD, EN. Board-ID divider removed. Only C8 (100n at pin 3) stays there.
+    'C8': (E, 27.9 + DL, 270, 'F'),                                    # rot 270: GND pad toward pin 2
+    # --- band in front of the module (y ~16-19): parts moved out of the strips -------------------------
+    'R5': (8.0, 18.0, 180, 'F'),                                       # BOOT pull-up at the +x lane starts
+    'C7': (8.0, 17.0, 180, 'F'),                                       # 3V3 bulk at the +3V3 lane start (was +x strip)
+    'R8': (-7.0, 17.0, 90, 'F'),                                       # TXD series R, east of the -x lanes
     # --- module ----------------------------------------------------------------------------------------------
     'U4': (0, MOD_CY, 180, 'F'),
     # --- bottom: microSD under the module (slot faces -x), BOOT switch, test pads (pogo grid, 2.35 pitch) ----
-    'J3': (-5.13, 27.0, 90, 'B'),
-    'SW1': (4.8, 8.4, 0, 'B'),
+    'J3': (-5.13, 27.0 + DL - 0.5, 90, 'B'),   # 0.5 mm toward the plug vs rev B placement: shield pad off the via band
+    'SW1': (4.8, 8.4, 180, 'B'),               # rot 180: BOOT pad toward the +x lane
     **{'TP%d' % n: (x, y, 0, 'B') for n, x, y in (
         (1, 2.5, 12.0), (3, 4.85, 12.0), (5, 7.2, 12.0),                     # +3V3, +5V, BOOT
-        (8, -2.5, 12.0), (4, -4.85, 12.0), (6, -7.2, 12.0),                  # USB_DP_C, EN, U0TXD
-        (9, -2.5, 8.7), (7, -4.85, 8.7), (2, -7.2, 8.7),                     # USB_DM_C, U0RXD, GND
-        (10, 8.05, 30.3))},                                                  # BOARD_ID, strip beside J3
+        (8, -2.5, 12.0), (6, -4.85, 12.0), (2, -7.2, 12.0),                  # USB_DP_C, U0TXD, GND
+        (9, -2.5, 8.7), (7, -4.85, 8.7), (4, -7.2, 8.7))},                   # USB_DM_C, U0RXD, EN (order = -x lane order)
 }
 
 
@@ -158,6 +163,13 @@ def drc_exclude_j3_pegs(keep):
                                                                it[0]['uuid'], it[1]['uuid']))
     d = json.loads(keep)
     d['board']['design_settings']['drc_exclusions'] = keys
+    # the project's rules override the board's in DRC: keep them equal to the JLC values set in main()
+    d['board']['design_settings']['rules'].update(min_clearance=0.127, min_hole_clearance=0.2, min_hole_to_hole=0.25,
+                                                  min_through_hole_diameter=0.2, min_via_diameter=0.45,
+                                                  min_via_annular_width=0.1, min_copper_edge_clearance=0.25)
+    for c in d['net_settings']['classes']:
+        if c['name'] == 'Default':
+            c.update(clearance=0.127, track_width=0.2, via_diameter=0.45, via_drill=0.2)
     with open(pro, 'w') as f:
         json.dump(d, f, indent=2); f.write('\n')
     return len(keys)
@@ -172,13 +184,15 @@ def main():
     board = pcbnew.BOARD()
     ds = board.GetDesignSettings()
     ds.SetBoardThickness(mm(1.6))
-    # JLCPCB 2-layer capabilities (min): 0.127 track/space, 0.3 drill / 0.45 via, 0.2 copper-to-edge.
+    # JLCPCB 2-layer, standard price (jlcpcb.com/capabilities/pcb-capabilities, read 2026-11-10): track/space
+    # 0.10; via 0.2 hole / 0.45 dia is the smallest without surcharge (0.15 hole, or 0.2 hole < 0.45 dia, costs
+    # more); via hole-to-hole 0.2, via hole to track 0.2. Margins kept: 0.127 track/space, 0.25 hole-to-hole.
     ds.m_MinClearance = mm(0.127); ds.m_TrackMinWidth = mm(0.127); ds.m_MinConn = mm(0.127)
-    ds.m_ViasMinSize = mm(0.45); ds.m_ViasMinAnnularWidth = mm(0.1); ds.m_MinThroughDrill = mm(0.25)
-    ds.m_HoleToHoleMin = mm(0.5); ds.m_HoleClearance = mm(0.25); ds.m_CopperEdgeClearance = mm(0.25)
+    ds.m_ViasMinSize = mm(0.45); ds.m_ViasMinAnnularWidth = mm(0.1); ds.m_MinThroughDrill = mm(0.2)
+    ds.m_HoleToHoleMin = mm(0.25); ds.m_HoleClearance = mm(0.2); ds.m_CopperEdgeClearance = mm(0.25)
     ds.m_MinSilkTextHeight = mm(0.8); ds.m_MinSilkTextThickness = mm(0.12); ds.m_SilkClearance = mm(0.0)
     nc = ds.m_NetSettings.GetDefaultNetclass()
-    nc.SetClearance(mm(0.15)); nc.SetTrackWidth(mm(0.2)); nc.SetViaDiameter(mm(0.6)); nc.SetViaDrill(mm(0.3))
+    nc.SetClearance(mm(0.127)); nc.SetTrackWidth(mm(0.2)); nc.SetViaDiameter(mm(0.45)); nc.SetViaDrill(mm(0.2))
     board.SetCopperLayerCount(2)
     netinfo = {}
     for name in sorted(set(nets.values())):
@@ -211,7 +225,7 @@ def main():
         fp.Reference().SetVisible(False)   # dense board: refs on F.Fab / assembly drawing only
     edge(board)
     keepout(board, *NOTCH, 'PLUG_NOTCH_RESERVE')
-    text(board, 'FileXfer rev B', 0, 31.2, pcbnew.B_SilkS)
+    text(board, 'FileXfer rev B', 0, L - 0.7, pcbnew.B_SilkS)
     pcbnew.SaveBoard(PCB, board)
     print(f'wrote {PCB}: {len(comps)} footprints, {len(netinfo)} nets, board {W} x {L:.1f} mm '
           f'(+5.1 antenna overhang); DRC exclusions (J3 pegs): {drc_exclude_j3_pegs(pro_text)}')
