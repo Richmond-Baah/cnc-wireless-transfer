@@ -9,17 +9,17 @@ Outputs:
   filexfer-revA-gerbers.zip
   bom-RX-jlc.csv, cpl-RX-jlc.csv   receiver build (Fit ALL + RX)
   bom-TX-jlc.csv, cpl-TX-jlc.csv   transmitter build (Fit ALL; R7 = 22k)
-J1 (USB-A plug) is DNP in every build (hand-soldered). Fit=DNP parts and the bottom test pads
+J1 (USB-A plug), J3 (microSD, bottom) and SW1 (BOOT, bottom) are DNP in every build (hand-soldered). Fit=DNP parts and the bottom test pads
 (not in BOM/CPL) are never placed.
 """
 import csv, os, shutil, subprocess, sys, zipfile
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 PCB, SCH = 'filexfer-pcb.kicad_pcb', 'filexfer-pcb.kicad_sch'
-OUT = os.path.join(HERE, 'fab', 'rev-A')
+OUT = os.path.join(HERE, 'fab', 'rev-B')
 GERB = os.path.join(OUT, 'gerbers')
 LAYERS = 'F.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts'
-ALWAYS_DNP = {'J1'}                                   # plug: hand-soldered
+ALWAYS_DNP = {'J1', 'J3', 'SW1'}                      # plug + bottom parts: hand-soldered (DNP-bottom)
 VARIANTS = {
     'RX': dict(fit={'ALL', 'RX'}, override={}),
     'TX': dict(fit={'ALL'}, override={'R7': ('22k', '0402WGF2202TCE', 'C25768')}),

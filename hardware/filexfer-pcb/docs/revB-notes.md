@@ -33,49 +33,67 @@ C_3V3 = 4.7 C4 + 10 C7 + 22 C6 + 1 C9 + ~0.6 decoupling + SD rail ~4.8 + 1 (rev 
 - **Totals:** components 61 → 48; nets 61 → 55; no other component, field or node changed.
 - **Title block:** rev B. Block notes updated. Export: `docs/img/schematic-revB.pdf` / `.png`.
 
-## 3. Placement: blocked (needs a decision)
+## 3. Placement (option 1 approved: SW1 on the bottom, hand-soldered)
 
-**Board:** 18.3 × 31.9 mm. The module pad field is centred at y 24.2 and its courtyard starts at y 16.2. The antenna overhangs 5.1 mm, ending 0.5 mm before the inner case end.
+History: with SW1 on top, the +x front half was at 93 % courtyard fill, so no fit. The user approved option 1: SW1 goes to the bottom, U6/C13/R11 stay, and a smaller switch is used only if needed (ask first). It wasn't needed.
 
-**J3 on the bottom (works):**
-- Rotation 90, origin (−5.13, 27.0); courtyard y 13.4–30.7.
-- Contacts at x 5.87 under the module's SD pins, so the SD lines run module pad → via → contact in about 2–3 mm.
-- The two J3 locating-peg holes (1.0 mm NPTH, x −5.13, y 19.0 / 27.0) fall in the free ring between the module's edge pads and its centre GND grid, 1.1 mm clear of both.
+- **Generator:** `tools/gen_pcb.py` (P dict; placement only, no tracks).
+- **Board:** 18.3 × 31.9 mm, 2 layers. The antenna overhangs 5.1 mm (37.0 of 37.5 inner length).
+- **Renders:** `docs/img/revB-placement-2d.png` (top and bottom courtyards), `revB-placement-3d-top.png`, `-bottom.png`, `-iso.png`.
 
-**Top front zone:** y 6.8–16.2 (9.4 mm) × 18.3 mm.
-- The USB pair is fixed in the centre: J1 pins at x ±1, module pins at x 0 / −0.85. Every net that crosses sides must cross the pair.
-- Crossing on the bottom under the pair breaks its GND reference (criterion 4). The only clean crossing is the bottom band under the J1 pads (y 5.1–6.4), which has room for about 3 thin tracks.
+**DRC (placement):**
+- 0 courtyard, clearance or edge errors.
+- 2 × `npth_inside_courtyard`: the J3 peg holes sit in the U4 courtyard (the free ring under the module). This is intended.
+  - Before marking them as DRC exclusions, confirm from the J3 drawing that the pegs don't reach the top surface (1.6 mm board) [U].
+- Silk clipped at the antenna edge (warning, same as rev A).
+- 145 unconnected items (not routed yet).
 
-**Pure rectangle packing** (courtyards only, zero routing space; 12 × 0402 already moved into the module-side strips):
+**Courtyard fill** (rectangle intersections, computed from the board):
 
-| +x half (70 mm²) | −x half | Result |
+| Zone | Area | Fill | Parts |
+|---|---|---|---|
+| Top front zone, whole (y 6.8–16.1) | 170 mm² | **54 %** (rev A routed at 55 %) | |
+| … −x half | 70 | 50 % | LED (D2, U5, R9, R10, C11, C12), SD switch (U6, C13, R11) |
+| … centre channel (\|x\| < 1.65) | 31 | 37 % | U1, R1, R2 (+ USB pair, swap via) |
+| … +x half | 70 | **66 %** | power (C3, U2, C4, C5, C6, U3), RN1, R23, R22, C14, C15 |
+| Top strip +x beside module | 16 | 60 % | C10, R7, R6 (board ID), R5 (BOOT pull-up), C8, C7 (3V3 at pin 3) |
+| Top strip −x | 16 | 30 % | R8, R4, C9, plus EN / TXD / RXD / SD_PWR_EN lanes (as rev A) |
+| Bottom front (y 3.9–13.4) | 174 | 28 % | SW1, TP1–TP9 |
+| Bottom strip +x beside J3 | 41 | 8 % | TP10 (rest = BOOT / +3V3 / SD_VDD lanes) |
+
+**Routing plan behind the placement** (to be proven at routing; criteria unchanged):
+- **USB:** J1 → U1 (ESD at the plug) → swap via (D+ hops once) → R1/R2 → module pins 23/24. Bottom under the pair: GND, apart from the swap via.
+- **Crossings of the pair:** in the bottom band under the J1 pads (y ≈ 4–6.4, ~2.5 mm wide inside \|x\| < 5): +5V (F1 → power/D1), +3V3 (+x → U6/R4/R11) and SD_VDD (U6 → +x). That is 3 tracks, ~10–14 mm long. These are the longest bottom tracks; everything else on the bottom is short stubs.
+- **SD:**
+  - Module pins → a via row at y ≈ 15.85 (CD, D1, D0, CLK, CMD, then D3/D2 around the +x module corner).
+  - Bottom tracks then run in x ≈ 3.5–5 under the J3 body and enter the contacts from −x, peeling in contact order.
+  - SD_VDD enters J3 pin 4 from the +x strip.
+  - RN1's pin order is mirrored relative to the module, so one pull-up (D1 or CMD) needs an extra via.
+- **Bottom strip +x (x 7–9.1):** BOOT (SW1 → pin 4), +3V3 (→ pin 3), SD_VDD (→ J3.4). GND pour everywhere else.
+- **Risk:** the +x half (66 %) and the 3-track band. If routing can't meet the criteria, the next step is a 4-layer proposal (needs approval), not a part change.
+
+**Case clearance** (board frame: x across, +x = D1/TVS side; y from the board front edge = inner front face; heights use feasibility option 1, board bottom z 4.71):
+
+| Item | Value | Clearance |
 |---|---|---|
-| power + SD (natural: module 3V3 and SD pins are on +x) | LED + BOOT | **+x 93 %: no fit** |
-| power + LED | SD + BOOT | 83 % / 70 %; adds crossings (LED, SD_VDD) |
-| power + BOOT | SD + LED | 85 % / 69 % |
+| Width | board 18.30 | case inner 18.54 → 0.12/side; **widen to ≥ 18.85** (unchanged) |
+| Length | 31.9 + 5.1 antenna = 37.0 | 0.5 to the inner back wall |
+| Module top (2.4) | z 8.71 | 1.60 to the lid (opt. 2: 0.90) |
+| Bottom parts: J3 and SW1 (TS-1088-xR020, 2.0) | lowest face z 2.71 | 2.71 above the floor (opt. 2: 3.41) |
+| Tallest other top part (U3/U6 SOT-23-6 ~1.45 [E]) | z ≈ 7.8 | under the module top |
+| Plug shell 12.0 W (12.9 over latches) | front slot | widen 12.4 → ≥ 13.1 (unchanged) |
+| Bottom under the plug | SW1 starts y 6.6; TPs y ≥ 7.65 | clear of the plug body if it straddles the board (seating [U] until the XKB STEP) |
 
-**Groups:**
-
-| Group | Parts | Courtyard |
-|---|---|---|
-| Power | U2, C3, C4, U3, C5, C6 | 37.9 mm² |
-| SD | U6, C13, C14, C15, RN1, R23 | 27.8 mm² |
-| LED | U5, C11, R10, D2, C12 | 20.7 mm² |
-| BOOT | SW1 | 21.9 mm² |
-
-**Why it doesn't work:**
-- Every split leaves one half at ≥ 83 % courtyard fill before any routing. Rev A routed at 55 %.
-- Filling the module-side strips with parts leaves no top corridor for TXD/RXD/EN/BOOT/+3V3. Those would run on the bottom under J3, which fails "bottom mostly GND, tracks short".
-- **2-layer fails, and 4-layer does not fix it.** The limit is area, not layers.
-
-**Options (need approval):**
-1. **SW1 to the bottom, hand-soldered with J3.** BOOT pinhole moves to the case floor. Frees 21.9 mm²: halves ≈ 54 % / 68 %; 2-layer becomes plausible.
-2. **Smaller BOOT switch** (part change, top side); frees ≈ 12–15 mm².
-3. **Remove the SD power switch U6 / C13 / R11**: frees ≈ 19 mm². Loses SD power-cycling (firmware SD_PWR_EN).
-4. 4-layer helps the crossings and the long nets, but only on top of 1–3.
+**Case openings:**
+- **BOOT pinhole: case floor at x +4.8, y 8.4.** The SW1 actuator faces the floor, 2.71 mm above it. Add a floor boss or guide tube so a 1 mm pin reaches it [E].
+- **LED window: lid at x −3.3, y 8.25** (D2, top side, ~3.2 mm below the lid). Use a light pipe or thin window.
+- **microSD slot: −x wall.** J3 body x −9.15…5.35, y 14.7…29.4, flush with the −x board edge. Slot ≈ y 16–28, at the J3 level under the board [E from footprint; confirm the card position from the drawing].
+- **Test pads:** bottom, 1.0 mm pads.
+  - Front grid 3 × 3 at 2.35 pitch (x ±2.5 / ±4.85 / ±7.2, y 8.7 / 12.0), plus TP10 at (8.05, 30.3).
+  - Pogo access is with the case open (jig before casing). No pad sits under SW1 or J3.
 
 ## 4. Bring-up checklist (rev B)
 
 - [ ] **Measure in-case temperature** (module shield + LDO) during a sustained transfer, lid closed, at room temperature and in a warm cabinet. The module is rated −40…85 °C ambient [V ESP32-S3-MINI-1 datasheet, Table 1-1]. The enclosure estimate is 67–80 °C inside the case at 40 °C ambient (`revB-feasibility.md`).
 - [ ] Inrush at attach (USB current probe): fast charge ≤ 50 µC, ramp ≈ 3.5 ms.
-- [ ] J3 hand-soldered on the bottom: card insert/eject, card detect polarity.
+- [ ] J3 and SW1 hand-soldered on the bottom (DNP-bottom in BOM/CPL): card insert/eject, card-detect polarity; BOOT through the floor pinhole (10 s pairing reset, download mode).
