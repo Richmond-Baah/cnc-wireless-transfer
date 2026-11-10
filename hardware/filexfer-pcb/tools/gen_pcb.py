@@ -39,31 +39,29 @@ P = {
     'C6': (2.6, 11.8, 90, 'F'), 'C5': (4.05, 11.1, 90, 'F'), 'U3': (6.75, 11.85, 180, 'F'),
     'R23': (2.2, RV, 90, 'F'), 'RN1': (4.7, RV - 0.15, 90, 'F'),
     # +x row: SD_VDD pads all on the south line (one track); R22 (D3) mid so D3 drops west of the BOOT/3V3/VDD lanes
-    'C14': (6.55, RV, 270, 'F'), 'R22': (7.6, RV, 90, 'F'), 'C15': (E, RV, 270, 'F'),
+    'C15': (6.55, RV, 270, 'F'), 'R22': (7.6, RV, 90, 'F'),          # 100n at the card; x 8.55 left free (GND/+3V3)
+    'C14': (-4.0, 10.2, 0, 'F'),                                       # 10u bulk at the U6 output
     # --- -x half: LED + buffer, SD power switch --------------------------------------------------------
     'D2': (-3.3, 8.25, 0, 'F'), 'C12': (-5.55, 8.25, 90, 'F'),
     'U5': (-3.4, 12.0, 0, 'F'), 'R10': (-1.4, 11.9, 90, 'F'), 'C11': (-3.4, 14.4, 0, 'F'),
     'U6': (-7.0, 11.3, 0, 'F'),
     'R11': (-7.25, 13.55, 180, 'F'),                                   # SD_PWR_EN pull-up between U6 and C13
-    'R4': (-6.85, 8.55, 90, 'F'), 'C9': (-8.25, 8.55, 270, 'F'),      # EN RC beside U6.1 (+3V3)
+    'R4': (-7.25, 17.3, 270, 'F'), 'C9': (-6.25, 17.3, 90, 'F'),      # EN RC at the end of the EN lane
     'C13': (-7.5, 15.0, 90, 'F'), 'R9': (-5.6, RV, 90, 'F'),
     # --- strips beside the module ------------------------------------------------------------------------
     # Strips beside the module carry lanes only (rev B +3 mm): +x BOOT -> pin 4, +3V3 -> C8 / pin 3;
-    # -x SD_PWR_EN, U0TXD_MOD, U0RXD, EN. Board-ID divider removed. Only C8 (100n at pin 3) stays there.
+    # -x SD_PWR_EN, EN (rev B: no UART lanes). Board-ID divider removed. Only C8 (100n at pin 3) stays there.
     'C8': (E, 27.9 + DL, 270, 'F'),                                    # rot 270: GND pad toward pin 2
     # --- band in front of the module (y ~16-19): parts moved out of the strips -------------------------
     'R5': (8.0, 18.0, 180, 'F'),                                       # BOOT pull-up at the +x lane starts
     'C7': (8.0, 17.0, 180, 'F'),                                       # 3V3 bulk at the +3V3 lane start (was +x strip)
-    'R8': (-7.0, 17.0, 90, 'F'),                                       # TXD series R, east of the -x lanes
     # --- module ----------------------------------------------------------------------------------------------
     'U4': (0, MOD_CY, 180, 'F'),
     # --- bottom: microSD under the module (slot faces -x), BOOT switch, test pads (pogo grid, 2.35 pitch) ----
     'J3': (-5.13, 27.0 + DL - 0.5, 90, 'B'),   # 0.5 mm toward the plug vs rev B placement: shield pad off the via band
     'SW1': (4.8, 8.4, 180, 'B'),               # rot 180: BOOT pad toward the +x lane
     **{'TP%d' % n: (x, y, 0, 'B') for n, x, y in (
-        (1, 2.5, 12.0), (3, 4.85, 12.0), (5, 7.2, 12.0),                     # +3V3, +5V, BOOT
-        (8, -2.5, 12.0), (6, -4.85, 12.0), (2, -7.2, 12.0),                  # USB_DP_C, U0TXD, GND
-        (9, -2.5, 8.7), (7, -4.85, 8.7), (4, -7.2, 8.7))},                   # USB_DM_C, U0RXD, EN (order = -x lane order)
+        (1, 2.5, 12.0), (2, -7.2, 12.0), (3, 7.2, 12.0))},                   # +3V3, GND, BOOT (rev B: no UART/EN pads)
 }
 
 

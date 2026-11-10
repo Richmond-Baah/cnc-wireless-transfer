@@ -143,6 +143,7 @@ class Router:
     def via(self, net, x, y):
         v = pcbnew.PCB_VIA(self.b)
         v.SetPosition(pt(x, y)); v.SetWidth(mm(VIA_D)); v.SetDrill(mm(VIA_DRILL)); v.SetNet(self.nets[net])
+        v.SetFrontTentingMode(pcbnew.TENTING_MODE_TENTED); v.SetBackTentingMode(pcbnew.TENTING_MODE_TENTED)
         self.b.Add(v)
         sh = Shape('circ', net, (0, 1), (x, y, VIA_D / 2))
         self.shapes.append(sh); self.copper.setdefault(net, []).append(sh)
@@ -572,10 +573,6 @@ def usb_pair(r):
     r.track('USB_DP', 0, [(-1.0, 15.56), (-1.0, 16.1), (-0.85, 16.25), (-0.85, YM)], 0.3)
     # U1.2 GND: via between the diverging pair
     r.track('GND', 0, [(0.0, 9.38), (0.0, 9.9)], 0.25); r.via('GND', 0.0, 9.9)
-    # test pads (bottom): TP8 from the D+ swap via, TP9 via a short top stub on D-
-    r.track('USB_DP_C', 1, [(-1.0, yv2), (-2.15, 12.1)], 0.3)
-    r.track('USB_DM_C', 0, [(-0.54, 8.4), (-1.3, 8.4)], 0.3); r.via('USB_DM_C', -1.3, 8.4)
-    r.track('USB_DM_C', 1, [(-1.3, 8.4), (-2.2, 8.65)], 0.3)
 
 
 def plug_power(r):
@@ -599,8 +596,8 @@ def plug_power(r):
     # (feeds R4 / U6.1 / R11 / C13 through mx_corner)
     r.via('+3V3', 2.25, 5.4); r.track('+3V3', 0, [(2.25, 5.4), (2.25, 6.8)], 0.3)
     r.track('+3V3', 1, [(2.25, 5.4), (-5.8, 5.4), (-6.2, 5.8), (-6.2, 5.9)], 0.3); r.via('+3V3', -6.2, 5.9)
-    r4 = loc([p for p in r.b.FindFootprintByReference('R4').Pads() if p.GetNumber() == '1'][0].GetPosition())
-    r.track('+3V3', 0, [(-6.2, 5.9), (-6.2, 8.75), (-6.51, r4[1]), r4], 0.25)
+    # top up beside C12 to U6.1, then a bottom lane (x -8.2) north to C13.2 / R11.1 and R4.1 (mx_corner)
+    r.track('+3V3', 0, [(-6.2, 5.9), (-6.2, 8.75), (-6.95, 9.5), (-8.2, 9.5)], 0.25); r.via('+3V3', -8.2, 9.55)
 
 
 def strips(r):
@@ -609,7 +606,7 @@ def strips(r):
     +x: BOOT (pin 4) -> R5, +3V3 (C8 / pin 3) -> R5; C8.2 GND -> pin 2."""
     yb = 18.75
     py = {n: loc(p.GetPosition())[1] for p in r.b.FindFootprintByReference('U4').Pads()
-          for n in [p.GetNetname().lstrip('/')] if n in ('SD_PWR_EN', 'U0TXD_MOD', 'U0RXD', 'EN', 'BOOT', '+3V3')}
+          for n in [p.GetNetname().lstrip('/')] if n in ('SD_PWR_EN', 'EN', 'BOOT', '+3V3')}
     # LED_DATA_3V3: pin 30 -> via beside the pin -> 3 mm bottom hop west of the J3 -x shield pad -> R9 / U5
     xl, yl = [loc(p.GetPosition()) for p in r.b.FindFootprintByReference('U4').Pads()
               if p.GetNetname().lstrip('/') == 'LED_DATA_3V3'][0]
@@ -622,8 +619,7 @@ def strips(r):
     # 0.14 wide at 0.3 pitch so the maze router (0.15, clearance 0.127) can continue from their ends in the band
     # SD_PWR_EN (front-most pin) hops 2.5 mm on the bottom at its pin and takes the OUTER lane, so the lane
     # order (W->E PWR_EN, EN, RXD, TXD) matches the targets (U6.3 at the edge; EN / RXD / TXD test pads)
-    for net, x in (('U0TXD_MOD', -7.6), ('U0RXD', -7.9), ('EN', -8.2)):
-        r.track(net, 0, [(-7.0, py[net]), (x, py[net]), (x, 19.3)], 0.14)
+    r.track('EN', 0, [(-7.0, py['EN']), (-7.65, py['EN']), (-7.65, 18.3)], 0.15)
     yp, xa, xo = py['SD_PWR_EN'], -6.2, -8.675
     r.track('SD_PWR_EN', 0, [(-7.0, yp), (xa, yp)], 0.15); r.via('SD_PWR_EN', xa, yp)
     r.track('SD_PWR_EN', 1, [(xa, yp), (xo, yp)], 0.15); r.via('SD_PWR_EN', xo, yp)
@@ -638,45 +634,34 @@ def strips(r):
 
 
 def mx_corner(r):
-    """-x front corner (scripted): strip lanes -> R8 / vias -> bottom -> test pads; U6 cluster; LED hop."""
+    """-x front corner (scripted): EN lane -> R4/C9 (band); SD_PWR_EN outer lane -> U6.3 / R11.2; +3V3 bottom lane
+    U6.1 -> C13.2 / R11.1 -> R4.1; U6.2 and R9.2 GND vias; SD_CT; LED."""
     P = lambda ref: {p.GetNumber(): loc(p.GetPosition()) for p in r.b.FindFootprintByReference(ref).Pads()}
-    u6, r11, c13, r8, r9, u5, r4, c9 = (P(x) for x in ('U6', 'R11', 'C13', 'R8', 'R9', 'U5', 'R4', 'C9'))
-    tp = {n: P('TP%d' % n)['1'] for n in (4, 6, 7)}
+    u6, r11, c13, r9, u5, r4, c9 = (P(x) for x in ('U6', 'R11', 'C13', 'R9', 'U5', 'R4', 'C9'))
     xo = -8.675
-    # SD_PWR_EN: outer lane down the edge (west of C13) into U6.3, tee to R11.2
     r.track('SD_PWR_EN', 0, [(xo, 21.25), (xo, u6['3'][1] + 0.15)], 0.15)
     r.track('SD_PWR_EN', 0, [(xo, r11['2'][1]), r11['2']], 0.15)
-    # U0TXD_MOD -> R8.1; U0TXD: R8.2 -> via -> bottom -> TP6
-    r.track('U0TXD_MOD', 0, [(-7.6, 19.3), (-7.6, 18.6), (r8['1'][0], 18.6), r8['1']], 0.15)
-    tv = (-6.75, 15.85)
-    r.track('U0TXD', 0, [r8['2'], tv], 0.15); r.via('U0TXD', *tv)
-    r.track('U0TXD', 1, [tv, (tp[6][0], tv[1] - (tp[6][0] - tv[0])), tp[6]], 0.15)
-    # U0RXD: lane -> via -> bottom -> TP7
-    rv = (-7.75, 17.55)
-    r.track('U0RXD', 0, [(-7.9, 19.3), (-7.9, 17.7), rv], 0.15); r.via('U0RXD', *rv)
-    r.track('U0RXD', 1, [rv, (-7.75, 13.75), (-7.5, 13.5), (-5.7, 13.5), (-5.7, tp[7][1] + 0.85), tp[7]], 0.15)
-    # EN: lane -> via west of C13 -> bottom -> TP4 -> via -> R4.2 / C9.1 (EN RC beside U6.1)
-    ev, ev2 = (-8.2, 16.1), (-7.55, 7.6)
-    r.track('EN', 0, [(-8.2, 19.3), ev], 0.15); r.via('EN', *ev)
-    r.track('EN', 1, [ev, (-8.2, tp[4][1] + 0.8), (tp[4][0] - 0.25, tp[4][1]), tp[4]], 0.15)
-    r.track('EN', 1, [tp[4], (ev2[0], tp[4][1] - 0.65), ev2], 0.15); r.via('EN', *ev2)
-    r.track('EN', 0, [c9['1'], (ev2[0] - 0.2, ev2[1]), (ev2[0] + 0.2, ev2[1]), r4['2']], 0.15)
-    # U6 cluster: +3V3 U6.1 -> under the U6 body -> R11.1 -> C13.2; R4.1 -> U6.1; SD_CT U6.4 -> C13.1
-    r.track('+3V3', 0, [u6['1'], (-6.95, u6['1'][1]), (-6.95, r11['1'][1]), r11['1']], 0.25)
+    r.track('EN', 0, [(-7.65, 18.3), (r4['2'][0], 17.9), r4['2'], c9['1']], 0.15)
+    r.track('+3V3', 0, [u6['1'], (-8.2, 9.55)], 0.25)
+    r.track('+3V3', 1, [(-8.2, 9.55), (-8.2, 14.3), (-8.16, 14.34), (-8.16, 16.6)], 0.25)
+    r.via('+3V3', -8.2, 14.3); r.via('+3V3', -8.16, 16.6)
+    r.track('+3V3', 0, [(-8.2, 14.3), c13['2']], 0.25)
     r.track('+3V3', 0, [r11['1'], (-7.3, 14.1), c13['2']], 0.25)
-    r.track('+3V3', 0, [r4['1'], (-7.6, r4['1'][1] + 0.75), (-7.6, u6['1'][1])], 0.25)
+    r.track('+3V3', 0, [(-8.16, 16.6), r4['1']], 0.25)
+    r.track('GND', 0, [u6['2'], (-7.0, 11.15)], 0.25); r.via('GND', -7.0, 11.15)        # U6.2 (via in the U6 body)
+    r.track('GND', 0, [r9['2'], (r9['2'][0], 13.45)], 0.25); r.via('GND', r9['2'][0], 13.45)   # R9.2
     r.track('SD_CT', 0, [u6['4'], (-6.17, u6['4'][1]), (-6.17, 15.4), (c13['1'][0], 15.4)], 0.15)
-    # LED_DATA_3V3: R9.1 -> east of R9 -> between U6 and U5 -> U5.2
     r.track('LED_DATA_3V3', 0, [r9['1'], (-4.975, r9['1'][1]), (-4.975, u5['2'][1]), u5['2']], 0.15)
 
 
 def px_corner(r):
     """+x front corner (scripted): the RN1/C14/R22/C15 row spans the board, so +3V3 (to C7/R5/strip) and
     SD_VDD (to J3.4) cross under it on short bottom lanes. Bottom lanes W->E: D2 6.6, D3 6.95, BOOT 7.45,
-    +3V3 8.0, SD_VDD 8.6. U3 VIN (pad 1) <-> ON (pad 3) tie runs along the board edge (no via)."""
+    +3V3 8.0, SD_VDD 8.6. U3 VIN (pad 1) <-> ON (pad 3) tie runs along the board edge (no via).
+    SD_VDD crosses the USB pair under the J1 pads (beside the +3V3 band), not under U1 -> R1/R2."""
     P = lambda ref: {p.GetNumber(): loc(p.GetPosition()) for p in r.b.FindFootprintByReference(ref).Pads()}
     u3, u6, rn, c14, c15, r22, c7, r5 = (P(x) for x in ('U3', 'U6', 'RN1', 'C14', 'C15', 'R22', 'C7', 'R5'))
-    tp5 = P('TP5')['1']
+    tp5 = P('TP3')['1']
     r.track('3V3_LDO', 0, [u3['1'], (8.8, u3['1'][1]), (8.8, u3['3'][1]), u3['3']], 0.2)
     # +3V3: U3.6 -> south of the row -> via -> bottom 8.0 -> via -> C7.1 -> R5.1
     r.track('+3V3', 0, [u3['6'], (u3['6'][0] + 0.7, 13.5), (7.95, 13.5)], 0.3); r.via('+3V3', 7.95, 13.5)
@@ -684,21 +669,26 @@ def px_corner(r):
     r.track('+3V3', 0, [(8.0, 16.35), (c7['1'][0], 16.83), c7['1'], r5['1']], 0.3)
     # SD_VDD: U6 -> via -> bottom across the front (y 10.25) -> via -> RN1 -> row -> C15 -> via -> bottom 8.6 -> J3.4
     r.track('SD_VDD', 0, [u6['5'], u6['6'], (-5.2, 9.75)], 0.3); r.via('SD_VDD', -5.2, 9.75)
-    r.track('SD_VDD', 1, [(-5.2, 9.75), (-4.5, 10.45), (1.0, 10.45), (1.25, 10.7), (3.3, 10.7), (3.55, 10.95), (3.55, 13.45)], 0.3)
+    r.track('SD_VDD', 0, [(-5.2, 9.75), c14['1']], 0.3)
+    r.track('GND', 0, [c14['2'], (c14['2'][0], 11.35), P('U5')['1']], 0.25)
+    r.track('SD_VDD', 1, [(-5.2, 9.75), (-3.2, 9.75), (-2.85, 9.4), (-2.85, 6.3), (-2.55, 5.975), (3.1, 5.975),
+                          (3.4, 6.275), (3.4, 13.3), (3.55, 13.45)], 0.3)
     r.via('SD_VDD', 3.55, 13.45)
     r.track('GND', 0, [(2.6, 11.0), (2.6, 10.0)], 0.3); r.via('GND', 2.6, 10.0)   # C6.2 (pocket)
-    r.track('SD_VDD', 0, [(3.55, 13.45), (3.95, 13.85), (3.95, 14.1), (rn['5'][0], 14.1), c14['1'], r22['2'], c15['1'],
-                          (c15['1'][0], 13.5)], 0.3)
-    r.via('SD_VDD', c15['1'][0], 13.5)
+    r.track('SD_VDD', 0, [(3.55, 13.45), (3.95, 13.85), (3.95, 14.1), (rn['5'][0], 14.1), c15['1'], r22['2'],
+                          (8.4, r22['2'][1]), (8.55, 14.09), (8.55, 13.5)], 0.3)
+    r.via('SD_VDD', 8.55, 13.5)
+    r.track('GND', 0, [c15['2'], (6.45, 15.8)], 0.25); r.via('GND', 6.45, 15.8)       # C15.2
+    r.track('GND', 0, [c7['2'], (6.05, 17.9)], 0.2); r.via('GND', 6.05, 17.9)          # C7.2 + U4.63 pocket
     j4 = P('J3')['4']
-    r.track('SD_VDD', 1, [(c15['1'][0], 13.5), (8.6, 13.55), (8.6, j4[1] - 0.3), (8.3, j4[1]), (j4[0] + 0.4, j4[1])], 0.3)
+    r.track('SD_VDD', 1, [(8.55, 13.5), (8.6, 13.55), (8.6, j4[1] - 0.3), (8.3, j4[1]), (j4[0] + 0.4, j4[1])], 0.3)
     # D3: R22.1 -> via -> bottom 6.95 -> J3 D3 pad (east end)
     j = P('J3')
     r.track('SD_D3', 0, [r22['1'], (r22['1'][0], 15.5), (6.95, 16.15)], 0.2); r.via('SD_D3', 6.95, 16.15)
     r.track('SD_D3', 1, [(6.95, 16.15), (6.95, j['2'][1]), (6.4, j['2'][1])], 0.2)
     # D2: RN1.4 -> via -> bottom 6.6 -> J3 D2 pad
     r.track('SD_D2', 0, [rn['4'], (rn['4'][0], 15.5), (6.45, 16.5), (6.45, 16.9)], 0.2); r.via('SD_D2', 6.45, 16.9)
-    r.track('SD_D2', 1, [(6.45, 16.9), (6.62, 17.07), (6.62, 21.7)], 0.2)
+    r.track('SD_D2', 1, [(6.45, 16.9), (6.62, 17.07), (6.62, 22.3)], 0.2)
     # BOOT: R5.2 -> via -> bottom 7.45 -> TP5
     r.track('BOOT', 0, [(7.75, 18.6), (7.55, 18.75)], 0.2); r.via('BOOT', 7.55, 18.75)
     r.track('BOOT', 1, [(7.55, 18.75), (7.45, 18.65), (7.45, 12.6), tp5], 0.2)
@@ -714,29 +704,27 @@ def sd_escape(r):
     xin = j3['SD_CMD'][0] - 0.8 + 0.1                      # pad west end (+0.1 inside)
     w = 0.2
     # D3: pin -> via inside the ring -> bottom west of the D2 pad -> D3 pad from the west
-    x3, y3 = pins['SD_D3']; xv = 6.15
+    x3, y3 = pins['SD_D3']; xv = 5.7
     r.track('SD_D3', 0, [(x3, y3), (xv, y3)], w); r.via('SD_D3', xv, y3)
     r.track('SD_D3', 1, [(xv, y3), (4.6, y3), (4.6, j3['SD_D3'][1]), (xin, j3['SD_D3'][1])], w)
-    # D2: pin -> via inside the ring, landing on the D2 pad (via in pad, hand-soldered DNP part)
-    x2, y2 = pins['SD_D2']
-    r.track('SD_D2', 0, [(x2, y2), (xv, y2)], w); r.via('SD_D2', xv, y2)
+    # D2: pin -> via inside the ring just in front of the J3 D2 pad (not in the pad; tented) -> pad
+    x2, y2 = pins['SD_D2']; d2v = (6.1, 21.71)
+    r.track('SD_D2', 0, [(x2, y2), (d2v[0], y2), d2v], w); r.via('SD_D2', *d2v)
+    r.track('SD_D2', 1, [d2v, (d2v[0], j3['SD_D2'][1])], w)
     yv = YM - 1.0
     for net, xl in (('SD_CMD', 4.0), ('SD_CLK', 3.65), ('SD_D0', 3.3), ('SD_D1', 2.95), ('SD_CD', 2.6)):
         xp, yp = pins[net]
         r.track(net, 0, [(xp, yp), (xp, yv)], w); r.via(net, xp, yv)
         r.track(net, 1, [(xp, yv), (xl, yv + (xp - xl)), (xl, j3[net][1]), (xin, j3[net][1])], w)
-    # pull-ups: RN1 pin order (W->E CMD, D0, D1, D2) is mirrored vs the module (W->E D1, D0, CMD), so D0 goes
-    # straight on top and D1 / CMD hop on the bottom in front of the J3 +x shield pad (y < 16.9).
+    # pull-ups: RN1 W->E = D1, D0, CMD, D2 (module order), all on top between the via row and RN1
     rn = {p.GetNetname().lstrip('/'): loc(p.GetPosition()) for p in r.b.FindFootprintByReference('RN1').Pads()
           if p.GetNumber() in '1234'}
     x0 = pins['SD_D0'][0]
     r.track('SD_D0', 0, [(x0, yv), (x0, yv - 0.4), (rn['SD_D0'][0], yv - 0.6), rn['SD_D0']], w)
-    x1 = pins['SD_D1'][0]; yh = 16.5
-    r.track('SD_D1', 1, [(x1, yv), (x1, yh), (rn['SD_D1'][0], yh)], w); r.via('SD_D1', rn['SD_D1'][0], yh)
-    r.track('SD_D1', 0, [(rn['SD_D1'][0], yh), rn['SD_D1']], w)
-    xc = pins['SD_CMD'][0]; yc = 15.9; xcv = rn['SD_CMD'][0] - 0.05
-    r.track('SD_CMD', 1, [(xc, yv), (xc, yc), (xcv, yc)], w); r.via('SD_CMD', xcv, yc)
-    r.track('SD_CMD', 0, [(xcv, yc), rn['SD_CMD']], w)
+    x1 = pins['SD_D1'][0]
+    r.track('SD_D1', 0, [(x1, yv), (x1, yv - 0.8), (rn['SD_D1'][0], yv - 1.35), rn['SD_D1']], w)
+    xc = pins['SD_CMD'][0]
+    r.track('SD_CMD', 0, [(xc, yv), (xc, yv - 0.6), (rn['SD_CMD'][0], yv - 1.6), rn['SD_CMD']], w)
 
 
 def main():

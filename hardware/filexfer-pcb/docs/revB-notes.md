@@ -90,7 +90,7 @@ History: with SW1 on top, the +x front half was at 93 % courtyard fill, so no fi
 | Module top | 1.60 to the lid (opt. 2: 0.90) |
 | Bottom parts (J3, SW1) | lowest face z 2.71 above the floor (opt. 2: 3.41) |
 | Bottom under the plug | SW1 starts y 6.6, TPs y ≥ 7.65; plug seating still [U] until the XKB STEP |
-| Test pads | bottom, 1.0 mm, grid 2.35 pitch (x ±2.5 / ±4.85 / ±7.2, y 8.7 / 12.0) + TP10 (8.05, 30.3); pogo access with the case open |
+| Test pads | bottom, 1.0 mm: TP1 +3V3 (2.5, 12), TP2 GND (−7.2, 12), TP3 BOOT (7.2, 12) (rev B pass 3, §3d); pogo access with the case open |
 
 ## 3b. 2-layer routing attempt: criteria not met → 4-layer proposed
 
@@ -137,11 +137,11 @@ Router: `tools/route.py` rewritten for rev B (scripted USB pair, plug power and 
 
 ## 3c. 2-layer routing, pass 2 (user: stay 2-layer, free via room)
 
-This section supersedes the §3 / §3b numbers where they differ.
+This section supersedes the §3 / §3b numbers where they differ. Its result (6 GND pockets) is superseded by §3d.
 
 **Changes:**
 - **Board +3.0 mm:** 18.3 × 34.9 mm (DL = 3.0; module centre y 27.2). Antenna overhang 5.1 mm, so the board plus antenna is 40.0 mm. **Case inner length 41–42 mm** (1–2 mm antenna clearance).
-- **Board-ID divider removed** (R6, R7, C10, TP10; IO1 = no connect). Board rev and role go in factory NVS (`firmware/board_config.h` `CONFIG_FILEXFER_BOARD_FX_REV_B`; backlog `stage2-parts.md` §5 items 4 and 7). There is no TX/RX BOM difference any more.
+- **Board-ID divider removed** (R6, R7, C10, TP10; IO1 = no connect). Board rev and role go in factory NVS (`firmware/board_config.h` `CONFIG_FILEXFER_BOARD_FX_REV_B`; backlog `stage2-parts.md` §5 items 4 and 7). The TX build no longer needs the R7 value override; TX and RX still differ by the RX-only SD parts.
 - **JLC 2-layer rules at standard price** [V jlcpcb.com/capabilities/pcb-capabilities, checked 2026-11-10]:
   - Via 0.45 / 0.2 drill (0.125 annular ring).
   - Clearance 0.127, hole clearance 0.2, hole-to-hole 0.25.
@@ -198,8 +198,58 @@ This section supersedes the §3 / §3b numbers where they differ.
 
 The root cause is the same in both corners. The +x and −x corners each have to pass 4–5 nets between the front zone and the module (+x: D2, D3, BOOT, +3V3, SD_VDD; −x: SD_PWR_EN, EN, RXD, TXD, plus U6/C13/R11/LED). On 2 layers those nets take both layers locally, so the GND pockets between them cannot be stitched.
 
+## 3d. 2-layer routing, pass 3: every GND pin on main GND
+
+User requirements: every GND pin connects to main GND; stay 2-layer; drop the UART/EN pads; 0 Ω jumpers allowed where needed.
+
+**Schematic** (`gen_sch.py`; ERC 0; 37 parts):
+- **R8 removed.** TXD0/RXD0 (pins 39/40) are no-connect.
+- **Test pads now 3:** TP1 +3V3 (2.5, 12), TP2 GND (−7.2, 12), TP3 BOOT (7.2, 12), all bottom.
+  - Removed: EN, U0TXD, U0RXD and also the +5V and USB D+/D− pads. The USB pads are gone so the pair has no stubs.
+  - Flashing is over USB in download mode (hold BOOT, plug in). Reset is a replug. RX logs go over Wi-Fi (backlog item 1).
+- **RN1 pins reassigned** W→E to D1, D0, CMD, D2, matching the module pin order. All four pull-ups now run on top with no crossings, which removed the D1/CMD bottom hops that sealed the J3 shield pocket.
+
+**Placement:**
+- R4/C9 (EN RC) moved to the end of the EN lane (−7.25 / −6.25, 17.3).
+- C14 (10 µF) moved to the U6 output (−4.0, 10.2). C15 (100 nF) now sits next to the card at (6.55, 14.75). x 8.55 in the row is left empty.
+
+**Routing:**
+- **−x:**
+  - EN takes the inner lane to R4/C9. SD_PWR_EN takes the outer lane (2.5 mm bottom hop at pin 31).
+  - +3V3 reaches U6.1 from the y 5.4 band, then runs a 7 mm bottom lane at x −8.2 to C13/R11 and R4.
+  - U6.2 has a GND via in the U6 body. R9.2 has its own GND via.
+- **+x:** as §3c, plus GND vias for C15.2 (6.45, 15.8) and C7.2 / U4.63 (6.05, 17.9).
+- **SD_VDD crossing** moved under the J1 pads (y 5.975, beside the +3V3 band). The bottom under U1 → R1/R2 → module is now GND except the D+ swap hop.
+- **D2 via** moved out of the J3 D2 pad, to (6.10, 21.71) in front of it. D3 via moved to (5.70, 21.25). No via sits in any SMD pad.
+- **All 115 vias tented both sides** (JLC standard).
+
+**Result (pass 16):**
+- **DRC** (kicad-cli, project rules, schematic parity):
+  - **0 errors and 0 unconnected items.** Parity 0.
+  - Warnings: only the 4 silk-at-antenna-edge ones (as rev A). 2 J3 peg exclusions.
+- **GND pins:** all 63 GND pads are in the main GND connectivity cluster (KiCad connectivity from U4.65; ratsnest 0).
+  - That includes U6.2, U4.63, C7.2, C15.2, R9.2, the J3 shield pads, J3.6, TP2 and the J1 shield.
+  - One 0.23 mm² top fill sliver sits beside C7.2. It touches only that pad, which reaches its via by a track.
+- **0 Ω jumpers added: none** (rerouting was enough).
+- **Copper:** 258 tracks, 115 vias (78 GND).
+  - Bottom track 158 mm (top 233 mm).
+  - Longest bottom runs: SD_VDD 34 mm (crossing under the J1 pads 20 mm, plus the J3.4 lane 12 mm), +3V3 19 mm (y 5.4 band, x −8.2 lane, +x 2.8 mm crossing).
+  - SD ribbon: CD 14.6, D1 13.2, D0 12.0, D3 11.6, CLK 9.6, CMD 7.3, D2 6.1 mm.
+- **Renders:** `docs/img/revB-routed-2d.png`, `revB-routed-3d-top.png`, `-bottom.png`, `-iso.png`.
+
+**Criteria:**
+- **DRC clean:** yes.
+- **GND under module pads:** yes.
+- **GND under the USB pair:** yes, except the D+ swap hop.
+- **SD (relaxed rule):** grouped ribbon on the bottom. D2/D3 still run beside the BOOT/+3V3/SD_VDD lanes on the +x side.
+- **No tracks under the antenna:** yes.
+- **0402:** yes.
+- **Bottom mostly GND:** the +x strip carries 5 lanes. SD_VDD is long, and the crossing band under the J1 pads holds +3V3 and SD_VDD.
+
 ## 4. Bring-up checklist (rev B)
 
 - [ ] **Measure in-case temperature** (module shield + LDO) during a sustained transfer, lid closed, at room temperature and in a warm cabinet. The module is rated −40…85 °C ambient [V ESP32-S3-MINI-1 datasheet, Table 1-1]. The enclosure estimate is 67–80 °C inside the case at 40 °C ambient (`revB-feasibility.md`).
 - [ ] Inrush at attach (USB current probe): fast charge ≤ 50 µC, ramp ≈ 3.5 ms.
 - [ ] J3 and SW1 hand-soldered on the bottom (DNP-bottom in BOM/CPL): card insert/eject, card-detect polarity; BOOT through the floor pinhole (10 s pairing reset, download mode).
+- [ ] **No UART pads on rev B.** Flash over USB: hold BOOT, plug in (ROM download mode), `idf.py -p <port> flash`; replug to run. Logs: TX over the USB-Serial-JTAG console (sdkconfig must select it — check); RX over Wi-Fi (backlog §5.1) — until that exists, RX bring-up logs need a temporary wire to module pin 39 (TXD0).
+- [ ] Pogo/probe pads: TP1 +3V3, TP2 GND, TP3 BOOT only (bottom, case open).

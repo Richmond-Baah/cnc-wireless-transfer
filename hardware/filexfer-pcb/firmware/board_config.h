@@ -47,7 +47,7 @@
 #define BOARD_PIN_SD_MOSI       BOARD_PIN_SD_CMD
 #define BOARD_PIN_SD_MISO       BOARD_PIN_SD_D0
 #define BOARD_PIN_SD_CS         BOARD_PIN_SD_D3
-#define BOARD_PIN_SD_PWR        33   /* (module pin 28, near U6) TPS22917 ON, 10k pull-up: card ON by default.
+#define BOARD_PIN_SD_PWR        35   /* IO35 = module pin 31 (schematic SD_PWR_EN), TPS22917 ON, 10k pull-up: card ON by default.
                                       * Power-cycle: set SD pins input/low first (no back-power),
                                       * drive low >= 50 ms (QOD discharge), release, wait >= 5 ms. */
 #define BOARD_SD_PWR_ACTIVE     1

@@ -64,7 +64,7 @@ Legend: **[V]** checked in the datasheet or drawing named; **[L]** from the LCSC
 The module is 72–80 % of the cost. Not included [U, quote JLC at Stage 4]: PCB (2-layer, about 50 × 18 mm), assembly setup + stencil, a **per-unique-Extended-part loading fee** (about 10 extended parts → a fixed charge per order, which dominates at qty 10), and the fixture/THT fee for the USB plug's shell legs. LCSC minimum order quantities raise the @10 figures slightly.
 
 ## 5. Firmware backlog (from Stages 1–2)
-1. Stream RX logs over Wi-Fi to TX (field logs without opening the case).
+1. Stream RX logs over Wi-Fi to TX (field logs without opening the case). **Required for rev B: no UART test pads (U0TXD/U0RXD unconnected, R8 removed 2026-11-10). Flash over USB (hold BOOT, replug = download mode); reset = replug.** Receiver app logs cannot use the USB-Serial-JTAG console (the USB PHY is taken by the TinyUSB mass-storage device), so Wi-Fi logging is the only field log path.
 2. Hold off or ramp Wi-Fi TX until USB is configured (USB 100 mA pre-configuration limit) [U spec text not read].
 3. SDMMC 4-bit driver via the GPIO matrix. Rev A pins (stage 4 remap): CLK IO13, CMD IO12, D0 IO14, D1 IO15, D2 IO10, D3 IO11 (`firmware/board_config.h`).
 4. Board ID by ADC on GPIO1; refuse the wrong app (rev A only). **Rev B has no divider (removed 2026-11-10 for routing room): write board rev + role to a factory NVS partition at production test; firmware reads it at boot and refuses the wrong app; a missing entry → log + fall back to the build role.** `board_config.h`: `BOARD_PIN_BOARD_ID = -1` for rev B.

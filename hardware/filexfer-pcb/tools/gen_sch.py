@@ -46,12 +46,13 @@ def C(ref, val, a, b, fit='ALL', fp=C0402, **f):
 
 MOD_NC = ['IO2', 'IO3', 'IO4', 'IO5', 'IO6', 'IO7', 'IO8', 'IO9', 'IO17', 'IO18', 'IO26', 'IO47',
           'IO33', 'IO34', 'IO36', 'IO37', 'IO38', 'IO39', 'IO40', 'IO41', 'IO42', 'IO45', 'IO46', 'IO21',
-          'IO1']   # IO1: rev A board-ID ADC; rev B board rev lives in factory NVS
+          'IO1',   # IO1: rev A board-ID ADC; rev B board rev lives in factory NVS
+          'TXD0', 'RXD0']   # rev B: no UART pads (flash over USB download mode; logs over Wi-Fi)
 mod_map = {'GND': 'GND', '3V3': '+3V3', 'EN': 'EN', 'IO0': 'BOOT', 'IO35': 'SD_PWR_EN',
            # SDMMC via GPIO matrix, pins in module-edge order = resistor column order (routing, stage 4)
            'IO10': 'SD_D2', 'IO11': 'SD_D3', 'IO12': 'SD_CMD', 'IO13': 'SD_CLK', 'IO14': 'SD_D0',
            'IO15': 'SD_D1', 'IO16': 'SD_CD', 'USB_D-': 'USB_DM', 'USB_D+': 'USB_DP', 'IO48': 'LED_DATA_3V3',
-           'TXD0': 'U0TXD_MOD', 'RXD0': 'U0RXD', **{n: 'NC' for n in MOD_NC}}
+           **{n: 'NC' for n in MOD_NC}}
 
 PARTS = [
     # --- USB input, protection -------------------------------------------------------------
@@ -87,11 +88,10 @@ PARTS = [
     R('R5', '10k', '+3V3', 'BOOT', Note='GPIO0 pull-up (HDG); no cap'),
     ('SW1', 'Switch', 'SW_Push', 'BOOT', 'Button_Switch_SMD:SW_SPST_TS-1088-xR020', {'1': 'BOOT', '2': 'GND'},
      dict(Fit='ALL', MPN='TS-1088-AR02016', LCSC='C720477')),
-    R('R8', '499', 'U0TXD_MOD', 'U0TXD', Note='U0TXD series (HDG)'),
     # --- Debug / test ---------------------------------------------------------------------------
 ] + [
     ('TP%d' % (i + 1), 'Connector', 'TestPoint', n, TP, {'1': n}, dict(Fit='ALL', MPN='pad'))
-    for i, n in enumerate(['+3V3', 'GND', '+5V', 'EN', 'BOOT', 'U0TXD', 'U0RXD', 'USB_DP_C', 'USB_DM_C'])
+    for i, n in enumerate(['+3V3', 'GND', 'BOOT'])   # rev B: EN / UART / +5V / USB pads removed
 ] + [
     # --- RGB LED on 5 V via SN74LV1T125 buffer ------------------------------------------------------------
     ('U5', '74xGxx', '74LVC1G125', 'SN74LV1T125', 'Package_TO_SOT_SMD:SOT-353_SC-70-5',
@@ -117,7 +117,8 @@ PARTS = [
       '7': 'SD_D0', '8': 'SD_D1', '9': 'SD_CD', 'SH': 'GND'},
      dict(Fit='RX', MPN='TF PUSH (SHOU HAN)', LCSC='C393941', Note='CD switch to GND on insert [U polarity]')),
     ('RN1', 'Device', 'R_Pack04', '4x10k', 'Resistor_SMD:R_Array_Convex_4x0402',
-     {'1': 'SD_CMD', '2': 'SD_D0', '3': 'SD_D1', '4': 'SD_D2', '5': 'SD_VDD', '6': 'SD_VDD', '7': 'SD_VDD', '8': 'SD_VDD'},
+     {'1': 'SD_D1', '2': 'SD_D0', '3': 'SD_CMD', '4': 'SD_D2',   # W->E = module pin order (no crossings)
+      '5': 'SD_VDD', '6': 'SD_VDD', '7': 'SD_VDD', '8': 'SD_VDD'},
      dict(Fit='RX', MPN='4D02WGJ0103TCE', LCSC='C25725', Note='SD pull-ups to switched rail (replaces rev A R18-R21)')),
     R('R22', '10k', 'SD_D3', 'SD_VDD', fit='RX', Note='SD pull-up to switched rail'),
     R('R23', '10k', '+3V3', 'SD_CD', fit='RX', Note='card detect pull-up'),

@@ -71,8 +71,14 @@
       },
       "diff_pair_dimensions": [],
       "drc_exclusions": [
-        "npth_inside_courtyard|94870000|129500000|ad507720-fa5b-4249-a75b-a881dc50032c|e23c1619-bb56-46cc-9aba-1d81007ee8a6",
-        "npth_inside_courtyard|94870000|121500000|498b0068-9820-4bd1-8037-314f421f2e92|e23c1619-bb56-46cc-9aba-1d81007ee8a6"
+        [
+          "npth_inside_courtyard|94870000|121500000|0fb3b957-1b01-44f5-8a6b-56c4ef064a3e|5db902c5-d517-48f3-8d05-bf822909a101",
+          ""
+        ],
+        [
+          "npth_inside_courtyard|94870000|129500000|71d5f80d-91be-44f1-a162-72d49a13fd62|5db902c5-d517-48f3-8d05-bf822909a101",
+          ""
+        ]
       ],
       "meta": {
         "version": 2
