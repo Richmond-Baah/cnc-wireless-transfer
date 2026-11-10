@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Generate JLCPCB fab files for the single FileXfer rev A board into fab/rev-A/.
+"""Generate JLCPCB fab files for the single FileXfer rev B board into fab/rev-B/ (rev A files stay in fab/rev-A/).
 
 Run from hardware/filexfer-pcb after gen_sch.py / gen_pcb.py / route.py:
     python3 tools/gen_fab.py
 
 Outputs:
   gerbers/                 Gerber X2 (9 layers) + Excellon PTH/NPTH + drill maps
-  filexfer-revA-gerbers.zip
+  filexfer-revB-gerbers.zip
   bom-RX-jlc.csv, cpl-RX-jlc.csv   receiver build (Fit ALL + RX)
-  bom-TX-jlc.csv, cpl-TX-jlc.csv   transmitter build (Fit ALL; R7 = 22k)
+  bom-TX-jlc.csv, cpl-TX-jlc.csv   transmitter build (Fit ALL; no SD block)
 J1 (USB-A plug), J3 (microSD, bottom) and SW1 (BOOT, bottom) are DNP in every build (hand-soldered). Fit=DNP parts and the bottom test pads
 (not in BOM/CPL) are never placed.
 """
@@ -34,7 +34,7 @@ def run(*args):
 
 def main():
     shutil.rmtree(GERB, ignore_errors=True)          # generated files only; README.md and gerber-check.png stay
-    for f in ('filexfer-revA-gerbers.zip', *(f'{k}-{v}-jlc.csv' for k in ('bom', 'cpl') for v in VARIANTS)):
+    for f in ('filexfer-revB-gerbers.zip', *(f'{k}-{v}-jlc.csv' for k in ('bom', 'cpl') for v in VARIANTS)):
         if os.path.exists(os.path.join(OUT, f)):
             os.remove(os.path.join(OUT, f))
     os.makedirs(GERB)
@@ -49,7 +49,7 @@ def main():
     parts = list(csv.DictReader(open(tmp_bom)))
     os.remove(tmp_pos); os.remove(tmp_bom)
 
-    with zipfile.ZipFile(os.path.join(OUT, 'filexfer-revA-gerbers.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
+    with zipfile.ZipFile(os.path.join(OUT, 'filexfer-revB-gerbers.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
         for f in sorted(os.listdir(GERB)):
             z.write(os.path.join(GERB, f), f)
 

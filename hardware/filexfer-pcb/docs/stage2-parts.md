@@ -72,6 +72,8 @@ The module is 72–80 % of the cost. Not included [U, quote JLC at Stage 4]: PCB
 6. Re-test TX power above 8.5 dBm on the new board (brownout count).
 7. **Rev B SD speed fallback:** SD lines run 7–15 mm on the bottom with no GND plane directly under them (2-layer). Run SDMMC at 40 MHz; on a CRC or timeout error, re-init at 20 MHz and stay there until reboot (`BOARD_SD_FREQ_FALLBACK_KHZ`). Bench-test both rates.
 8. **TX firmware ignores BOARD_ID (all rev A boards may be RX-populated).** The transmitter build doesn't read IO1, and there is no refusal or mismatch check (added 2026-11-10).
+9. **TX console:** add `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y` to `transmitter/sdkconfig.defaults`. Today it is only in `transmitter/sdkconfig:1302`, and rev B has no UART pads.
+10. **RX debug logs (rev B, no UART pads):** debug build = TinyUSB composite MSC + CDC-ACM with logs on the CDC port; release build stays MSC-only (one USB identity for the CNC host). A wire to module pin 39 (TXD0) is a last resort.
 
 ## 6. Questions for approval
 1. **One PCB → TX case grows to the RX length (about 50 mm board)?** Or allow a short TX variant?

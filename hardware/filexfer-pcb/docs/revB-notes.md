@@ -77,20 +77,21 @@ History: with SW1 on top, the +x front half was at 93 % courtyard fill, so no fi
 - **Bottom strip +x (x 7–9.1):** BOOT (SW1 → pin 4), +3V3 (→ pin 3), SD_VDD (→ J3.4). GND pour everywhere else.
 - **Risk:** the +x half (66 %) and the 3-track band. If routing can't meet the criteria, the next step is a 4-layer proposal (needs approval), not a part change.
 
-**Case notes for the regeneration** (board frame: x across, +x = D1/TVS side; y from the board front edge = inner front face; heights use feasibility option 1, board bottom z 4.71):
+**Case notes for the regeneration** (updated 2026-11-10 for the pass-3 board, 18.3 × 34.9 mm; board frame: x across, +x = D1/TVS side; y from the board front edge = inner front face; heights use feasibility option 1, board bottom z 4.71):
 
 | Item | Requirement |
 |---|---|
-| Inner width | **≥ 18.85** (board 18.30) |
-| Inner length | board 31.9 + antenna 5.1 = 37.0, **plus 1–2 mm antenna-to-back-wall clearance → inner length 38.0–39.0** (case grows slightly; current 37.5) |
+| Inner width | **≥ 18.85** (board 18.30). The J3 body is flush with the −x board edge (B.Fab x −9.15); its silk outline sits 0.2 mm outside the board and is not printed |
+| Inner length | board **34.9** + antenna 5.1 = 40.0, **plus 1–2 mm antenna-to-back-wall clearance → inner length 41.0–42.0** (current case 37.5: must grow 3.5–4.5 mm) |
 | Front plug slot | **≥ 13.1** wide (XKB shell 12.0, 12.9 over the latches) |
-| microSD | **No slot: the card is sealed inside.** Solid −x wall, plus an internal retaining rib on the −x side at **y 16–28** (J3 body x −9.15…5.35, y 14.7…29.4, flush with the −x board edge) |
+| microSD | **No slot: the card is sealed inside.** Solid −x wall, plus an internal retaining rib on the −x side at **y 18.5–30.5** (J3 body x −9.15…5.35, **y 17.2…31.9** after the +3.0 / −0.5 mm shifts, flush with the −x board edge). Card insert/eject only with the case open |
 | BOOT | **Floor pinhole + guide boss at (+4.8, 8.4)**. SW1 (bottom, TS-1088-xR020, 2.0 tall) actuator faces the floor, 2.71 mm above it |
 | LED | **Light guide at (−3.3, 8.25), 3.2 mm deep** (D2 top side to the lid) |
 | Module top | 1.60 to the lid (opt. 2: 0.90) |
 | Bottom parts (J3, SW1) | lowest face z 2.71 above the floor (opt. 2: 3.41) |
 | Bottom under the plug | SW1 starts y 6.6, TPs y ≥ 7.65; plug seating still [U] until the XKB STEP |
-| Test pads | bottom, 1.0 mm: TP1 +3V3 (2.5, 12), TP2 GND (−7.2, 12), TP3 BOOT (7.2, 12) (rev B pass 3, §3d); pogo access with the case open |
+| Test pads | bottom, 1.0 mm: TP1 +3V3 (2.5, 12), TP2 GND (−7.2, 12), TP3 BOOT (7.2, 12) (rev B pass 3, §3d); pogo access with the case open. No UART pads: flashing is over the USB plug (hold BOOT through the pinhole while plugging in), so the case can stay closed |
+| Module | centre (0, 27.2); antenna end at y 40.0 |
 
 ## 3b. 2-layer routing attempt: criteria not met → 4-layer proposed
 
@@ -246,10 +247,82 @@ User requirements: every GND pin connects to main GND; stay 2-layer; drop the UA
 - **0402:** yes.
 - **Bottom mostly GND:** the +x strip carries 5 lanes. SD_VDD is long, and the crossing band under the J1 pads holds +3V3 and SD_VDD.
 
+## 3e. Design review (kicad skill), 2026-11-10
+
+Separate check of the pass-16 board (committed in 3b55b02) and the regenerated fab files. Analyzer JSON is kept out of the repo.
+
+**Ran:**
+- `analyze_schematic.py`, `analyze_pcb.py --full --schematic`, `cross_analysis.py`, `analyze_gerbers.py` (on `fab/rev-B/gerbers`).
+- kicad-cli DRC and ERC.
+- Manual geometry checks: pad-to-edge distances, GND connectivity per pad, via-in-pad, tenting, zone pad connection.
+- An independent gerber raster: `fab/rev-B/gerber-check.png`, drawn from the gerber/drill files only by a small parser, not by KiCad.
+
+**Not run / limits:**
+- **EMC analyzer:** the `emc` skill is not installed.
+- **Thermal analyzer and lifecycle audit:** both fail on missing skill modules (`datasheet_types`, `datasheet_extract_cache`).
+- **SPICE:** no simulator is installed.
+- **No `datasheets/` folder.** Pin checks rely on the earlier stage notes' datasheet citations, plus one new check: **TLV76733 against TI SLVSE84D Table 5-1** (pin 1 OUT, 2 SNS → OUT, 3 / 5 GND "all ground pins must be grounded", 4 EN = IN allowed, 6 IN, pad → GND), which matches.
+- No prior skill review exists to diff against.
+
+**Results:**
+- **Blockers: none.**
+- **DRC:** 0 errors, 0 unconnected, 0 parity. **ERC:** 0.
+- **Gerbers:** complete. 9 layers + PTH/NPTH, 18.35 × 34.95 mm, 115 vias at 0.2 mm, 4 NPTH at 1.0 mm (J1 legs and J3 pegs), 2 PTH at 1.0 mm (J1 shell).
+- **Tenting:** no via mask openings on either side. B.Mask opens only J3, SW1 and TP1–3.
+- **BOM/CPL:** J1, J3, SW1 and the TPs are absent from both builds; all placements are top-side (single-sided assembly).
+  - RX: 31 placements, 19 lines. TX: 23 placements, 17 lines (no U6/C13/C14/RN1).
+
+**Findings triaged:**
+
+| Analyzer finding | Verdict |
+|---|---|
+| VM-001 LED_DATA_3V3 3.3 → 5 V without a shifter | False positive: U5 SN74LV1T125 at VCC 5 V is the translator [stage4-notes, TI SCLS745D] |
+| UC-001 / UC-002 no VBUS decoupling / ESD at J1 | False positive: they sit after F1 on +5V (C3 4.7 µF, C11, C12; D1 SMF5.0A, U1 VBUS) |
+| PM-002 C8 / C7 / R5 / U3 / U6 / F1 / D1 "0.0–0.35 mm from edge" | Body/courtyard measure. **Pad copper ≥ 0.29 mm** from the edge (C8 0.29, U4 0.30, F1 0.33, U6 0.35); DRC edge rule 0.25 passes; JLC routed-edge copper minimum 0.2. Order with rails (§5) |
+| FD-001 no fiducials | As rev A: fiducials go on the JLC edge rails |
+| BV-001 via 0.48 mm from edge (SD_PWR_EN at x −8.675) | Via copper 0.255 mm from the edge, which passes the 0.25 rule |
+| TB-001 0402 tombstoning (medium) | GND pads use thermal relief (0.3 mm spokes, 0.25 gap) except U4 and J1 SH; accepted |
+| GR-004 B.Paste 15 flashes | B.Paste covers the hand-soldered J3/SW1/TP pads only; no bottom stencil is needed (DNP-bottom) |
+| TE-001 test coverage 6 % | By decision (§3d) |
+| DA-001 3V3_LDO: 1 cap for 2 ICs | C4 4.7 µF sits between U2.OUT and U3.VIN (1.3 / 1.9 mm); accepted |
+| J3 has no ESD | As rev A: the card is sealed inside the case (no slot) |
+
+**Manual findings:**
+- **USB pair:** D+ 14.8 mm, D− 14.3 mm (0.5 mm skew, one via pair on D+). That is negligible at full speed (12 Mbit/s).
+- **SD_VDD:** 0.3 mm wide, 42 mm total, about 0.07 Ω on 1 oz copper.
+  - That is about 14 mV at a 200 mA card peak, plus the TPS22917 R_ON. The current capacity is far above the card's needs.
+  - **Accepted for card current.**
+- **U6 input cap (suggestion, not changed):**
+  - U6.VIN (+3V3) has no local bulk cap. The nearest are C13 (1 nF, CT, 3.7 mm) and C6 (22 µF, 9.6 mm via the y 5.4 band and the x −8.2 lane).
+  - The SD rail ramps slowly (CT 1 nF, tR ≈ 1.6 ms → ≈ 21 mA into C14), and C14 10 µF carries card transients, so this is low risk.
+  - Optional for rev C: add a 1 µF at U6.1.
+
 ## 4. Bring-up checklist (rev B)
 
 - [ ] **Measure in-case temperature** (module shield + LDO) during a sustained transfer, lid closed, at room temperature and in a warm cabinet. The module is rated −40…85 °C ambient [V ESP32-S3-MINI-1 datasheet, Table 1-1]. The enclosure estimate is 67–80 °C inside the case at 40 °C ambient (`revB-feasibility.md`).
 - [ ] Inrush at attach (USB current probe): fast charge ≤ 50 µC, ramp ≈ 3.5 ms.
 - [ ] J3 and SW1 hand-soldered on the bottom (DNP-bottom in BOM/CPL): card insert/eject, card-detect polarity; BOOT through the floor pinhole (10 s pairing reset, download mode).
-- [ ] **No UART pads on rev B.** Flash over USB: hold BOOT, plug in (ROM download mode), `idf.py -p <port> flash`; replug to run. Logs: TX over the USB-Serial-JTAG console (sdkconfig must select it — check); RX over Wi-Fi (backlog §5.1) — until that exists, RX bring-up logs need a temporary wire to module pin 39 (TXD0).
+- [ ] **No UART pads on rev B.** Flash over USB: hold BOOT, plug in (ROM download mode), `idf.py -p <port> flash`; replug to run. Logs: TX over the USB-Serial-JTAG secondary console, already enabled (`transmitter/sdkconfig:1302-1303`, `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y`; primary stays UART0). It is in `sdkconfig` only, not `sdkconfig.defaults`, so a regenerated sdkconfig would lose it (backlog §5.9). RX: debug build with TinyUSB MSC+CDC (backlog §5.10), Wi-Fi logs (§5.1). A wire to module pin 39 (TXD0) is a last resort only.
 - [ ] Pogo/probe pads: TP1 +3V3, TP2 GND, TP3 BOOT only (bottom, case open).
+
+## 5. Before ordering (rev B checklist)
+
+1. **Fab files:** `fab/rev-B/` (gen_fab.py on the committed board, 2026-11-10). Upload `filexfer-revB-gerbers.zip`, and use the BOM/CPL for one build (RX or TX) per order.
+2. **Board spec:** 2 layers, 1.6 mm FR-4, 1 oz, 18.3 × 34.9 mm. Min track 0.15, clearance 0.127, via 0.45/0.2 (JLC standard tier, §3c). All vias tented (no plugging option needed).
+3. **Rails:** order with JLC edge rails joined by **mouse-bites, not V-cut**, with fiducials on the rails. Pad copper sits ≥ 0.29 mm from the long edges (C8, U4, F1, U6). The economic-tier minimum board size is still [U]: check at order time.
+4. **DNP / hand-solder:** J1 (USB-A plug, top), J3 (microSD, bottom) and SW1 (BOOT, bottom) are not in the BOM/CPL. Order them separately: plug U217-041N-4BV81 C319178, SW1 TS-1088-AR02016 C720477, socket SHOU HAN TF PUSH C393941 (LCSC number only in the footprint description; the schematic has no LCSC field for J3). TP1–3 are bare pads.
+5. **Check JLC's placement preview** for rotations: U2 (WSON-6), U1 (SOT-666), U5 (SC-70-5), RN1, D2 (WS2812B-2020 pin 1).
+6. **Stock and price:** re-check every line. Extended parts: TLV76733 C2848334, USBLC6-2P6 C15999, SN74LV1T125 C75925, TPS22917 C2681320, RN1 C25725, WS2812B-2020 C52917434, SMF5.0A C2759874, BSMD1206 C883127, C1531, C1523.
+7. **Case:** case notes in §3, updated for the 34.9 mm board. The case inner length must grow to 41–42 mm before the boards are useful in a case.
+8. **The committed `filexfer-pcb.kicad_pcb` is the master** (the router isn't deterministic). Regenerate fab files only with `python3 tools/gen_fab.py`. After any design change: gen_sch → gen_pcb → route → DRC (`--schematic-parity`) → gen_fab → gerber check.
+9. **Firmware before bring-up:**
+   - `CONFIG_FILEXFER_BOARD_FX_REV_B` board config.
+   - TX console in `sdkconfig.defaults` (stage2-parts §5 #9).
+   - RX debug MSC+CDC build (§5 #10).
+   - Factory-NVS board rev (§5 #4).
+10. **Open:**
+    - J3 peg length [U] (pegs into the module courtyard).
+    - XKB plug STEP for seating.
+    - Card-detect polarity (bench).
+    - 0402 10 µF DC-bias derating (C7, C14).
+
