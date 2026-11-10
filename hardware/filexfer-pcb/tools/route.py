@@ -170,6 +170,9 @@ class Router:
             for l in sh.layers:
                 self.raster(tb[l], sh, hw + sh.cl + MARGIN)
             self.raster(vb, sh, vr + sh.cl + MARGIN)
+        for _, _, layers, sh in self.pads.get(net, []):   # no via in own SMD pads (solder wicking)
+            if len(layers) == 1:
+                self.raster(vb, sh, vr + 0.05)
         for (hx, hy, hr) in self.holes:
             self.raster(vb, Shape('circ', None, (), (hx, hy, hr)), VIA_DRILL / 2 + HOLE2HOLE + MARGIN)
         # board edge
@@ -432,7 +435,8 @@ class Router:
                 self.emit('GND', path, 0.3)
             else:
                 log.append(f'GND fanout {ref}.{num}: none (solid pour connection)')
-                self.full_pads.append((ref, num))
+                if not (ref[0] in 'RC' and ref[1:].isdigit()):   # 0402 passives keep spokes (tombstoning); see fix_starved
+                    self.full_pads.append((ref, num))
 
     def span(self, a, b, n=None):
         n = n or NY
@@ -487,6 +491,21 @@ class Router:
                 o.Append(mm(G.OX + x), mm(G.OY + y))
             self.b.Add(z)
         pcbnew.ZONE_FILLER(self.b).Fill(self.b.Zones())
+
+    def fix_starved(self, log):
+        """0402 GND pads keep thermal spokes; any pad kicad-cli DRC reports as starved is poured solid instead."""
+        import re, subprocess, tempfile
+        d = tempfile.mkdtemp(); f = os.path.join(d, 'b.kicad_pcb'); rpt = os.path.join(d, 'drc.rpt')
+        pcbnew.SaveBoard(f, self.b)
+        subprocess.run(['kicad-cli', 'pcb', 'drc', '-o', rpt, f], capture_output=True)
+        hits = set(re.findall(r'\[starved_thermal\](?:(?!\n\[).)*?Pad (\S+) \[/GND\] of (\S+)', open(rpt).read(), re.S))
+        for num, ref in sorted(hits):
+            for pad in self.b.FindFootprintByReference(ref).Pads():
+                if pad.GetNumber() == num:
+                    pad.SetLocalZoneConnection(pcbnew.ZONE_CONNECTION_FULL)
+        if hits:
+            pcbnew.ZONE_FILLER(self.b).Fill(self.b.Zones())
+        log.append('starved thermals -> solid: ' + (', '.join(f'{r}.{n}' for n, r in sorted(hits)) or 'none'))
 
     def pocket_vias(self, log):
         """Every filled GND island on either layer gets at least one via (pockets left by routing)."""
@@ -654,6 +673,12 @@ def bus(r):
     r.via('GND', 5.6, 19.85)                                                       # U5.3
     r.track('GND', 0, [(8.1, 12.05), (8.4, 11.55), (8.4, 10.9)], 0.3); r.via('GND', 8.4, 10.9)       # C6.2
     r.track('GND', 0, [(5.8, 7.72), (6.55, 7.1)], 0.3); r.via('GND', 6.55, 7.1)                      # C12.2
+    # U1.2 GND: pocket enclosed by the USB pair on top -> via between the U1 pin rows
+    r.track('GND', 0, [(0.0, 9.6), (0.0, 8.95)], 0.3); r.via('GND', 0.0, 8.95)
+    # U3.2 GND: boxed in by the 3V3_LDO pins -> via to the left of the pad
+    r.track('GND', 0, [(2.76, 12.9), (1.6, 12.75)], 0.3); r.via('GND', 1.6, 12.75)
+    # U3.6 (+3V3 out of the soft-start switch): escape via beside the pad (no via in pad)
+    r.track('+3V3', 0, [(5.04, 11.95), (5.2, 11.05)], 0.4); r.via('+3V3', 5.2, 11.05)
     # LED_DATA_5V: U5.4 -> via -> bottom under SW1 -> via -> R10.1
     r.track('LED_DATA_5V', 0, [(8.14, 19.15), (8.5, 19.5), (8.5, 20.0)], W)
     r.via('LED_DATA_5V', 8.5, 20.0)
@@ -682,6 +707,12 @@ def bus(r):
     r.track('+3V3', 1, [(8.55, 57.3), (8.6, 57.35), (8.6, 58.9), (8.25, 59.25), (7.85, 59.25)], 0.25)
     r.track('BOOT', 1, [(-2.6, Y0), (-2.6, 45.0), (7.35, 45.0), (7.35, 58.0), (7.8, 58.45), (8.0, 58.45)], W)
     r.via('BOOT', 8.0, 58.45)
+    # BOOT front: SW1.1 -> R5.2 -> top across the USB pair -> via -> trunk start; TP5 (bottom) via beside SW1.1
+    r.track('BOOT', 0, [(3.0, 21.4), (1.9, 21.4), (1.7, 21.6), (-1.35, 21.6), (-1.55, 21.8)], W)
+    r.via('BOOT', -1.55, 21.8)
+    r.track('BOOT', 1, [(-1.55, 21.8), (-2.6, 22.85), (-2.6, Y0)], W)
+    r.track('BOOT', 0, [(2.45, 20.7), (2.85, 21.0)], W); r.via('BOOT', 2.45, 20.7)
+    r.track('BOOT', 1, [(2.45, 20.7), (2.85, 21.1), (3.3, 21.1)], W)
     r.track('BOOT', 0, [(8.0, 58.45), (7.0, 58.45)], W)                              # pin 4
     r.track('+3V3', 1, [(-3.35, Y0), (-3.35, 45.6), (6.75, 45.6), (6.75, 58.7), (7.3, 59.25), (7.85, 59.25)], 0.5)
     r.via('+3V3', 7.85, 59.25)
@@ -733,8 +764,9 @@ def main():
     r.stitch(log)
     r.pour()
     r.pocket_vias(log)
+    r.fix_starved(log)
     pcbnew.SaveBoard(PCB, board)
-    print('\n'.join(l for l in log if 'FAILED' in l or 'fanout' in l or 'stitch' in l or 'island' in l or 'pocket' in l))
+    print('\n'.join(l for l in log if 'FAILED' in l or 'fanout' in l or 'stitch' in l or 'island' in l or 'pocket' in l or 'starved' in l))
     print(f'tracks {r.ntracks}, vias {r.nvias}, failed nets: {failed}')
 
 

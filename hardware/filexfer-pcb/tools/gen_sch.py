@@ -24,10 +24,25 @@ SOT236 = 'Package_TO_SOT_SMD:SOT-23-6'
 
 # Fit: ALL = TX+RX, RX = receiver only (DNP on TX), DNP = never fitted (footprint reserve)
 # (ref, lib, symbol, value, footprint, {pin: net}, extra fields)
+# JLC/LCSC passives (stock + Basic/Extended checked on jlcpcb.com 2026-11-10; E = Extended)
+PASSIVE = {
+    (C0402, '100n'): ('CL05B104KO5NNNC', 'C1525'), (C0402, '1u'): ('CL05A105KA5NQNC', 'C52923'),
+    (C0402, '10u'): ('CL05A106MQ5NUNC', 'C15525'), (C0402, '1n'): ('0402B102K500NT', 'C1523'),
+    (C0402, '2.2n'): ('0402B222K500NT', 'C1531'),            # E
+    (C0603, '4.7u'): ('CL10A475KO8NNNC', 'C19666'), (C0805, '22u'): ('CL21A226MAQNNNE', 'C45783'),
+    (R0402, '22'): ('0402WGF220JTCE', 'C25092'), (R0402, '0'): ('0402WGF0000TCE', 'C17168'),
+    (R0402, '10k'): ('0402WGF1002TCE', 'C25744'), (R0402, '100k'): ('0402WGF1003TCE', 'C25741'),
+    (R0402, '22k'): ('0402WGF2202TCE', 'C25768'), (R0402, '100'): ('0402WGF1000TCE', 'C25076'),
+    (R0402, '499'): ('0402WGF4990TCE', 'C4125'),             # E
+}
+def _src(fp, val, f):
+    if (fp, val) in PASSIVE and 'MPN' not in f:
+        f = dict(f, MPN=PASSIVE[(fp, val)][0], LCSC=PASSIVE[(fp, val)][1])
+    return f
 def R(ref, val, a, b, fit='ALL', fp=R0402, **f):
-    return (ref, 'Device', 'R', val, fp, {'1': a, '2': b}, dict(Fit=fit, **f))
+    return (ref, 'Device', 'R', val, fp, {'1': a, '2': b}, dict(Fit=fit, **_src(fp, val, f)))
 def C(ref, val, a, b, fit='ALL', fp=C0402, **f):
-    return (ref, 'Device', 'C', val, fp, {'1': a, '2': b}, dict(Fit=fit, **f))
+    return (ref, 'Device', 'C', val, fp, {'1': a, '2': b}, dict(Fit=fit, **_src(fp, val, f)))
 
 MOD_NC = ['IO2', 'IO3', 'IO4', 'IO5', 'IO6', 'IO7', 'IO8', 'IO9', 'IO17', 'IO18', 'IO26', 'IO47',
           'IO33', 'IO34', 'IO36', 'IO37', 'IO38', 'IO39', 'IO40', 'IO41', 'IO42', 'IO45', 'IO46', 'IO21']
@@ -69,7 +84,7 @@ PARTS = [
     C('C8', '100n', '+3V3', 'GND'),
     # --- Module -------------------------------------------------------------------------------
     ('U4', 'RF_Module', 'ESP32-S3-MINI-1', 'ESP32-S3-MINI-1-N8', 'filexfer:ESP32-S3-MINI-1', 'MODULE',
-     dict(Fit='ALL', MPN='ESP32-S3-MINI-1-N8', LCSC='C2913206', Alt='ESP32-S3-MINI-1U-N8 C2980299 (U.FL)')),
+     dict(Fit='ALL', MPN='ESP32-S3-MINI-1-N8', LCSC='C2913206', Note='ESP32-S3-MINI-1-N8 only (IO35 used; no PSRAM variants)', Alt='ESP32-S3-MINI-1U-N8 C2980299 (U.FL; also no PSRAM)')),
     R('R4', '10k', '+3V3', 'EN'), C('C9', '1u', 'EN', 'GND', Note='EN RC 10k/1u (DS-M)'),
     ('SW2', 'Switch', 'SW_Push', 'RESET', 'Button_Switch_SMD:SW_SPST_TS-1088-xR020', {'1': 'EN', '2': 'GND'},
      dict(Fit='ALL', MPN='TS-1088-AR02016', LCSC='C720477')),
@@ -77,7 +92,7 @@ PARTS = [
     ('SW1', 'Switch', 'SW_Push', 'BOOT', 'Button_Switch_SMD:SW_SPST_TS-1088-xR020', {'1': 'BOOT', '2': 'GND'},
      dict(Fit='ALL', MPN='TS-1088-AR02016', LCSC='C720477')),
     R('R6', '100k', '+3V3', 'BOARD_ID', Note='board ID top'),
-    R('R7', '100k', 'BOARD_ID', 'GND', Note='board ID: RX 100k (1.65 V), TX 22k (0.60 V); see board_config.h'),
+    R('R7', '100k', 'BOARD_ID', 'GND', Note='board ID: RX 100k (1.65 V), TX 22k (0.60 V, 0402WGF2202TCE C25768); see board_config.h'),
     C('C10', '100n', 'BOARD_ID', 'GND', Note='ADC filter (HDG)'),
     R('R8', '499', 'U0TXD_MOD', 'U0TXD', Note='U0TXD series (HDG)'),
     # --- Debug / test ---------------------------------------------------------------------------

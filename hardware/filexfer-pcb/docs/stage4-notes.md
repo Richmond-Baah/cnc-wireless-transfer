@@ -95,7 +95,7 @@ ERC 0. 310 tracks, 169 vias.
 
 ### Changes made for routing (schematic / placement / firmware proposal)
 1. **SDMMC pins remapped** to follow the module edge order (any GPIO is allowed via the GPIO matrix — ESP-IDF SDMMC docs [V]): CLK IO13, CMD IO12, D0 IO14, D1 IO15, D2 IO10, D3 IO11, CD IO16. IO9 and IO21 are now NC.
-2. **SD_PWR_EN moved IO2 → IO35** (module pin 31, beside U6). IO33–IO37 are octal-PSRAM pins only on modules with octal PSRAM; MINI-1-N8 has none (my reading of the module variants; not rechecked this stage) [U]. Don't swap to an octal-PSRAM module.
+2. **SD_PWR_EN moved IO2 → IO35** (module pin 31, beside U6). **Module is ESP32-S3-MINI-1-N8 only (IO35 used; no PSRAM variants)**, noted on U4 in the schematic/BOM. IO33–IO37 are octal-PSRAM pins on PSRAM variants. LCSC lists C2913206 as ESP32-S3FN8 (no PSRAM). The MINI-1U-N8 alternate is also N8.
 3. **SD bus layout:** resistors in columns at 1.0 mm pitch. Each column is the 10k pull-up (card side), then a via, then the 22 Ω series resistor, running straight to the module pins.
    - J3 pins escape to vias beside the socket and run in non-crossing bottom lanes. SD_VDD runs as a top lane beside J3.
    - R23 (CD pull-up) moved beside J3.
@@ -107,7 +107,7 @@ ERC 0. 310 tracks, 169 vias.
 7. `firmware/board_config.h` updated for items 1–2.
 
 ### Open / unverified
-- **TPS22917 CT capacitor:** the schematic note says "CT to VIN"; recheck against the datasheet (I believe the usual connection is CT to GND) [U].
+- **TPS22917 CT capacitor:** CT to VIN is correct. TI SLVSDW8B pin table: "Connect capacitor from this pin to VIN" [V]. Recommended operating conditions: VCT, timing-capacitor voltage rating, 7 V. C13 (1 nF) and C5 (2.2 nF) are 50 V X7R, so OK [V]. Rise time ≈ 1.6 µs/pF at 3.6 V → C13 ≈ 1.6 ms, C5 ≈ 3.5 ms.
 - Impedance: not checked by the fab's stack-up calculator (JLC impedance tool) [U].
 - XKB plug seating and the plug notch: waiting for the STEP. Notch width is limited to about 9.8 mm by the leg slots.
 - CD switch polarity; TS-1088 height; C7/C14 0402 10 µF derating.
@@ -117,3 +117,39 @@ ERC 0. 310 tracks, 169 vias.
 - Evaluate solderable SD NAND (e.g. an LGA-8 part) instead of a socket. It drops the socket, card retention and CD.
 
 Renders: `docs/img/routed-3d-top.png`, `routed-3d-bottom.png`, `routed-3d-iso.png`, `routed-copper.png` (top/bottom copper, pours shaded).
+
+## 6. Pre-fab design review (kicad skill pass, 2026-11-10)
+Analyzers run: schematic, PCB (`--full`, with schematic), cross-analysis. KiCad DRC (schematic parity on) and ERC.
+**Not run:**
+- SPICE: no simulator installed.
+- EMC: no emc skill installed.
+- Thermal and lifecycle scripts: crash on a missing module in the skill. Done by hand below.
+- Gerber analysis: no gerbers yet.
+- Datasheet sync: no `datasheets/` folder. Pin-level checks rely on the [V] items in stages 2–4.
+
+**Fixed in this pass**
+1. **Vias in SMD pads (~45, from my router).** Same-net SMD pads now block vias (`route.py blocked()`).
+   - New scripted escapes: U3.6, U1.2 (between the pin rows), U3.2.
+   - **TP5 (BOOT) moved** to the bottom at (3.6, 21.5), under SW1.1, with a scripted BOOT front link.
+   - Left as-is: the scripted via between C2/C15 overlaps both pads' annulus. Its hole is outside C15; C2 is DNP.
+   - Module EPAD vias sit in the gaps between the thermal pads.
+2. **Tombstoning:** 0402 GND pads now keep thermal spokes. Only pads KiCad flags as starved go solid: C11.2, R7.2, R9.2 (`fix_starved`, using kicad-cli DRC). Each of these also has a fanout track.
+3. **BOM:** every part now has an MPN and LCSC number (passives table in `gen_sch.py`). All in stock on JLC 2026-11-10.
+   - Extended passives: C5 2.2 nF (C1531), R8 499 Ω (C4125).
+   - TX variant: R7 22k = C25768.
+   - Lowest-stock parts: TPS22917 C2681320 (2.2k), ESP32-S3-MINI-1-N8 (22.7k).
+
+**DRC after the fixes:** 0 errors, 0 unconnected, 0 parity. Warnings: 4 module silk lines past the edge (antenna), 3 pour necks at the J1 shell. ERC 0.
+
+**Findings left open (for decision)**
+- **Panel / edge rails (JLC assembly):** 18 parts sit 0.07–0.22 mm from the long edges (pads keep ≥0.25 mm copper-to-edge). The module overhangs the antenna end by 5.1 mm. JLC needs rails on the long sides. V-cut beside C6 (0805, 0.07 mm) risks cracking; mouse-bite tabs are safer.
+- **No fiducials** on the board. JLC rails carry them.
+- **LDO U2 thermal [U, estimate]:** dissipation is 1.7 V × 0.25 A avg ≈ 0.43 W (≈0.6 W peaks). The tab (VOUT) has only its pad, no spreading copper. At ~100 °C/W that is +45–60 °C, so Tj ≈ 85–100 °C in a 40 °C cabinet (limit 125 °C). Optional: add 3V3_LDO copper around the tab.
+- **SD socket C393941:** LCSC's listing says "No Push-Push", but the stage 2 drawing reading says push-push. Recheck the drawing. Either way the card is sealed in with the rib.
+- **0402 10 µF X5R 6.3 V (C7, C14):** DC-bias loss at 3.3 V not checked [U].
+- **SD_CLK_C reference:** 80 % (bottom lanes cross top tracks under J3). Short net at ≤25 MHz; accepted.
+- **Analyzer false positives:**
+  - VM-001: LV1T125 is the level shifter; VIH 2.03 V max was checked in §0.
+  - UC-001/002: VBUS protection (TVS D1, C3) sits after F1 on +5V by design.
+  - J3 courtyard over the edge: the socket is flush with the edge.
+  - U4 over the edge: antenna overhang.
