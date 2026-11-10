@@ -33,7 +33,10 @@ def run(*args):
 
 
 def main():
-    shutil.rmtree(OUT, ignore_errors=True)
+    shutil.rmtree(GERB, ignore_errors=True)          # generated files only; README.md and gerber-check.png stay
+    for f in ('filexfer-revA-gerbers.zip', *(f'{k}-{v}-jlc.csv' for k in ('bom', 'cpl') for v in VARIANTS)):
+        if os.path.exists(os.path.join(OUT, f)):
+            os.remove(os.path.join(OUT, f))
     os.makedirs(GERB)
     run('pcb', 'export', 'gerbers', '-o', GERB, '-l', LAYERS, '--subtract-soldermask', '--check-zones', PCB)
     run('pcb', 'export', 'drill', '-o', GERB + os.sep, '--format', 'excellon', '--excellon-separate-th',

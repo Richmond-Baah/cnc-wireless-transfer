@@ -173,6 +173,11 @@ Analyzers run: schematic, PCB (`--full`, with schematic), cross-analysis. KiCad 
   - Independent raster of the copper/silk/mask/outline/drills: `fab/rev-A/gerber-check.png`. Matches the layout.
 - Final DRC: 0 errors, 0 unconnected, 0 parity.
   - Warnings: 4 module silk lines past the antenna edge, 3 pour necks at the J1 shell (0.09 mm), 1 copper sliver on B.Cu (KiCad gives no location).
+- **Track mitres (`tools/miter.py`, 2026-11-10):** run in place on the committed board. Nothing was rerouted, and parts, vias, pads and the USB D+/D− copper are unchanged.
+  - 32 corners fixed: 30 right-angle bends cut to 45° mitres (23 at ≥ 2× track width), plus 2 short Z-jogs (SD_CMD_C at (6.23, 37.0), SD_CLK_C at (5.67, 37.7)) replaced by a single 45° diagonal.
+  - 7 mitres are shorter than 2× width for lack of room: +3V3 at (−6.34, 41.9) and the SD_D0–D3 staircase at x 4.5–7.5, y 35.6–37.0.
+  - 3 corners left as they are, each where two tracks meet at a pad centre (pad copper covers the corner): SD_VDD 90° at (−4.06, 42.25), SD_VDD 45° at (8.5, 41.47), SD_PWR_EN 45° at (−7.75, 43.71).
+  - After the mitres, DRC is unchanged (0 / 0 / 0, same warnings), the zones were refilled, and the fab files were regenerated.
 - CPL rotations are KiCad's. **Check JLC's placement preview** (SOT-23/SOT-223/module/LED orientation) when ordering.
 
 ## 8. Before ordering (checklist)
