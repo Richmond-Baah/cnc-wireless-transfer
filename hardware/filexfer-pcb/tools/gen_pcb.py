@@ -29,10 +29,10 @@ RV = 14.75                  # row of 0402s / RN1 just in front of the module (SD
 P = {
     # --- plug + input protection (beside the plug, outside the notch reserve) ---------------
     'J1': (0, PLUG_EDGE_TO_HOLES, 180, 'F'),
-    'F1': (-7.95, 2.6, 90, 'F'), 'D1': (7.95, 2.6, 90, 'F'),
+    'F1': (-7.95, 2.6, 270, 'F'), 'D1': (7.95, 2.6, 90, 'F'),   # F1: +5V pad inboard, VBUS_IN at the edge
     # --- centre channel: USB ESD at the plug, series R at the module (D+/D- swap via between) --------
     'U1': (0, 8.45, 90, 'F'),
-    'R2': (-1.0, 15.05, 90, 'F'), 'R1': (0.0, 15.05, 90, 'F'),
+    'R2': (-1.0, 15.05, 270, 'F'), 'R1': (0.0, 15.05, 270, 'F'),   # connector side toward U1
     # --- +x half: LDO -> soft-start -> +3V3, then SD pull-ups in front of the module SD pins ----------
     'C3': (2.55, 8.4, 90, 'F'), 'U2': (4.85, 8.2, 180, 'F'), 'C4': (7.05, 8.4, 90, 'F'),
     'C6': (2.6, 11.8, 90, 'F'), 'C5': (4.3, 11.1, 90, 'F'), 'U3': (7.0, 11.85, 180, 'F'),
@@ -42,7 +42,7 @@ P = {
     'D2': (-3.3, 8.25, 0, 'F'), 'C12': (-5.55, 8.25, 90, 'F'),
     'U5': (-3.4, 12.0, 0, 'F'), 'R10': (-1.4, 11.9, 90, 'F'), 'C11': (-3.4, 14.4, 0, 'F'),
     'U6': (-7.0, 11.65, 0, 'F'),
-    'R11': (-E, RV, 90, 'F'), 'C13': (-7.5, RV, 90, 'F'), 'R9': (-5.95, RV, 90, 'F'),
+    'R11': (-E, 19.4, 90, 'F'), 'C13': (-7.5, RV, 90, 'F'), 'R9': (-5.95, RV, 90, 'F'),   # R11: -x strip at pin 31
     # --- strips beside the module ------------------------------------------------------------------------
     # +x: board ID divider at IO1 (pin 5), BOOT pull-up at pin 4, 3V3 decoupling at pin 3 / GND pins 2, 1
     'C10': (E, 20.1, 270, 'F'), 'R7': (E, 22.05, 90, 'F'), 'R6': (E, 24.0, 90, 'F'),
@@ -140,7 +140,31 @@ def text(board, s, x, y, layer, size=0.8):
     board.Add(t)
 
 
+def drc_exclude_j3_pegs(keep):
+    """J3 locating pegs (NPTH, bottom) sit in the U4 courtyard on purpose: they fall in the free ring
+    between the module edge pads and its centre GND pads (>= 0.9 mm from any pad; peg protrusion
+    ~0.6 mm per the SHOU HAN TF PUSH drawing, scaled, < 1.6 mm board). Record them as DRC exclusions
+    in the project (UUIDs change on every regeneration, so this runs after each save)."""
+    import json
+    pro = os.path.join(HERE, 'filexfer-pcb.kicad_pro')   # keep: project text before any kicad-cli run
+    out = os.path.join(tempfile.mkdtemp(), 'drc.json')
+    subprocess.run(['kicad-cli', 'pcb', 'drc', '--format', 'json', '--severity-all', '-o', out, PCB],
+                   capture_output=True)
+    keys = []
+    for v in json.load(open(out))['violations']:
+        it = v['items']
+        if v['type'] == 'npth_inside_courtyard' and 'J3' in it[0]['description'] and 'U4' in it[1]['description']:
+            keys.append('npth_inside_courtyard|%d|%d|%s|%s' % (round(it[0]['pos']['x'] * 1e6), round(it[0]['pos']['y'] * 1e6),
+                                                               it[0]['uuid'], it[1]['uuid']))
+    d = json.loads(keep)
+    d['board']['design_settings']['drc_exclusions'] = keys
+    with open(pro, 'w') as f:
+        json.dump(d, f, indent=2); f.write('\n')
+    return len(keys)
+
+
 def main():
+    pro_text = open(os.path.join(HERE, 'filexfer-pcb.kicad_pro')).read()   # kicad-cli rewrites it; restored below
     comps, nets = netlist()
     missing = set(comps) - set(P)
     if missing:
@@ -190,7 +214,7 @@ def main():
     text(board, 'FileXfer rev B', 0, 31.2, pcbnew.B_SilkS)
     pcbnew.SaveBoard(PCB, board)
     print(f'wrote {PCB}: {len(comps)} footprints, {len(netinfo)} nets, board {W} x {L:.1f} mm '
-          f'(+5.1 antenna overhang)')
+          f'(+5.1 antenna overhang); DRC exclusions (J3 pegs): {drc_exclude_j3_pegs(pro_text)}')
 
 
 if __name__ == '__main__':

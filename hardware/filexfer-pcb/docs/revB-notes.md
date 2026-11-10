@@ -42,11 +42,16 @@ History: with SW1 on top, the +x front half was at 93 % courtyard fill, so no fi
 - **Renders:** `docs/img/revB-placement-2d.png` (top and bottom courtyards), `revB-placement-3d-top.png`, `-bottom.png`, `-iso.png`.
 
 **DRC (placement):**
-- 0 courtyard, clearance or edge errors.
-- 2 × `npth_inside_courtyard`: the J3 peg holes sit in the U4 courtyard (the free ring under the module). This is intended.
-  - Before marking them as DRC exclusions, confirm from the J3 drawing that the pegs don't reach the top surface (1.6 mm board) [U].
-- Silk clipped at the antenna edge (warning, same as rev A).
-- 145 unconnected items (not routed yet).
+- 0 courtyard, clearance or edge errors. Silk clipped at the antenna edge (warning, same as rev A). Unconnected items: not routed.
+- **J3 pegs** (2 × NPTH Ø1.0, x −5.13, y 19.0 / 27.0) sit in the U4 courtyard on purpose:
+  - Peg Ø0.80 ±0.10 at 8.00 pitch [V SHOU HAN TF PUSH drawing Rev A/0, front view]. Peg length is not dimensioned; scaled from that view it is ≈ 0.6 mm [E], below the 1.6 mm board, so the pegs don't reach the top surface.
+  - Hole edge to the nearest module pad: ≥ 0.90 mm (pads 29 / 32 / 41); no peg is under a module edge pad or a centre GND pad.
+  - Recorded as 2 DRC exclusions in `filexfer-pcb.kicad_pro` by `gen_pcb.py` (`drc_exclude_j3_pegs`, rewritten on each regeneration because the UUIDs change).
+
+**Placement corrections made for routing** (no other part moved; pinhole and LED positions unchanged):
+- R1, R2 rotated 270°: connector-side pad toward U1, module-side pad toward pins 23/24.
+- F1 rotated 270°: +5V pad inboard (y 4.0); VBUS_IN pad at the board edge, reached by a via between the F1 pads.
+- R11 (SD_PWR_EN pull-up) moved from the front row into the −x strip next to module pin 31 (x −8.55, y 19.4).
 
 **Courtyard fill** (rectangle intersections, computed from the board):
 
@@ -72,25 +77,63 @@ History: with SW1 on top, the +x front half was at 93 % courtyard fill, so no fi
 - **Bottom strip +x (x 7–9.1):** BOOT (SW1 → pin 4), +3V3 (→ pin 3), SD_VDD (→ J3.4). GND pour everywhere else.
 - **Risk:** the +x half (66 %) and the 3-track band. If routing can't meet the criteria, the next step is a 4-layer proposal (needs approval), not a part change.
 
-**Case clearance** (board frame: x across, +x = D1/TVS side; y from the board front edge = inner front face; heights use feasibility option 1, board bottom z 4.71):
+**Case notes for the regeneration** (board frame: x across, +x = D1/TVS side; y from the board front edge = inner front face; heights use feasibility option 1, board bottom z 4.71):
 
-| Item | Value | Clearance |
-|---|---|---|
-| Width | board 18.30 | case inner 18.54 → 0.12/side; **widen to ≥ 18.85** (unchanged) |
-| Length | 31.9 + 5.1 antenna = 37.0 | 0.5 to the inner back wall |
-| Module top (2.4) | z 8.71 | 1.60 to the lid (opt. 2: 0.90) |
-| Bottom parts: J3 and SW1 (TS-1088-xR020, 2.0) | lowest face z 2.71 | 2.71 above the floor (opt. 2: 3.41) |
-| Tallest other top part (U3/U6 SOT-23-6 ~1.45 [E]) | z ≈ 7.8 | under the module top |
-| Plug shell 12.0 W (12.9 over latches) | front slot | widen 12.4 → ≥ 13.1 (unchanged) |
-| Bottom under the plug | SW1 starts y 6.6; TPs y ≥ 7.65 | clear of the plug body if it straddles the board (seating [U] until the XKB STEP) |
+| Item | Requirement |
+|---|---|
+| Inner width | **≥ 18.85** (board 18.30) |
+| Inner length | board 31.9 + antenna 5.1 = 37.0, **plus 1–2 mm antenna-to-back-wall clearance → inner length 38.0–39.0** (case grows slightly; current 37.5) |
+| Front plug slot | **≥ 13.1** wide (XKB shell 12.0, 12.9 over the latches) |
+| microSD | **No slot: the card is sealed inside.** Solid −x wall, plus an internal retaining rib on the −x side at **y 16–28** (J3 body x −9.15…5.35, y 14.7…29.4, flush with the −x board edge) |
+| BOOT | **Floor pinhole + guide boss at (+4.8, 8.4)**. SW1 (bottom, TS-1088-xR020, 2.0 tall) actuator faces the floor, 2.71 mm above it |
+| LED | **Light guide at (−3.3, 8.25), 3.2 mm deep** (D2 top side to the lid) |
+| Module top | 1.60 to the lid (opt. 2: 0.90) |
+| Bottom parts (J3, SW1) | lowest face z 2.71 above the floor (opt. 2: 3.41) |
+| Bottom under the plug | SW1 starts y 6.6, TPs y ≥ 7.65; plug seating still [U] until the XKB STEP |
+| Test pads | bottom, 1.0 mm, grid 2.35 pitch (x ±2.5 / ±4.85 / ±7.2, y 8.7 / 12.0) + TP10 (8.05, 30.3); pogo access with the case open |
 
-**Case openings:**
-- **BOOT pinhole: case floor at x +4.8, y 8.4.** The SW1 actuator faces the floor, 2.71 mm above it. Add a floor boss or guide tube so a 1 mm pin reaches it [E].
-- **LED window: lid at x −3.3, y 8.25** (D2, top side, ~3.2 mm below the lid). Use a light pipe or thin window.
-- **microSD slot: −x wall.** J3 body x −9.15…5.35, y 14.7…29.4, flush with the −x board edge. Slot ≈ y 16–28, at the J3 level under the board [E from footprint; confirm the card position from the drawing].
-- **Test pads:** bottom, 1.0 mm pads.
-  - Front grid 3 × 3 at 2.35 pitch (x ±2.5 / ±4.85 / ±7.2, y 8.7 / 12.0), plus TP10 at (8.05, 30.3).
-  - Pogo access is with the case open (jig before casing). No pad sits under SW1 or J3.
+## 3b. 2-layer routing attempt: criteria not met → 4-layer proposed
+
+Router: `tools/route.py` rewritten for rev B (scripted USB pair, plug power and pair crossings; A* for the rest; GND fanout, stitching, pours). Evidence: `docs/img/revB-route-attempt-2layer.png` (first pass, not kept on the board).
+
+**What worked (scripted, DRC-clean geometry):**
+- USB pair J1 → U1 → swap (D+ one bottom hop, 2.6 mm) → R1/R2 → pins 23/24; U1 GND via between the diverging pair.
+- **Pair crossings, shortest possible:**
+  - +5V crosses on **top**, on a 0.25 mm lane at y 4.15 in front of the J1 signal pads (no USB copper there; between the notch reserve and the pads). It taps U1 VBUS straight down between the pair.
+  - +3V3 crosses on the bottom through the two J1 pad gaps (vias x ±2.25): **4.5 mm** under the J1 D−/D+ pads.
+  - SD_VDD crosses on the bottom under the J1 pads: ≈ 10 mm.
+  - VBUS_IN: J1.1 → via → bottom 6 mm → via between the F1 pads.
+
+**What blocks 2-layer (geometry, not router quality):**
+1. **SD escape.** 7 SD vias must fit in the 1.45 mm band between the RN1/C14 pads (y 15.35) and the module pad row (y 16.8).
+   - On the bottom, the J3 shield pad (x 4.12–5.62, y ≤ 16.0) sits right under the D0/CLK vias. J3 must move 0.5 mm forward, which leaves the pegs 0.4 mm from the module pads.
+   - The 7 lines then run as a ribbon on the bottom under J3, 4–12 mm each. That ribbon crosses under the module's signal pad row (no reference there) and cuts the bottom pour under the module.
+2. **+x strip (pins 3 / 4 / 5 = +3V3 / BOOT / BOARD_ID).** Module pad edge to strip 0402 pad is 0.83 mm, so no 0.6 via fits beside a part, and the six strip parts leave no gap.
+   - BOOT and +3V3 must come from the front on the bottom strip (≈ 15 mm each, beside the J3 contact row) and need a via gap. One strip part has to leave (e.g. C7 10 µF to the −x strip; C8 100 nF stays at pin 3, C6 22 µF at U3).
+3. **Result of the first pass:**
+   - 14 of the 23 auto-routed nets incomplete (SD_D0 / D1 / CD, +3V3, SD_VDD, SD_CT, SD_PWR_EN, LED_DATA_3V3, U0TXD / U0TXD_MOD / U0RXD, EN, BOOT, BOARD_ID); the scripted USB and VBUS_IN nets are complete.
+   - 7 top GND pour islands with no via spot (front zone and strip).
+   - Completing it needs the ≥ 9 long bottom tracks above, which fails "bottom mostly GND (tracks short)" and puts the SD lines and the module front edge without a continuous reference.
+
+**Criteria (2-layer):**
+- **DRC clean:** not reached (incomplete).
+- **GND under module pads:** yes (top ring and EPAD vias).
+- **GND under the USB pair:** yes except the swap.
+- **GND under the SD lines:** no (bottom ribbon under the module edge).
+- **No tracks under the antenna:** yes (off board).
+- **Bottom mostly GND, tracks short:** no.
+- **0402 where possible:** yes.
+
+**Proposal (needs approval): 4 layers, GND on L2.**
+- **Layers:**
+  - L1: parts, short signals, GND pour.
+  - L2: solid GND, no tracks.
+  - L3: the pair crossings (+5V, +3V3, SD_VDD), the SD ribbon, BOOT / +3V3 / BOARD_ID to the strip, EN / TXD / RXD to the test pads.
+  - L4 (bottom): J3, SW1, test pads, GND pour, stubs only.
+- **What it fixes:** every routed signal has L2 directly under it (USB, SD, module edge), and the bottom stays almost pure GND.
+- **Still needed on 4 layers** (via room is layer-independent): J3 0.5 mm forward, one strip part out of the +x strip, SW1 rotated 180° (BOOT pad toward the strip; same centre and pinhole).
+- **USB pair:** must be re-dimensioned for L1 over L2 (JLC 4-layer prepreg ≈ 0.2 mm) [E].
+- **Cost:** 4-layer costs more; quote at order time.
 
 ## 4. Bring-up checklist (rev B)
 
