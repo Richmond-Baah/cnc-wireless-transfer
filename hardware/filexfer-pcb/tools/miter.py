@@ -8,23 +8,84 @@ otherwise as long as fits. Bends where two tracks just end at a pad or via are r
 changed. Zones are refilled.
 
 Run from hardware/filexfer-pcb:  python3 tools/miter.py   (then DRC with --schematic-parity)
+
+Rev B (pcb-short) port:
+- Clearance margin from the rev B project rule (0.127 mm, JLC standard).
+- A pre-pass collapses track stubs lying wholly inside a same-net via's copper (they make hidden acute
+  or 90° corners), so the next track starts at the via centre.
+- One targeted fix (REV_B_FIXES): the BOOT via at (7.55, 18.75) teed into the strip at 53°. It now
+  drops straight into R5.2 at x 7.55.
+- Corners whose copper disc is wholly covered by a pad or via are reported, not changed.
 """
 import math, os, sys
 import pcbnew
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 PCB = os.path.join(HERE, 'filexfer-pcb.kicad_pcb')
-CLR = 0.16          # 0.15 net-class clearance + margin
-EDGE = 0.26         # 0.25 copper-to-edge + margin
+CLR = 0.14          # rev B: 0.127 net-class clearance (JLC standard) + margin
+EDGE = 0.245        # rev B 0.25 copper-to-edge rule; mitre ends sit on legs that already pass it (DRC re-checks)
 mm, MM = pcbnew.FromMM, pcbnew.ToMM
+_REMOVED = []      # keep removed items referenced until the board is saved (KiCad 10 SWIG: a freed removed item breaks GetTracks())
 
 
 def loc(p):
     return round(MM(p.x) - 100, 2), round(MM(p.y) - 100, 2)
 
 
+def pt(x, y):
+    return pcbnew.VECTOR2I(mm(x + 100), mm(y + 100))
+
+
+def via_stubs(b):
+    """Collapse a track wholly inside a same-net via's copper: remove it, move the joined track end to the via.
+    Plan first, then edit (b.GetTracks() breaks if items are removed while iterating)."""
+    tr = [t for t in b.GetTracks() if t.GetClass() == 'PCB_TRACK']
+    vias = [t for t in b.GetTracks() if t.GetClass() == 'PCB_VIA']
+    plan, used = [], set()
+    for v in vias:
+        r = v.GetWidth(pcbnew.F_Cu) / 2; vp = pcbnew.VECTOR2I(v.GetPosition().x, v.GetPosition().y)
+        near = lambda q, p: (q - p).EuclideanNorm() < 1000                  # 1 µm
+        for t in tr:
+            if t.GetNetCode() != v.GetNetCode() or t.m_Uuid.AsString() in used:
+                continue
+            ends = (t.GetStart(), t.GetEnd())
+            if not any(near(q, vp) for q in ends):
+                continue
+            o = ends[1] if near(ends[0], vp) else ends[0]
+            if (o - vp).EuclideanNorm() + t.GetWidth() / 2 > r:
+                continue
+            nxt = [s for s in tr if s.m_Uuid.AsString() != t.m_Uuid.AsString() and s.GetNetCode() == t.GetNetCode()
+                   and s.GetLayer() == t.GetLayer() and any(near(q, o) for q in (s.GetStart(), s.GetEnd()))]
+            if len(nxt) != 1:
+                continue
+            used.add(t.m_Uuid.AsString())
+            plan.append((t, nxt[0], o, vp, (t.GetNetname().lstrip('/'), b.GetLayerName(t.GetLayer()), loc(o))))
+    for t, s, o, vp, info in plan:
+        if (s.GetStart() - o).EuclideanNorm() < 1000:
+            s.SetStart(vp)
+        else:
+            s.SetEnd(vp)
+    for t, *_ in plan:
+        _REMOVED.append(t); b.Remove(t)
+    return [p[-1] for p in plan]
+
+
+def rev_b_fixes(b):
+    """BOOT: via (7.55, 18.75) teed into the strip at (7.75, 18.6) at 53° from the R5.2 branch -> straight into R5.2."""
+    out = []
+    for t in [t for t in b.GetTracks() if t.GetClass() == 'PCB_TRACK' and t.GetNetname() == '/BOOT' and t.GetLayer() == pcbnew.F_Cu]:
+        if {loc(t.GetStart()), loc(t.GetEnd())} == {(7.75, 18.6), (7.55, 18.75)}:
+            w, net = t.GetWidth(), t.GetNetCode()
+            _REMOVED.append(t); b.Remove(t)
+            n = pcbnew.PCB_TRACK(b); n.SetStart(pt(7.55, 18.75)); n.SetEnd(pt(7.55, 18.0)); n.SetWidth(w)
+            n.SetLayer(pcbnew.F_Cu); n.SetNetCode(net); b.Add(n)
+            out.append(('BOOT', 'F.Cu', (7.75, 18.6), 'via branch re-joined straight into R5.2 at x 7.55 (acute tee removed)'))
+    return out
+
+
 def main():
     b = pcbnew.LoadBoard(PCB)
+    pre = via_stubs(b) + [(n, l, w) for n, l, w, _ in rev_b_fixes(b)]
     edges = [d for d in b.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts]
     keepouts = [z for z in b.Zones() if z.GetIsRuleArea() and z.GetDoNotAllowTracks()]
     pads = [p for fp in b.GetFootprints() for p in fp.Pads()]
@@ -34,7 +95,7 @@ def main():
 
     vias = [t for t in b.GetTracks() if t.GetClass() == 'PCB_VIA']
 
-    def clear(seg, layer, net):
+    def clear(seg, layer, net, legs=()):
         sh = seg.GetEffectiveShape(layer)
         for t in tracks():
             if t.GetNetCode() != net and t.GetLayer() == layer and t.GetEffectiveShape(layer).Collide(sh, mm(CLR)):
@@ -49,6 +110,10 @@ def main():
                 return 'hole ' + p.GetParentFootprint().GetReference()
         for e in edges:
             if e.GetEffectiveShape().Collide(sh, mm(EDGE)):
+                # a mitre lies inside its corner, so it is never nearer a straight edge than its legs:
+                # accept it when a leg is already that close (that leg passes DRC as committed)
+                if any(e.GetEffectiveShape().Collide(l.GetEffectiveShape(layer), mm(EDGE)) for l in legs):
+                    continue
                 return 'board edge'
         for z in keepouts:
             if z.IsOnLayer(layer) and z.Outline().Collide(pcbnew.SEG(seg.GetStart(), seg.GetEnd()), seg.GetWidth() // 2):
@@ -81,7 +146,7 @@ def main():
         net, layer, x, y, P, legs = todo
         key = (net, layer, x, y)
         name, where = legs[0][0].GetNetname().lstrip('/'), loc(P)
-        if any(v.GetPosition() == P and v.IsOnLayer(layer) for v in vias):
+        if any(v.GetPosition() == P and v.IsOnLayer(layer) for v in vias):   # track ends at via centre: corner inside via copper
             skipped.append((key, name, where, 'two tracks end at a via (no copper corner to cut)')); continue
         if any(p.IsOnLayer(layer) and p.HitTest(P) for p in pads):
             skipped.append((key, name, where, 'two tracks end inside a pad (corner covered by pad copper)')); continue
@@ -104,7 +169,7 @@ def main():
             B = pcbnew.VECTOR2I(int(x + legs[1][3][0] * mm(c)), int(y + legs[1][3][1] * mm(c)))
             seg = pcbnew.PCB_TRACK(b)
             seg.SetStart(A); seg.SetEnd(B); seg.SetWidth(mm(w)); seg.SetLayer(layer); seg.SetNetCode(net)
-            why = clear(seg, layer, net)
+            why = clear(seg, layer, net, [l[0] for l in legs])
             if why is None:
                 done = (c, A, B, seg); break
             last = why
@@ -137,7 +202,7 @@ def main():
                         tt.SetStart(N)
                     else:
                         tt.SetEnd(N)
-                b.Remove(t); b.Add(seg)
+                _REMOVED.append(t); b.Remove(t); b.Add(seg)
                 fixed.append((name, where, round(w, 2), round(MM(seg.GetLength()), 2), f'Z-jog {jog:.2f} mm -> one 45° diagonal'))
                 continue
         if not done:
@@ -157,7 +222,10 @@ def main():
 
     pcbnew.ZONE_FILLER(b).Fill(b.Zones())
     pcbnew.SaveBoard(PCB, b)
+    print(f'pre-pass (via stubs / targeted): {len(pre)}', pre)
     print(f'mitred: {len(fixed)}  (mitre < 2x width: {len(short)})')
+    for f in fixed:
+        print('   ok', *f[:4])
     for f in fixed:
         if len(f) > 4:
             print('  ', *f)

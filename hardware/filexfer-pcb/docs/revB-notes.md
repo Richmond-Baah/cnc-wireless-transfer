@@ -297,6 +297,42 @@ Separate check of the pass-16 board (committed in 3b55b02) and the regenerated f
   - The SD rail ramps slowly (CT 1 nF, tR ≈ 1.6 ms → ≈ 21 mA into C14), and C14 10 µF carries card transients, so this is low risk.
   - Optional for rev C: add a 1 µF at U6.1.
 
+## 3f. Mitre pass (in place, 2026-11-10)
+
+The committed board was edited in place by `tools/miter.py` (port of the `pcb` branch tool). `route.py` was not re-run. No part, via or pad moved; BOM/CPL unchanged.
+
+**Changes (26):**
+- **21 × 90° bends mitred to 45°.** 19 have a mitre ≥ 2× track width.
+  - +5V ×4 at (±4.5, 4.15 / 5.3)
+  - SD ribbon ×8 (CD, CLK, CMD, D0, D1, D2, D3 ×3)
+  - 3V3_LDO edge tie ×2 at (8.8, 10.9 / 12.8)
+  - LED_DATA_3V3 ×2
+  - EN, BOOT, SD_CT, GND (C14.2)
+- **2 short mitres:** +5V at (±4.5, 5.3), 0.35 mm on 0.25 mm track (2× would be 0.5). They are short because the legs are short in the band under the J1 pads.
+- **4 sub-via stubs removed** (0.06–0.07 mm tracks wholly inside a via's copper, which hid acute or 90° corners):
+  - SD_CD (2.6, 19.15): this was the 45° acute bend.
+  - +3V3 (−8.16, 14.34) and (8.0, 13.55).
+  - SD_VDD (8.6, 13.55).
+  - The next track now starts at the via centre.
+- **1 acute tee removed:** BOOT at (7.75, 18.6), 53°. The via branch now drops straight into R5.2 at x 7.55.
+
+**Left as is (no exposed corner):**
+- 5 tracks meet at about 90° (91.7–98°) at a point inside a pad: SD_VDD at RN1.8, LED_DATA_3V3 at R9.1, SD_CT at U6.4, +3V3 at C13.2, EN at R4.2.
+  - The corner's copper disc lies wholly inside the pad copper (checked at 32 points on each).
+- SD_VDD meets at 106° on the via at (−5.2, 9.75): the corner is inside the via copper.
+- 3 T-joins onto a segment interior: +5V (0, 4.15), +3V3 (8.35, 30.42), SD_PWR_EN (−8.67, 13.55). These are tees, not bends.
+- 10 obtuse bends that aren't exactly 45° (interior 122–178°, shallower than 90°).
+
+**USB D+/D−:** no 90° or acute bends; both nets' copper is identical before and after (22 items), so the pair stays as routed (coupled, 0.5 mm skew).
+
+**After the pass:**
+- Zones refilled.
+- DRC 0 errors, 0 unconnected, parity 0 (warnings: the 4 antenna-edge silk lines).
+- All 63 GND pads are still in the main GND cluster (from U4.65; ratsnest 0).
+- `fab/rev-B` regenerated with `gen_fab.py`. The gerbers are complete (9 layers + drills, 18.35 × 34.95 mm, 115 vias), and `gerber-check.png` was re-drawn from them.
+- `docs/img/revB-routed-*.png` re-rendered.
+- `filexfer-revB.step` was not regenerated: it has no copper, and parts did not move.
+
 ## 4. Bring-up checklist (rev B)
 
 - [ ] **Measure in-case temperature** (module shield + LDO) during a sustained transfer, lid closed, at room temperature and in a warm cabinet. The module is rated −40…85 °C ambient [V ESP32-S3-MINI-1 datasheet, Table 1-1]. The enclosure estimate is 67–80 °C inside the case at 40 °C ambient (`revB-feasibility.md`).
