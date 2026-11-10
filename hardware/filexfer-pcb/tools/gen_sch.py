@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the FileXfer rev A schematic (label-per-pin style) from KiCad stock symbols.
+"""Generate the FileXfer rev A schematic from KiCad stock symbols (layout: tools/sch_layout.py).
 
 Every symbol pin must be mapped to a net name or 'NC'; the script fails otherwise.
-Run: python3 -I tools/gen_sch.py  (from hardware/filexfer-pcb)
+Run: python3 -I tools/gen_sch.py --force  (from hardware/filexfer-pcb; the .kicad_sch is the master now)
 Then: kicad-cli sch erc filexfer-pcb.kicad_sch
 """
 import os, sys, uuid
@@ -132,9 +132,6 @@ PARTS = [
 ] + [
     R('R23', '10k', '+3V3', 'SD_CD', fit='RX', Note='card detect pull-up'),
 ]
-PWR_FLAGS = ['GND', 'VBUS_IN', '+5V']
-
-
 def flatten(libname, symname):
     sym = getsym(libname, symname)
     ext = find(sym, 'extends')
@@ -165,98 +162,15 @@ def prop(name, value, x, y, hide=False):
     return ['property', q(name), q(value), ['at', f'{x:.2f}', f'{y:.2f}', '0'], e]
 
 
+from sch_layout import build   # drawing (blocks, wires, labels); PARTS above stays the electrical spec
+
+
 def main():
-    items, libsyms, used = [], {}, set()
-    # place: module alone at left, then pack the rest in rows
-    x0, y0, rowh = 60.0, 40.0, 0.0
-    cursor_x, cursor_y = 150.0, y0
-    for ref, libname, symname, val, fp, netmap, fields in PARTS:
-        key = f'{libname}:{symname}'
-        if key not in libsyms:
-            libsyms[key] = flatten(libname, symname)
-            if symname == 'TPS22917DBV':   # QOD tied to VOUT (DS option 1): pin 5 open_collector -> passive for ERC
-                def relax(node):
-                    if isinstance(node, list):
-                        if node and node[0] == 'pin' and any(isinstance(c, list) and c[:1] == ['number'] and
-                                                              str(c[1]).strip('"') == '5' for c in node):
-                            node[1] = 'passive'
-                        for c in node:
-                            relax(c)
-                relax(libsyms[key])
-        ps = [p for p in pins(libsyms[key]) if p['unit'] in (0, 1)]
-        if netmap == 'MODULE':
-            netmap = {p['num']: mod_map[p['name']] for p in ps}
-        missing = [p['num'] for p in ps if p['num'] not in netmap]
-        extra = set(netmap) - {p['num'] for p in ps}
-        if missing or extra:
-            sys.exit(f'{ref}: unmapped pins {missing} / unknown pins {sorted(extra)}')
-        xs = [p['x'] for p in ps] or [0]; ys = [p['y'] for p in ps] or [0]
-        w, h = max(xs) - min(xs), max(ys) - min(ys)
-        if ref == 'U4':
-            X, Y = 91.44, 101.6
-        else:
-            if cursor_x + w + 60 > 560:
-                cursor_x, cursor_y, rowh = 150.0, cursor_y + rowh + 25, 0.0
-            X = round((cursor_x - min(xs) + 25) / 2.54) * 2.54
-            Y = round((cursor_y + max(ys) + 8) / 2.54) * 2.54
-            cursor_x += w + 70; rowh = max(rowh, h + 16)
-        sym = ['symbol', ['lib_id', q(key)], ['at', f'{X:.2f}', f'{Y:.2f}', '0'], ['unit', '1'],
-               ['exclude_from_sim', 'no'], ['in_bom', 'yes' if fields.get('Fit') != 'DNP' and not ref.startswith('TP') else 'no'],
-               ['on_board', 'yes'], ['dnp', 'yes' if fields.get('Fit') == 'DNP' else 'no'],
-               ['uuid', q(uid('sym', ref))],
-               prop('Reference', ref, X, Y - max(ys) - 3), prop('Value', val, X, Y - min(ys) + 3),
-               prop('Footprint', fp, X, Y, True), prop('Datasheet', '', X, Y, True)]
-        for k, v in fields.items():
-            sym.append(prop(k, v, X, Y, True))
-        for p in ps:
-            sym.append(['pin', q(p['num']), ['uuid', q(uid('pin', ref, p['num']))]])
-        sym.append(['instances', ['project', q(PROJECT), ['path', q('/' + ROOT_UUID),
-                    ['reference', q(ref)], ['unit', '1']]]])
-        items.append(sym)
-        for p in ps:
-            px, py = X + p['x'], Y - p['y']
-            net = netmap[p['num']]
-            if net == 'NC':
-                items.append(['no_connect', ['at', f'{px:.2f}', f'{py:.2f}'], ['uuid', q(uid('nc', ref, p['num']))]])
-                continue
-            used.add(net)
-            la = {0: 180, 180: 0, 90: 270, 270: 90}[int(p['a']) % 360]
-            just = ['justify', 'right', 'bottom'] if la in (180, 270) else ['justify', 'left', 'bottom']
-            items.append(['label', q(net), ['at', f'{px:.2f}', f'{py:.2f}', str(la)],
-                          ['effects', ['font', ['size', '1.27', '1.27']], just],
-                          ['uuid', q(uid('lbl', ref, p['num']))]])
-    # power flags
-    key = 'power:PWR_FLAG'
-    libsyms[key] = flatten('power', 'PWR_FLAG')
-    for i, net in enumerate(PWR_FLAGS):
-        X, Y = 40.64 + i * 25.4, 20.32
-        ref = '#FLG0%d' % (i + 1)
-        items.append(['symbol', ['lib_id', q(key)], ['at', f'{X:.2f}', f'{Y:.2f}', '0'], ['unit', '1'],
-                      ['exclude_from_sim', 'no'], ['in_bom', 'yes'], ['on_board', 'yes'], ['dnp', 'no'],
-                      ['uuid', q(uid('sym', ref))],
-                      prop('Reference', ref, X, Y, True), prop('Value', 'PWR_FLAG', X, Y - 3),
-                      prop('Footprint', '', X, Y, True), prop('Datasheet', '', X, Y, True),
-                      ['pin', q('1'), ['uuid', q(uid('pin', ref))]],
-                      ['instances', ['project', q(PROJECT), ['path', q('/' + ROOT_UUID),
-                       ['reference', q(ref)], ['unit', '1']]]]])
-        items.append(['label', q(net), ['at', f'{X:.2f}', f'{Y:.2f}', '270'],
-                      ['effects', ['font', ['size', '1.27', '1.27']], ['justify', 'right', 'bottom']],
-                      ['uuid', q(uid('flaglbl', net))]])
-    notes = ('FileXfer rev A — generated by tools/gen_sch.py; edit the script, not this file. '
-             'Fit field: ALL = TX+RX, RX = receiver only (DNP on TX), DNP = footprint reserve. '
-             'Board ID R7: RX 100k, TX 22k. LED buffer U5 = SN74LV1T125 (74LVC1G125 symbol, same pinout).')
-    items.append(['text', q(notes), ['exclude_from_sim', 'no'], ['at', '20', '410', '0'],
-                  ['effects', ['font', ['size', '2', '2']], ['justify', 'left', 'bottom']],
-                  ['uuid', q(uid('note'))]])
-    doc = ['kicad_sch', ['version', '20250114'], ['generator', q('eeschema')], ['generator_version', q('9.0')],
-           ['uuid', q(ROOT_UUID)], ['paper', q('A2')],
-           ['title_block', ['title', q('FileXfer TX/RX')], ['rev', q('A')], ['company', q('FileXfer')],
-            ['comment', '1', q('ESP32-S3-MINI-1-N8, USB-A plug, microSD (RX)')]],
-           ['lib_symbols'] + list(libsyms.values())] + items + [
-           ['sheet_instances', ['path', q('/'), ['page', q('1')]]], ['embedded_fonts', 'no']]
-    with open(OUT, 'w') as f:
-        f.write(dump(doc) + '\n')
-    print('wrote', os.path.abspath(OUT), len(PARTS), 'parts, nets:', len(used))
+    # Since the 2026-11-10 cleanup filexfer-pcb.kicad_sch is the master (edit it in KiCad).
+    # Regenerating would drop any hand edits, so it needs an explicit --force.
+    if os.path.exists(OUT) and '--force' not in sys.argv:
+        sys.exit('filexfer-pcb.kicad_sch is the master; refusing to overwrite (use --force, then diff the netlist)')
+    build(PARTS, mod_map, flatten, OUT, PROJECT, ROOT_UUID, uid, prop)
 
 
 if __name__ == '__main__':

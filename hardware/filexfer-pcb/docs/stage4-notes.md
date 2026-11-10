@@ -180,6 +180,12 @@ Analyzers run: schematic, PCB (`--full`, with schematic), cross-analysis. KiCad 
   - After the mitres, DRC is unchanged (0 / 0 / 0, same warnings), the zones were refilled, and the fab files were regenerated.
 - CPL rotations are KiCad's. **Check JLC's placement preview** (SOT-23/SOT-223/module/LED orientation) when ordering.
 
+## 7b. Schematic cleanup (2026-11-10)
+- `filexfer-pcb.kicad_sch` was redrawn for readability only, with no electrical change: A3 single sheet, titled functional blocks, notes per block, filled title block.
+- Conventions and references: `docs/schematic-style.md`. Review exports: `docs/img/schematic-revA.pdf` / `.png`.
+- Netlist before vs after is identical (components, fields, net names and nodes). ERC 0; PCB parity 0; DRC unchanged.
+- The `.kicad_sch` is now the master: `gen_sch.py` needs `--force` to overwrite it. Power symbols come from the project library `filexfer_power` (sheet-local, keeping the `/GND`-style net names).
+
 ## 8. Before ordering (checklist)
 1. **Plug STEP / notch:** get the XKB U217-041N-4BV81 (C319178) STEP. Confirm seating, shell height above/below the board, and whether a board notch is needed (the reserve x ±6.5, y 0–3.9 is kept free; the leg slots limit a notch to about 9.8 mm).
 2. **Sample test-fit:** hand-fit a plug and an SD socket on a bare board or a 1:1 print. Check the case fit, the SD retaining rib, the buttons and the LED window.

@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "filexfer_power")(type "KiCad")(uri "${KIPRJMOD}/filexfer_power.kicad_sym")(options "")(descr "Sheet-local power symbols (keep /GND, /+3V3, /+5V net names)"))
+)
